@@ -14,10 +14,6 @@ pub struct StreamInfo {
 impl StreamInfo {
     #[inline]
     pub fn new(
-        min_block_size: u16,
-        max_block_size: u16,
-        min_frame_size: u32,
-        max_frame_size: u32,
         sample_rate: u32,
         channels: u8,
         bits_per_sample: u8,
@@ -27,15 +23,13 @@ impl StreamInfo {
         assert!(channels >= 1 && channels <= 8);
         assert!(bits_per_sample >= 4 && bits_per_sample <= 32);
         assert!(sample_rate <= 0x0f_ffff);
-        assert!(min_frame_size <= 0x00ff_ffff);
-        assert!(max_frame_size <= 0x00ff_ffff);
         assert!(total_samples <= 0x0f_ff_ff_ff_ff);
 
         Self {
-            min_block_size,
-            max_block_size,
-            min_frame_size,
-            max_frame_size,
+            min_block_size: 0,
+            max_block_size: 0,
+            min_frame_size: 0,
+            max_frame_size: 0,
             sample_rate,
             channels,
             bits_per_sample,
@@ -45,14 +39,32 @@ impl StreamInfo {
     }
 
     pub fn update_block_size(&mut self, block_size: u16) {
-        self.min_block_size = self.min_block_size.min(block_size);
-        self.max_block_size = self.max_block_size.max(block_size);
+        if self.min_block_size == 0 {
+            self.min_block_size = block_size;
+        } else {
+            self.min_block_size = self.min_block_size.min(block_size);
+        }
+
+        if self.max_block_size == 0 {
+            self.max_block_size = block_size;
+        } else {
+            self.max_block_size = self.max_block_size.max(block_size);
+        }
     }
 
     #[inline]
     pub fn update_frame_size(&mut self, frame_size: u32) {
-        self.min_frame_size = self.min_frame_size.min(frame_size);
-        self.max_frame_size = self.max_frame_size.max(frame_size);
+        if self.min_frame_size == 0 {
+            self.min_frame_size = frame_size;
+        } else {
+            self.min_frame_size = self.min_frame_size.min(frame_size);
+        }
+
+        if self.max_frame_size == 0 {
+            self.max_frame_size = frame_size;
+        } else {
+            self.max_frame_size = self.max_frame_size.max(frame_size);
+        }
     }
 
     #[inline]
@@ -120,8 +132,8 @@ mod tests {
     fn new_packs_all_fields() {
         let cases = [
             Case {
-                min_block_size: 16,
-                max_block_size: 16,
+                min_block_size: 0,
+                max_block_size: 0,
                 min_frame_size: 0,
                 max_frame_size: 0,
                 sample_rate: 44_100,
@@ -131,10 +143,10 @@ mod tests {
                 md5: [0xAB; 16],
             },
             Case {
-                min_block_size: 0x1234,
-                max_block_size: 0xabcd,
-                min_frame_size: 0x00_12_34,
-                max_frame_size: 0x00_fe_dc,
+                min_block_size: 0,
+                max_block_size: 0,
+                min_frame_size: 0,
+                max_frame_size: 0,
                 sample_rate: 0x0f_ff_ff,
                 channels: 8,
                 bits_per_sample: 32,
@@ -145,10 +157,6 @@ mod tests {
 
         for case in cases {
             let streaminfo = StreamInfo::new(
-                case.min_block_size,
-                case.max_block_size,
-                case.min_frame_size,
-                case.max_frame_size,
                 case.sample_rate,
                 case.channels,
                 case.bits_per_sample,
@@ -161,7 +169,7 @@ mod tests {
 
     #[test]
     fn update_block_and_frame_sizes_expand_ranges() {
-        let mut streaminfo = StreamInfo::new(64, 128, 1000, 2000, 44_100, 2, 16, 1, [0x11; 16]);
+        let mut streaminfo = StreamInfo::new(44_100, 2, 16, 1, [0x11; 16]);
 
         streaminfo.update_block_size(43);
         streaminfo.update_block_size(32);
@@ -177,5 +185,15 @@ mod tests {
         assert_eq!(streaminfo.max_block_size, 256);
         assert_eq!(streaminfo.min_frame_size, 900);
         assert_eq!(streaminfo.max_frame_size, 2500);
+    }
+
+    #[test]
+    fn new_initializes_ranges_to_zero() {
+        let streaminfo = StreamInfo::new(44_100, 2, 16, 1, [0xAA; 16]);
+
+        assert_eq!(streaminfo.min_block_size, 0);
+        assert_eq!(streaminfo.max_block_size, 0);
+        assert_eq!(streaminfo.min_frame_size, 0);
+        assert_eq!(streaminfo.max_frame_size, 0);
     }
 }
