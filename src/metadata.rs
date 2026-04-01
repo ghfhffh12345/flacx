@@ -74,11 +74,6 @@ impl StreamInfo {
     }
 
     #[inline]
-    pub fn as_bytes(&self) -> [u8; 34] {
-        self.to_bytes()
-    }
-
-    #[inline]
     const fn u24_be_bytes(value: u32) -> [u8; 3] {
         let [_, b1, b2, b3] = value.to_be_bytes();
         [b1, b2, b3]
