@@ -1,8 +1,17 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct StreanInfo([u8; 34]);
+pub struct StreamInfo {
+    pub min_block_size: u16,
+    pub max_block_size: u16,
+    pub min_frame_size: u32,
+    pub max_frame_size: u32,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub bits_per_sample: u8,
+    pub total_samples: u64,
+    pub md5: [u8; 16],
+}
 
-impl StreanInfo {
+impl StreamInfo {
     #[inline]
     pub fn new(
         min_block_size: u16,
@@ -22,43 +31,51 @@ impl StreanInfo {
         assert!(max_frame_size <= 0x00ff_ffff);
         assert!(total_samples <= 0x0f_ff_ff_ff_ff);
 
+        Self {
+            min_block_size,
+            max_block_size,
+            min_frame_size,
+            max_frame_size,
+            sample_rate,
+            channels,
+            bits_per_sample,
+            total_samples,
+            md5,
+        }
+    }
+
+    pub fn update_block_size(&mut self, block_size: u16) {
+        self.min_block_size = self.min_block_size.min(block_size);
+        self.max_block_size = self.max_block_size.max(block_size);
+    }
+
+    #[inline]
+    pub fn update_frame_size(&mut self, frame_size: u32) {
+        self.min_frame_size = self.min_frame_size.min(frame_size);
+        self.max_frame_size = self.max_frame_size.max(frame_size);
+    }
+
+    #[inline]
+    pub fn to_bytes(&self) -> [u8; 34] {
         let mut bytes = [0u8; 34];
-        bytes[..2].copy_from_slice(&min_block_size.to_be_bytes());
-        bytes[2..4].copy_from_slice(&max_block_size.to_be_bytes());
-        bytes[4..7].copy_from_slice(&Self::u24_be_bytes(min_frame_size));
-        bytes[7..10].copy_from_slice(&Self::u24_be_bytes(max_frame_size));
-        bytes[10..18].copy_from_slice(&(((sample_rate as u64) << 44)
-            | (((channels - 1) as u64) << 41)
-            | (((bits_per_sample - 1) as u64) << 36)
-            | total_samples)
-            .to_be_bytes());
-        bytes[18..].copy_from_slice(&md5);
-        Self(bytes)
+        bytes[..2].copy_from_slice(&self.min_block_size.to_be_bytes());
+        bytes[2..4].copy_from_slice(&self.max_block_size.to_be_bytes());
+        bytes[4..7].copy_from_slice(&Self::u24_be_bytes(self.min_frame_size));
+        bytes[7..10].copy_from_slice(&Self::u24_be_bytes(self.max_frame_size));
+        bytes[10..18].copy_from_slice(
+            &(((self.sample_rate as u64) << 44)
+                | (((self.channels - 1) as u64) << 41)
+                | (((self.bits_per_sample - 1) as u64) << 36)
+                | self.total_samples)
+                .to_be_bytes(),
+        );
+        bytes[18..].copy_from_slice(&self.md5);
+        bytes
     }
 
     #[inline]
-    pub fn set_min_block_size(&mut self, min_block_size: u16) {
-        self.0[..2].copy_from_slice(&min_block_size.to_be_bytes());
-    }
-
-    #[inline]
-    pub fn set_max_block_size(&mut self, max_block_size: u16) {
-        self.0[2..4].copy_from_slice(&max_block_size.to_be_bytes());
-    }
-
-    #[inline]
-    pub fn set_min_frame_size(&mut self, min_frame_size: u32) {
-        self.0[4..7].copy_from_slice(&Self::u24_be_bytes(min_frame_size));
-    }
-
-    #[inline]
-    pub fn set_max_frame_size(&mut self, max_frame_size: u32) {
-        self.0[7..10].copy_from_slice(&Self::u24_be_bytes(max_frame_size));
-    }
-
-    #[inline]
-    pub fn as_bytes(&self) -> &[u8; 34] {
-        &self.0
+    pub fn as_bytes(&self) -> [u8; 34] {
+        self.to_bytes()
     }
 
     #[inline]
@@ -70,7 +87,7 @@ impl StreanInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::StreanInfo;
+    use super::StreamInfo;
 
     #[derive(Clone, Copy)]
     struct Case {
@@ -85,8 +102,8 @@ mod tests {
         md5: [u8; 16],
     }
 
-    fn assert_streaminfo_layout(streaminfo: &StreanInfo, expected: Case) {
-        let bytes = streaminfo.as_bytes();
+    fn assert_streaminfo_layout(streaminfo: &StreamInfo, expected: Case) {
+        let bytes = streaminfo.to_bytes();
         let min_frame_size = expected.min_frame_size.to_be_bytes();
         let max_frame_size = expected.max_frame_size.to_be_bytes();
         let mut packed_bytes = [0u8; 8];
@@ -132,7 +149,7 @@ mod tests {
         ];
 
         for case in cases {
-            let streaminfo = StreanInfo::new(
+            let streaminfo = StreamInfo::new(
                 case.min_block_size,
                 case.max_block_size,
                 case.min_frame_size,
@@ -148,21 +165,22 @@ mod tests {
     }
 
     #[test]
-    fn setters_touch_only_their_ranges() {
-        let original = StreanInfo::new(16, 16, 0x00_12_34, 0x00_ab_cd, 44_100, 2, 16, 1, [0xAA; 16]);
-        let mut streaminfo = original;
-        streaminfo.set_min_block_size(4096);
-        streaminfo.set_max_block_size(8192);
-        streaminfo.set_min_frame_size(0x00_fe_dc);
-        streaminfo.set_max_frame_size(0x00_65_43);
+    fn update_block_and_frame_sizes_expand_ranges() {
+        let mut streaminfo = StreamInfo::new(64, 128, 1000, 2000, 44_100, 2, 16, 1, [0x11; 16]);
 
-        let min_frame_size = 0x00_fe_dc_u32.to_be_bytes();
-        let max_frame_size = 0x00_65_43_u32.to_be_bytes();
+        streaminfo.update_block_size(43);
+        streaminfo.update_block_size(32);
+        streaminfo.update_block_size(256);
+        streaminfo.update_block_size(124);
 
-        assert_eq!(&streaminfo.as_bytes()[0..2], &4096u16.to_be_bytes());
-        assert_eq!(&streaminfo.as_bytes()[2..4], &8192u16.to_be_bytes());
-        assert_eq!(&streaminfo.as_bytes()[4..7], &min_frame_size[1..]);
-        assert_eq!(&streaminfo.as_bytes()[7..10], &max_frame_size[1..]);
-        assert_eq!(&streaminfo.as_bytes()[10..34], &original.as_bytes()[10..34]);
+        streaminfo.update_frame_size(1000);
+        streaminfo.update_frame_size(900);
+        streaminfo.update_frame_size(2500);
+        streaminfo.update_frame_size(2000);
+
+        assert_eq!(streaminfo.min_block_size, 32);
+        assert_eq!(streaminfo.max_block_size, 256);
+        assert_eq!(streaminfo.min_frame_size, 900);
+        assert_eq!(streaminfo.max_frame_size, 2500);
     }
 }
