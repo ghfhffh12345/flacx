@@ -8,10 +8,12 @@ pub(crate) struct Crc8Writer<W: Write> {
 impl<W: Write> Crc8Writer<W> {
     #[inline]
     pub(crate) fn new(writer: W) -> Self {
-        Self {
-            writer,
-            crc: 0,
-        }
+        Self { writer, crc: 0 }
+    }
+
+    #[inline]
+    pub(crate) fn with_crc(crc: u8, writer: W) -> Self {
+        Self { writer, crc }
     }
 
     #[inline]
@@ -50,19 +52,135 @@ impl<W: Write> Write for Crc8Writer<W> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Write};
-
     use super::Crc8Writer;
+    use std::io::{self, Write};
+
+    struct ShortWriter {
+        max_write: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl ShortWriter {
+        fn new(max_write: usize) -> Self {
+            Self {
+                max_write,
+                bytes: Vec::new(),
+            }
+        }
+    }
+
+    impl Write for ShortWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let written = buf.len().min(self.max_write);
+            self.bytes.extend_from_slice(&buf[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn assert_crc_output(input: &[u8], expected_crc: u8, chunk_sizes: &[usize]) {
+        let mut sink = Vec::new();
+
+        {
+            let mut writer = Crc8Writer::new(&mut sink);
+            let mut offset = 0;
+
+            for &chunk_size in chunk_sizes {
+                let end = offset + chunk_size;
+                writer.write_all(&input[offset..end]).unwrap();
+                offset = end;
+            }
+
+            assert_eq!(offset, input.len());
+            writer.flush().unwrap();
+        }
+
+        let mut expected = input.to_vec();
+        expected.push(expected_crc);
+        assert_eq!(sink, expected);
+    }
+
+    fn crc8_reference(mut crc: u8, bytes: &[u8]) -> u8 {
+        for &byte in bytes {
+            crc ^= byte;
+            for _ in 0..8 {
+                crc = if crc & 0x80 != 0 {
+                    (crc << 1) ^ 0x07
+                } else {
+                    crc << 1
+                };
+            }
+        }
+
+        crc
+    }
 
     #[test]
-    fn write_accumulates_crc_and_flush_appends_current_state_each_time() {
-        let mut writer = Crc8Writer::new(Cursor::new(Vec::new()));
+    fn crc_matches_rfc9639_frame_header_examples() {
+        assert_crc_output(b"", 0x00, &[]);
 
-        writer.write_all(b"1234").unwrap();
-        writer.write_all(b"56789").unwrap();
-        writer.flush().unwrap();
-        writer.flush().unwrap();
+        let example_2_first_frame = b"\xff\xf8\x69\x98\x00\x0f";
+        assert_crc_output(example_2_first_frame, 0x99, &[6]);
+        assert_crc_output(example_2_first_frame, 0x99, &[2, 4]);
+        assert_crc_output(example_2_first_frame, 0x99, &[1, 1, 1, 1, 1, 1]);
 
-        assert_eq!(writer.writer.into_inner(), b"123456789\xF4\xF4".to_vec());
+        let example_2_second_frame = b"\xff\xf8\x69\x18\x01\x02";
+        assert_crc_output(example_2_second_frame, 0xa4, &[6]);
+        assert_crc_output(example_2_second_frame, 0xa4, &[3, 3]);
+        assert_crc_output(example_2_second_frame, 0xa4, &[1, 1, 1, 1, 1, 1]);
+
+        let example_3_frame = b"\xff\xf8\x68\x02\x00\x17";
+        assert_crc_output(example_3_frame, 0xe9, &[6]);
+        assert_crc_output(example_3_frame, 0xe9, &[2, 2, 2]);
+        assert_crc_output(example_3_frame, 0xe9, &[1, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn write_handles_short_writes_and_accumulates_only_written_bytes() {
+        let input = b"\xff\xf8\x68\x02\x00\x17";
+        let mut sink = ShortWriter::new(2);
+
+        {
+            let mut writer = Crc8Writer::new(&mut sink);
+
+            let written = writer.write(input).unwrap();
+            assert_eq!(written, 2);
+
+            writer.write_all(&input[written..]).unwrap();
+            writer.flush().unwrap();
+        }
+
+        let mut expected = input.to_vec();
+        expected.push(0xe9);
+        assert_eq!(sink.bytes, expected);
+    }
+
+    #[test]
+    fn with_crc_resumes_from_previous_state() {
+        let prefix = b"\xff\xf8\x68";
+        let suffix = b"\x02\x00\x17";
+
+        let mut prefix_sink = Vec::new();
+        let seed = {
+            let mut writer = Crc8Writer::new(&mut prefix_sink);
+            writer.write_all(prefix).unwrap();
+            writer.crc
+        };
+
+        let mut sink = Vec::new();
+        {
+            let mut writer = Crc8Writer::with_crc(seed, &mut sink);
+            writer.write_all(suffix).unwrap();
+            writer.flush().unwrap();
+        }
+
+        assert_eq!(prefix_sink, prefix.to_vec());
+
+        let mut expected = suffix.to_vec();
+        expected.push(crc8_reference(seed, suffix));
+        assert_eq!(sink, expected);
     }
 }
