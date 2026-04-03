@@ -1,8 +1,15 @@
-[package]
-name = "flacx"
+[workspace]
+members = ["crates/flacx", "crates/flacx-cli"]
+default-members = ["crates/flacx", "crates/flacx-cli"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/ghfhffh12345/flacx"
 
-[dependencies]
+[workspace.dependencies]
 bitstream-io = "4.9.0"
 clap = { version = "4.5", features = ["derive"] }

@@ -3,8 +3,8 @@
 //! # Library-first, CLI-backed design
 //!
 //! `flacx` keeps a single tuned encode pipeline and exposes it through both a
-//! Rust API and the `flacx` CLI. The CLI is a thin adapter over the same
-//! library entrypoints used by Rust callers.
+//! Rust API and the sibling `flacx-cli` crate. The CLI remains a thin adapter
+//! over the same library entrypoints used by Rust callers.
 //!
 //! # Quick start
 //!

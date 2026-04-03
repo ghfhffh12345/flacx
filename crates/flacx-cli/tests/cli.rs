@@ -2,6 +2,7 @@ use std::{fs, process::Command};
 
 use flacx::{EncodeOptions, FlacEncoder, level::Level};
 
+#[path = "../../flacx/tests/support/mod.rs"]
 mod support;
 
 use support::{pcm_wav_bytes, sample_fixture, unique_temp_path};

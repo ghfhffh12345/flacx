@@ -141,7 +141,10 @@ fn benchmark_fixture(wav_path: &Path) -> Result<FixtureMeasurement, Box<dyn std:
 }
 
 fn default_corpus() -> Vec<PathBuf> {
-    DEFAULT_CORPUS.iter().map(PathBuf::from).collect()
+    DEFAULT_CORPUS
+        .iter()
+        .map(|relative| repo_root().join(relative))
+        .collect()
 }
 
 struct TimedEncode {
@@ -317,6 +320,14 @@ fn median(values: &mut [f64]) -> f64 {
 
 fn temp_path(stem: &str, extension: &str) -> PathBuf {
     env::temp_dir().join(format!("flacx-{stem}.{extension}"))
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf()
 }
 
 #[cfg(test)]
