@@ -1,28 +1,40 @@
-use std::io::{self, Seek, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 
-use bitstream_io::{BigEndian, BitWriter};
+use crate::metadata::StreamInfo;
 
-use crate::{level::LevelProfile, metadata::StreamInfo};
+const STREAMINFO_LENGTH: [u8; 3] = [0x00, 0x00, 34];
 
-pub struct FlacWriter<W: Seek + Write> {
-    writer: BitWriter<W, BigEndian>,
+pub(crate) struct FlacWriter<W: Seek + Write> {
+    writer: W,
     stream_info: StreamInfo,
-    level_profile: LevelProfile,
+    streaminfo_offset: u64,
 }
 
 impl<W: Seek + Write> FlacWriter<W> {
-    pub fn new(
-        mut writer: W,
-        stream_info: StreamInfo,
-        level_profile: LevelProfile,
-    ) -> io::Result<Self> {
+    pub(crate) fn new(mut writer: W, stream_info: StreamInfo) -> io::Result<Self> {
         writer.write_all(b"fLaC")?;
+        writer.write_all(&[0x80, STREAMINFO_LENGTH[0], STREAMINFO_LENGTH[1], STREAMINFO_LENGTH[2]])?;
+        let streaminfo_offset = writer.stream_position()?;
         writer.write_all(&stream_info.to_bytes())?;
 
         Ok(Self {
-            writer: BitWriter::new(writer),
+            writer,
             stream_info,
-            level_profile,
+            streaminfo_offset,
         })
+    }
+
+    pub(crate) fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.stream_info.update_frame_size(frame.len() as u32);
+        self.writer.write_all(frame)
+    }
+
+    pub(crate) fn finalize(mut self) -> io::Result<(W, StreamInfo)> {
+        let end_position = self.writer.stream_position()?;
+        self.writer.seek(SeekFrom::Start(self.streaminfo_offset))?;
+        self.writer.write_all(&self.stream_info.to_bytes())?;
+        self.writer.seek(SeekFrom::Start(end_position))?;
+        self.writer.flush()?;
+        Ok((self.writer, self.stream_info))
     }
 }
