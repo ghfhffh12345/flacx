@@ -1,10 +1,23 @@
+#[cfg(test)]
 use std::io::{self, Write};
 
+#[inline]
+pub(crate) fn crc8(bytes: &[u8]) -> u8 {
+    crc8_seeded(0, bytes)
+}
+
+#[inline]
+pub(crate) fn crc16(bytes: &[u8]) -> u16 {
+    crc16_seeded(0, bytes)
+}
+
+#[cfg(test)]
 pub(crate) struct Crc8Writer<W: Write> {
     writer: W,
     crc: u8,
 }
 
+#[cfg(test)]
 impl<W: Write> Crc8Writer<W> {
     #[inline]
     pub(crate) fn new(writer: W) -> Self {
@@ -18,23 +31,11 @@ impl<W: Write> Crc8Writer<W> {
 
     #[inline]
     fn update_crc(&mut self, bytes: &[u8]) {
-        let mut crc = self.crc;
-
-        for &byte in bytes {
-            crc ^= byte;
-            for _ in 0..8 {
-                crc = if crc & 0x80 != 0 {
-                    (crc << 1) ^ 0x07
-                } else {
-                    crc << 1
-                };
-            }
-        }
-
-        self.crc = crc;
+        self.crc = crc8_seeded(self.crc, bytes);
     }
 }
 
+#[cfg(test)]
 impl<W: Write> Write for Crc8Writer<W> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -50,11 +51,13 @@ impl<W: Write> Write for Crc8Writer<W> {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct Crc16Writer<W: Write> {
     writer: W,
     crc: u16,
 }
 
+#[cfg(test)]
 impl<W: Write> Crc16Writer<W> {
     #[inline]
     pub(crate) fn new(writer: W) -> Self {
@@ -68,23 +71,11 @@ impl<W: Write> Crc16Writer<W> {
 
     #[inline]
     fn update_crc(&mut self, bytes: &[u8]) {
-        let mut crc = self.crc;
-
-        for &byte in bytes {
-            crc ^= (byte as u16) << 8;
-            for _ in 0..8 {
-                crc = if crc & 0x8000 != 0 {
-                    (crc << 1) ^ 0x8005
-                } else {
-                    crc << 1
-                };
-            }
-        }
-
-        self.crc = crc;
+        self.crc = crc16_seeded(self.crc, bytes);
     }
 }
 
+#[cfg(test)]
 impl<W: Write> Write for Crc16Writer<W> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -99,6 +90,36 @@ impl<W: Write> Write for Crc16Writer<W> {
         self.writer.write_all(&crc)?;
         self.writer.flush()
     }
+}
+
+#[inline]
+fn crc8_seeded(mut crc: u8, bytes: &[u8]) -> u8 {
+    for &byte in bytes {
+        crc ^= byte;
+        for _ in 0..8 {
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ 0x07
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+#[inline]
+fn crc16_seeded(mut crc: u16, bytes: &[u8]) -> u16 {
+    for &byte in bytes {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x8005
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
 }
 
 #[cfg(test)]
