@@ -17,6 +17,7 @@ pub(crate) struct EncodedFrame {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ChannelAssignment {
     IndependentMono,
     IndependentStereo,
@@ -132,41 +133,39 @@ fn analyze_frame(
             });
         }
         2 => {
-            let left = extract_channel(interleaved_samples, channel_count, 0);
-            let right = extract_channel(interleaved_samples, channel_count, 1);
-            candidates.push(analyze_stereo_candidate(
-                ChannelAssignment::IndependentStereo,
-                [left.clone(), right.clone()],
-                [bits_per_sample, bits_per_sample],
-                sample_rate,
-                profile,
-            )?);
-
+            let (left, right) = extract_stereo_channels(interleaved_samples);
             if profile.use_mid_side_stereo {
-                let side: Vec<i32> = left.iter().zip(&right).map(|(&l, &r)| l - r).collect();
-                let mid: Vec<i32> = left
-                    .iter()
-                    .zip(&right)
-                    .map(|(&l, &r)| ((i64::from(l) + i64::from(r)) >> 1) as i32)
-                    .collect();
+                let mut side = Vec::with_capacity(left.len());
+                let mut mid = Vec::with_capacity(left.len());
+                for (&left_sample, &right_sample) in left.iter().zip(&right) {
+                    side.push(left_sample - right_sample);
+                    mid.push(((i64::from(left_sample) + i64::from(right_sample)) >> 1) as i32);
+                }
+                let independent_cost = sample_magnitude_cost(&left) + sample_magnitude_cost(&right);
+                let mid_side_cost = sample_magnitude_cost(&mid) + sample_magnitude_cost(&side);
+
+                if mid_side_cost < independent_cost {
+                    candidates.push(analyze_stereo_candidate(
+                        ChannelAssignment::MidSide,
+                        [&mid, &side],
+                        [bits_per_sample, bits_per_sample + 1],
+                        sample_rate,
+                        profile,
+                    )?);
+                } else {
+                    candidates.push(analyze_stereo_candidate(
+                        ChannelAssignment::IndependentStereo,
+                        [&left, &right],
+                        [bits_per_sample, bits_per_sample],
+                        sample_rate,
+                        profile,
+                    )?);
+                }
+            } else {
                 candidates.push(analyze_stereo_candidate(
-                    ChannelAssignment::LeftSide,
-                    [left.clone(), side.clone()],
-                    [bits_per_sample, bits_per_sample + 1],
-                    sample_rate,
-                    profile,
-                )?);
-                candidates.push(analyze_stereo_candidate(
-                    ChannelAssignment::SideRight,
-                    [side.clone(), right.clone()],
-                    [bits_per_sample + 1, bits_per_sample],
-                    sample_rate,
-                    profile,
-                )?);
-                candidates.push(analyze_stereo_candidate(
-                    ChannelAssignment::MidSide,
-                    [mid, side],
-                    [bits_per_sample, bits_per_sample + 1],
+                    ChannelAssignment::IndependentStereo,
+                    [&left, &right],
+                    [bits_per_sample, bits_per_sample],
                     sample_rate,
                     profile,
                 )?);
@@ -194,7 +193,7 @@ fn analyze_frame(
 
 fn analyze_stereo_candidate(
     assignment: ChannelAssignment,
-    transformed_channels: [Vec<i32>; 2],
+    transformed_channels: [&[i32]; 2],
     bits_per_subframe: [u8; 2],
     sample_rate: u32,
     profile: LevelProfile,
@@ -202,7 +201,7 @@ fn analyze_stereo_candidate(
     let mut bits = 0usize;
     let mut subframes = Vec::with_capacity(2);
     for (samples, bits_per_sample) in transformed_channels.into_iter().zip(bits_per_subframe) {
-        let subframe = choose_subframe(&samples, bits_per_sample, sample_rate, profile)?;
+        let subframe = choose_subframe(samples, bits_per_sample, sample_rate, profile)?;
         bits += subframe.bit_len(bits_per_sample);
         subframes.push(subframe);
     }
@@ -410,6 +409,24 @@ fn extract_channel(interleaved: &[i32], channels: usize, channel: usize) -> Vec<
         .collect()
 }
 
+fn extract_stereo_channels(interleaved: &[i32]) -> (Vec<i32>, Vec<i32>) {
+    let frame_count = interleaved.len() / 2;
+    let mut left = Vec::with_capacity(frame_count);
+    let mut right = Vec::with_capacity(frame_count);
+    for frame in interleaved.chunks_exact(2) {
+        left.push(frame[0]);
+        right.push(frame[1]);
+    }
+    (left, right)
+}
+
+fn sample_magnitude_cost(samples: &[i32]) -> u64 {
+    samples
+        .iter()
+        .map(|&sample| i64::from(sample).unsigned_abs())
+        .sum()
+}
+
 impl AnalyzedSubframe {
     fn bit_len(&self, bits_per_sample: u8) -> usize {
         match self {
@@ -509,19 +526,29 @@ fn choose_subframe(
     profile: LevelProfile,
 ) -> Result<AnalyzedSubframe> {
     let mut best = None;
+    let mut best_bits = usize::MAX;
+    let mut best_is_verbatim = false;
     if samples.iter().all(|&sample| sample == samples[0]) {
         let constant = AnalyzedSubframe::Constant(samples[0]);
-        best = pick_better(best, constant.bit_len(bits_per_sample), constant);
+        best_bits = constant.bit_len(bits_per_sample);
+        best = Some(constant);
     }
 
-    let verbatim = AnalyzedSubframe::Verbatim(samples.to_vec());
-    best = pick_better(best, verbatim.bit_len(bits_per_sample), verbatim);
+    let verbatim_bits = SUBFRAME_HEADER_BITS + samples.len() * usize::from(bits_per_sample);
+    if verbatim_bits < best_bits {
+        best_bits = verbatim_bits;
+        best = None;
+        best_is_verbatim = true;
+    }
 
     let max_partition_order = profile
         .max_residual_partition_order
         .min(MAX_RICE_PARTITION_ORDER);
     for order in 0..=profile.max_fixed_order.min(4) {
         if samples.len() < usize::from(order) {
+            continue;
+        }
+        if fixed_subframe_lower_bound(order, bits_per_sample, samples.len()) >= best_bits {
             continue;
         }
         if let Some(residuals) = fixed_residuals(samples, order)
@@ -532,21 +559,38 @@ fn choose_subframe(
                 warmup: samples[..usize::from(order)].to_vec(),
                 residual,
             };
-            best = pick_better(best, candidate.bit_len(bits_per_sample), candidate);
+            let candidate_bits = candidate.bit_len(bits_per_sample);
+            if candidate_bits < best_bits {
+                best_bits = candidate_bits;
+                best = Some(candidate);
+                best_is_verbatim = false;
+            }
         }
     }
 
     let max_lpc_order =
         max_lpc_order_for_stream(profile, sample_rate).min((samples.len().saturating_sub(1)) as u8);
     if max_lpc_order > 0
-        && let Some(candidate) =
-            choose_lpc_subframe(samples, bits_per_sample, max_lpc_order, max_partition_order)
+        && let Some(candidate) = choose_lpc_subframe(
+            samples,
+            bits_per_sample,
+            max_lpc_order,
+            max_partition_order,
+            best_bits,
+        )
     {
-        best = pick_better(best, candidate.bit_len(bits_per_sample), candidate);
+        let candidate_bits = candidate.bit_len(bits_per_sample);
+        if candidate_bits < best_bits {
+            best = Some(candidate);
+            best_is_verbatim = false;
+        }
     }
 
-    best.map(|(_, subframe)| subframe)
-        .ok_or_else(|| Error::Encode("unable to select a subframe".into()))
+    if best_is_verbatim {
+        Ok(AnalyzedSubframe::Verbatim(samples.to_vec()))
+    } else {
+        best.ok_or_else(|| Error::Encode("unable to select a subframe".into()))
+    }
 }
 
 fn max_lpc_order_for_stream(profile: LevelProfile, sample_rate: u32) -> u8 {
@@ -562,12 +606,22 @@ fn choose_lpc_subframe(
     bits_per_sample: u8,
     max_lpc_order: u8,
     max_partition_order: u8,
+    current_best_bits: usize,
 ) -> Option<AnalyzedSubframe> {
     let lpc_coefficients = estimate_lpc_coefficients(samples, max_lpc_order)?;
     let mut best = None;
-    for (order_index, coefficients) in lpc_coefficients.iter().enumerate() {
-        let order = (order_index + 1) as u8;
-        for precision in 7..=15u8 {
+    let mut best_bits = current_best_bits;
+    for order in lpc_order_candidates(max_lpc_order) {
+        let coefficients = &lpc_coefficients[usize::from(order - 1)];
+        if lpc_subframe_lower_bound(order, 7, bits_per_sample, samples.len()) >= best_bits {
+            continue;
+        }
+        for precision in lpc_precision_candidates().iter().copied() {
+            if lpc_subframe_lower_bound(order, precision, bits_per_sample, samples.len())
+                >= best_bits
+            {
+                continue;
+            }
             let quantized = quantize_lpc_coefficients(coefficients, precision)?;
             let residuals = lpc_residuals(samples, &quantized.coefficients, quantized.shift)?;
             let residual = choose_residual_encoding(&residuals, order, max_partition_order)?;
@@ -579,22 +633,61 @@ fn choose_lpc_subframe(
                 coefficients: quantized.coefficients.clone(),
                 residual,
             };
-            best = pick_better(best, candidate.bit_len(bits_per_sample), candidate);
+            let candidate_bits = candidate.bit_len(bits_per_sample);
+            if candidate_bits < best_bits {
+                best_bits = candidate_bits;
+                best = Some((candidate_bits, candidate));
+            }
         }
     }
     best.map(|(_, subframe)| subframe)
 }
 
-fn pick_better(
-    current: Option<(usize, AnalyzedSubframe)>,
-    bits: usize,
-    candidate: AnalyzedSubframe,
-) -> Option<(usize, AnalyzedSubframe)> {
-    match current {
-        Some((best_bits, _)) if best_bits <= bits => current,
-        _ => Some((bits, candidate)),
+fn lpc_order_candidates(max_lpc_order: u8) -> Vec<u8> {
+    if max_lpc_order <= 4 {
+        return (1..=max_lpc_order).collect();
     }
+
+    let mut candidates = Vec::with_capacity(6);
+    for order in [8, 12, max_lpc_order] {
+        if order <= max_lpc_order && !candidates.contains(&order) {
+            candidates.push(order);
+        }
+    }
+    candidates
 }
+
+fn lpc_precision_candidates() -> &'static [u8] {
+    &[15]
+}
+
+const SUBFRAME_HEADER_BITS: usize = 1 + 6 + 1;
+const MIN_RESIDUAL_ENCODING_BITS: usize = 2 + 4 + 4;
+
+fn fixed_subframe_lower_bound(order: u8, bits_per_sample: u8, sample_count: usize) -> usize {
+    let residual_count = sample_count.saturating_sub(usize::from(order));
+    SUBFRAME_HEADER_BITS
+        + usize::from(order) * usize::from(bits_per_sample)
+        + MIN_RESIDUAL_ENCODING_BITS
+        + residual_count
+}
+
+fn lpc_subframe_lower_bound(
+    order: u8,
+    precision: u8,
+    bits_per_sample: u8,
+    sample_count: usize,
+) -> usize {
+    let residual_count = sample_count.saturating_sub(usize::from(order));
+    SUBFRAME_HEADER_BITS
+        + usize::from(order) * usize::from(bits_per_sample)
+        + 4
+        + 5
+        + usize::from(order) * usize::from(precision)
+        + MIN_RESIDUAL_ENCODING_BITS
+        + residual_count
+}
+
 fn fixed_residuals(samples: &[i32], order: u8) -> Option<Vec<i32>> {
     let order_usize = usize::from(order);
     let mut residuals = Vec::with_capacity(samples.len().saturating_sub(order_usize));
@@ -630,34 +723,23 @@ fn choose_residual_encoding(
 ) -> Option<ResidualEncoding> {
     let block_size = residuals.len() + usize::from(predictor_order);
     let mut best: Option<(usize, ResidualEncoding)> = None;
-    let capped_partition_order = max_partition_order.min(MAX_RICE_PARTITION_ORDER);
-
-    for partition_order in 0..=capped_partition_order {
+    for partition_order in
+        partition_order_candidates(block_size, predictor_order, max_partition_order)
+    {
         let partition_count = 1usize << partition_order;
-        if block_size % partition_count != 0 {
-            continue;
-        }
         let partition_len = block_size >> partition_order;
-        if partition_len <= usize::from(predictor_order) {
-            continue;
-        }
         let first_partition_len = partition_len - usize::from(predictor_order);
-        if first_partition_len == 0 {
-            continue;
-        }
 
-        let mut counts = Vec::with_capacity(partition_count);
-        counts.push(first_partition_len);
-        counts.extend(std::iter::repeat_n(partition_len, partition_count - 1));
-        if counts.iter().sum::<usize>() != residuals.len() {
-            continue;
-        }
-
-        for method in [RiceMethod::FourBit, RiceMethod::FiveBit] {
+        for method in candidate_rice_methods(residuals) {
             let mut offset = 0usize;
             let mut partitions = Vec::with_capacity(partition_count);
             let mut valid = true;
-            for count in &counts {
+            for partition_index in 0..partition_count {
+                let count = if partition_index == 0 {
+                    first_partition_len
+                } else {
+                    partition_len
+                };
                 let end = offset + count;
                 if let Some(partition) = choose_partition_encoding(&residuals[offset..end], method)
                 {
@@ -686,22 +768,63 @@ fn choose_residual_encoding(
     best.map(|(_, encoding)| encoding)
 }
 
+fn partition_order_candidates(
+    block_size: usize,
+    predictor_order: u8,
+    max_partition_order: u8,
+) -> Vec<u8> {
+    let predictor_order = usize::from(predictor_order);
+    let capped_partition_order = max_partition_order.min(MAX_RICE_PARTITION_ORDER);
+    let highest_valid = (0..=capped_partition_order).rev().find(|&partition_order| {
+        let partition_count = 1usize << partition_order;
+        if block_size % partition_count != 0 {
+            return false;
+        }
+        let partition_len = block_size >> partition_order;
+        partition_len > predictor_order
+    });
+
+    let mut candidates = Vec::with_capacity(3);
+    if let Some(highest_valid) = highest_valid {
+        for partition_order in [highest_valid, highest_valid.saturating_sub(1), 0] {
+            if !candidates.contains(&partition_order) {
+                candidates.push(partition_order);
+            }
+        }
+    }
+    candidates
+}
+
+fn candidate_rice_methods(residuals: &[i32]) -> Vec<RiceMethod> {
+    let estimated = estimate_rice_parameter_from_residuals(residuals);
+    if estimated <= RiceMethod::FourBit.max_parameter() {
+        vec![RiceMethod::FourBit]
+    } else {
+        vec![RiceMethod::FourBit, RiceMethod::FiveBit]
+    }
+}
+
 fn choose_partition_encoding(residuals: &[i32], method: RiceMethod) -> Option<ResidualPartition> {
-    let mut best: Option<(usize, ResidualPartition)> = None;
-    if let Some(bits) = residual_escape_width(residuals) {
-        let partition = ResidualPartition::Escape {
-            bits,
-            residuals: residuals.to_vec(),
-        };
-        best = Some((partition.bit_len(method), partition));
+    enum BestPartition {
+        Rice(u8),
+        Escape(u8),
     }
 
-    for parameter in 0..=method.max_parameter() {
+    let folded_residuals: Vec<usize> = residuals
+        .iter()
+        .map(|&residual| fold_residual(residual))
+        .collect();
+    let mut best: Option<(usize, BestPartition)> = None;
+    if let Some(bits) = residual_escape_width(residuals) {
+        let bit_len = method.parameter_bits() + 5 + residuals.len() * usize::from(bits);
+        best = Some((bit_len, BestPartition::Escape(bits)));
+    }
+
+    for parameter in candidate_rice_parameters(&folded_residuals, method) {
         let mut bit_len = method.parameter_bits();
         let parameter_shift = usize::from(parameter);
         let mut valid = true;
-        for &residual in residuals {
-            let folded = fold_residual(residual);
+        for &folded in &folded_residuals {
             let quotient = folded >> parameter_shift;
             if quotient > u32::MAX as usize {
                 valid = false;
@@ -710,38 +833,89 @@ fn choose_partition_encoding(residuals: &[i32], method: RiceMethod) -> Option<Re
             bit_len += quotient + 1 + parameter_shift;
         }
         if valid {
-            let partition = ResidualPartition::Rice {
-                parameter,
-                residuals: residuals.to_vec(),
-            };
             best = match best {
                 Some((best_bits, _)) if best_bits <= bit_len => best,
-                _ => Some((bit_len, partition)),
+                _ => Some((bit_len, BestPartition::Rice(parameter))),
             };
         }
     }
 
-    best.map(|(_, partition)| partition)
+    best.map(|(_, partition)| match partition {
+        BestPartition::Rice(parameter) => ResidualPartition::Rice {
+            parameter,
+            residuals: residuals.to_vec(),
+        },
+        BestPartition::Escape(bits) => ResidualPartition::Escape {
+            bits,
+            residuals: residuals.to_vec(),
+        },
+    })
+}
+
+fn candidate_rice_parameters(folded_residuals: &[usize], method: RiceMethod) -> Vec<u8> {
+    let max_parameter = method.max_parameter();
+    if folded_residuals.is_empty() {
+        return vec![0];
+    }
+
+    let estimated = estimate_rice_parameter(folded_residuals).min(max_parameter);
+
+    let mut parameters = Vec::with_capacity(2);
+    let mut candidates = Vec::with_capacity(4);
+    if estimated <= 2 {
+        candidates.push(0);
+    }
+    candidates.push(estimated);
+    for candidate in candidates {
+        if !parameters.contains(&candidate) {
+            parameters.push(candidate);
+        }
+    }
+    parameters
+}
+
+fn estimate_rice_parameter(folded_residuals: &[usize]) -> u8 {
+    let mean_folded =
+        folded_residuals.iter().copied().sum::<usize>() / folded_residuals.len().max(1);
+    if mean_folded == 0 {
+        0
+    } else {
+        (usize::BITS - mean_folded.leading_zeros() - 1) as u8
+    }
+}
+
+fn estimate_rice_parameter_from_residuals(residuals: &[i32]) -> u8 {
+    let mean_folded =
+        residuals.iter().copied().map(fold_residual).sum::<usize>() / residuals.len().max(1);
+    if mean_folded == 0 {
+        0
+    } else {
+        (usize::BITS - mean_folded.leading_zeros() - 1) as u8
+    }
 }
 
 fn residual_escape_width(residuals: &[i32]) -> Option<u8> {
     if residuals.iter().all(|&value| value == 0) {
         return Some(0);
     }
+    let (min_value, max_value) =
+        residuals
+            .iter()
+            .fold((i64::MAX, i64::MIN), |(min_value, max_value), &value| {
+                let value = i64::from(value);
+                (min_value.min(value), max_value.max(value))
+            });
     (1..=MAX_ESCAPE_BITS).find(|&bits| {
         let minimum = -(1i64 << (bits - 1));
         let maximum = (1i64 << (bits - 1)) - 1;
-        residuals.iter().all(|&value| {
-            let value = i64::from(value);
-            value >= minimum && value <= maximum
-        })
+        min_value >= minimum && max_value <= maximum
     })
 }
 
 fn residual_is_encodable(residual: i64) -> bool {
-    residual >= i64::from(i32::MIN)
-        && residual <= i64::from(i32::MAX)
-        && residual_escape_width(&[residual as i32]).is_some()
+    let minimum = -(1i64 << (MAX_ESCAPE_BITS - 1));
+    let maximum = (1i64 << (MAX_ESCAPE_BITS - 1)) - 1;
+    residual >= minimum && residual <= maximum
 }
 
 fn fold_residual(residual: i32) -> usize {
@@ -771,6 +945,7 @@ fn estimate_lpc_coefficients(samples: &[i32], max_order: u8) -> Option<Vec<Vec<f
 
     let mut prediction_error = autocorrelation[0];
     let mut coefficients = vec![0.0f64; max_order + 1];
+    let mut next_coefficients = vec![0.0f64; max_order + 1];
     let mut orders = Vec::with_capacity(max_order);
     for order in 1..=max_order {
         let mut reflection = autocorrelation[order];
@@ -782,13 +957,12 @@ fn estimate_lpc_coefficients(samples: &[i32], max_order: u8) -> Option<Vec<Vec<f
         }
         reflection /= prediction_error;
 
-        let mut next_coefficients = coefficients.clone();
         next_coefficients[order] = reflection;
         for index in 1..order {
             next_coefficients[index] =
                 coefficients[index] - reflection * coefficients[order - index];
         }
-        coefficients = next_coefficients;
+        coefficients[1..=order].copy_from_slice(&next_coefficients[1..=order]);
         prediction_error *= 1.0 - reflection * reflection;
         if !prediction_error.is_finite() || prediction_error <= f64::EPSILON {
             break;

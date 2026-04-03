@@ -158,10 +158,8 @@ fn decode_with_ffmpeg(flac_bytes: &[u8], bits_per_sample: u16) -> Vec<i32> {
 fn patches_streaminfo_after_encoding() {
     let samples = sample_fixture(2, 5_000);
     let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
-    let flac = Encoder::default()
-        .with_threads(2)
-        .encode_wav_bytes(&wav)
-        .unwrap();
+    let encoder = Encoder::default().with_threads(2);
+    let flac = encoder.encode_wav_bytes(&wav).unwrap();
 
     assert_eq!(&flac[..4], b"fLaC");
     assert_eq!(&flac[4..8], &[0x80, 0x00, 0x00, 0x22]);
@@ -169,9 +167,10 @@ fn patches_streaminfo_after_encoding() {
     let max_block = u16::from_be_bytes([flac[10], flac[11]]);
     let min_frame = u32::from_be_bytes([0, flac[12], flac[13], flac[14]]);
     let max_frame = u32::from_be_bytes([0, flac[15], flac[16], flac[17]]);
+    let expected_block_size = encoder.config().block_size;
 
-    assert_eq!(min_block, 4096);
-    assert_eq!(max_block, 4096);
+    assert_eq!(min_block, expected_block_size);
+    assert_eq!(max_block, expected_block_size);
     assert!(min_frame > 0);
     assert!(max_frame >= min_frame);
 }
