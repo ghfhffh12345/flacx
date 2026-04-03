@@ -77,7 +77,21 @@ The library and CLI still use the same tuned encode engine. The `test-wavs/`
 benchmark contract remains the regression baseline for throughput and encoded
 size.
 
+## Releases
+
+Tagged releases use `v*` tags:
+
+- final tags publish the `flacx` library crate to crates.io and create a
+  GitHub release
+- prerelease tags such as `v1.2.3-rc1` create a GitHub prerelease only
+- GitHub release pages rely on GitHub's built-in tagged source archive, so no
+  binaries or extra source bundles are attached
+
+See [`docs/releasing.md`](docs/releasing.md) for the release workflow details,
+required crates.io secret setup, and manual recovery notes.
+
 ## Documentation
 
 - [`crates/flacx/README.md`](crates/flacx/README.md) — library crate usage
 - [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) — CLI crate usage
+- [`docs/releasing.md`](docs/releasing.md) — tag-driven release automation

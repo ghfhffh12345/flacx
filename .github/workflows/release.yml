@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate tag and flacx version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag_name: ${{ steps.validate.outputs.tag_name }}
+      release_kind: ${{ steps.validate.outputs.release_kind }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate pushed tag and effective flacx version
+        id: validate
+        shell: bash
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import pathlib
+          import re
+          import sys
+          import tomllib
+
+          TAG_REF = os.environ["GITHUB_REF_NAME"]
+
+          SEMVER_IDENT_RE = re.compile(r"^[0-9A-Za-z-]+$")
+          NUMERIC_RE = re.compile(r"^(0|[1-9]\d*)$")
+
+          def fail(message: str) -> None:
+              print(f"::error::{message}", file=sys.stderr)
+              raise SystemExit(1)
+
+          def parse_semver(raw: str) -> tuple[str, str, str]:
+              core_and_prerelease, _, build = raw.partition("+")
+              core, _, prerelease = core_and_prerelease.partition("-")
+
+              core_parts = core.split(".")
+              if len(core_parts) != 3:
+                  fail(f"Tag version '{raw}' is not valid semver: expected major.minor.patch")
+              if not all(NUMERIC_RE.fullmatch(part) for part in core_parts):
+                  fail(
+                      f"Tag version '{raw}' is not valid semver: "
+                      "core identifiers must be numeric without leading zeros"
+                  )
+
+              if prerelease:
+                  for ident in prerelease.split("."):
+                      if not SEMVER_IDENT_RE.fullmatch(ident):
+                          fail(
+                              f"Tag version '{raw}' is not valid semver: "
+                              f"invalid prerelease identifier '{ident}'"
+                          )
+                      if ident.isdigit() and not NUMERIC_RE.fullmatch(ident):
+                          fail(
+                              f"Tag version '{raw}' is not valid semver: "
+                              f"numeric prerelease identifier '{ident}' has a leading zero"
+                          )
+
+              if build:
+                  for ident in build.split("."):
+                      if not SEMVER_IDENT_RE.fullmatch(ident):
+                          fail(
+                              f"Tag version '{raw}' is not valid semver: "
+                              f"invalid build identifier '{ident}'"
+                          )
+
+              return core, prerelease, build
+
+          def load_effective_flacx_version() -> str:
+              root_manifest = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+              workspace_version = (
+                  root_manifest.get("workspace", {})
+                  .get("package", {})
+                  .get("version")
+              )
+              if not isinstance(workspace_version, str) or not workspace_version:
+                  fail("Root Cargo.toml is missing [workspace.package].version")
+
+              flacx_manifest = tomllib.loads(
+                  pathlib.Path("crates/flacx/Cargo.toml").read_text(encoding="utf-8")
+              )
+              package = flacx_manifest.get("package", {})
+              if package.get("name") != "flacx":
+                  fail("crates/flacx/Cargo.toml does not describe the flacx package")
+
+              package_version = package.get("version")
+              if isinstance(package_version, str):
+                  return package_version
+
+              if isinstance(package_version, dict) and package_version.get("workspace") is True:
+                  return workspace_version
+
+              fail("Unable to determine the effective flacx version from manifests")
+
+          if not TAG_REF.startswith("v"):
+              fail(f"Tag '{TAG_REF}' does not start with the required 'v' prefix")
+
+          tag_version = TAG_REF[1:]
+          tag_core, tag_prerelease, _ = parse_semver(tag_version)
+          package_version = load_effective_flacx_version()
+          package_core, _, _ = parse_semver(package_version)
+
+          if tag_core != package_core:
+              fail(
+                  f"Tag version '{tag_version}' does not match "
+                  f"the flacx package core version '{package_core}'"
+              )
+
+          is_prerelease = bool(tag_prerelease)
+          if is_prerelease:
+              release_kind = "prerelease"
+          else:
+              release_kind = "final"
+              if tag_version != package_version:
+                  fail(
+                      f"Final release tag '{tag_version}' must match "
+                      f"the effective flacx package version '{package_version}' exactly"
+                  )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"tag_name={TAG_REF}", file=output)
+              print(f"release_kind={release_kind}", file=output)
+          PY
+
+  prerelease:
+    name: Create GitHub prerelease
+    needs: validate
+    if: needs.validate.outputs.release_kind == 'prerelease'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.validate.outputs.tag_name }}
+        run: |
+          gh release create "$TAG_NAME" \
+            --title "$TAG_NAME" \
+            --prerelease \
+            --notes "Automated prerelease for $TAG_NAME"
+
+  publish_flacx:
+    name: Publish flacx to crates.io
+    needs: validate
+    if: needs.validate.outputs.release_kind == 'final'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Ensure crates.io token is configured
+        shell: bash
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::Missing required CARGO_REGISTRY_TOKEN secret"
+            exit 1
+          fi
+
+      - name: Publish flacx to crates.io
+        run: cargo publish -p flacx --locked
+
+  create_release:
+    name: Create GitHub release
+    needs:
+      - validate
+      - publish_flacx
+    if: needs.validate.outputs.release_kind == 'final'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.validate.outputs.tag_name }}
+        run: |
+          # If this step fails after cargo publish succeeds, recover manually by
+          # creating the release for the existing tag instead of attempting to
+          # re-publish the same crates.io version.
+          gh release create "$TAG_NAME" \
+            --title "$TAG_NAME" \
+            --notes "Automated release for $TAG_NAME"
