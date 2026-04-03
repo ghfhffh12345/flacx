@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::{Cursor, Read, Seek, Write},
     sync::{
         Arc,
@@ -16,6 +17,8 @@ use crate::{
     metadata::StreamInfo,
     wav::{WavData, WavSpec, read_wav},
 };
+
+const FRAME_CHUNK_SIZE: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderConfig {
@@ -143,32 +146,28 @@ impl Encoder {
             return Ok(summary_from_stream_info(stream_info, 0));
         }
 
-        let encoded_frames = self.encode_frames_in_parallel(&wav, block_size, profile)?;
-        for frame in encoded_frames {
-            writer.write_frame(&frame.bytes)?;
-        }
+        self.encode_frames_in_parallel(wav.spec, wav.samples, block_size, profile, &mut writer)?;
 
         let (_, stream_info) = writer.finalize()?;
         Ok(summary_from_stream_info(stream_info, total_frames))
     }
 
-    fn encode_frames_in_parallel(
+    fn encode_frames_in_parallel<W: Write + Seek>(
         &self,
-        wav: &WavData,
+        spec: WavSpec,
+        samples: Vec<i32>,
         block_size: u16,
         profile: LevelProfile,
-    ) -> Result<Vec<EncodedFrame>> {
-        let total_frames = wav.spec.total_samples.div_ceil(u64::from(block_size)) as usize;
+        writer: &mut FlacWriter<W>,
+    ) -> Result<()> {
+        let total_frames = spec.total_samples.div_ceil(u64::from(block_size)) as usize;
         let worker_count = self.config.threads.max(1).min(total_frames.max(1));
         let next_frame = Arc::new(AtomicUsize::new(0));
-        let samples = Arc::new(wav.samples.clone());
-        let channels = usize::from(wav.spec.channels);
-        let sample_rate = wav.spec.sample_rate;
-        let bits_per_sample = wav.spec.bits_per_sample;
-        let total_samples = wav.spec.total_samples;
-
-        let mut results: Vec<Option<Result<EncodedFrame>>> =
-            (0..total_frames).map(|_| None).collect();
+        let samples: Arc<[i32]> = Arc::from(samples);
+        let channels = usize::from(spec.channels);
+        let sample_rate = spec.sample_rate;
+        let bits_per_sample = spec.bits_per_sample;
+        let total_samples = spec.total_samples;
 
         thread::scope(|scope| -> Result<()> {
             let (sender, receiver) = mpsc::channel();
@@ -177,53 +176,75 @@ impl Encoder {
                 let next_frame = Arc::clone(&next_frame);
                 let samples = Arc::clone(&samples);
                 let channels_in_scope = channels;
-                let wav_channels = wav.spec.channels;
+                let wav_channels = spec.channels;
 
                 scope.spawn(move || {
                     loop {
-                        let frame_index = next_frame.fetch_add(1, Ordering::Relaxed);
-                        if frame_index >= total_frames {
+                        let chunk_start = next_frame.fetch_add(FRAME_CHUNK_SIZE, Ordering::Relaxed);
+                        if chunk_start >= total_frames {
                             break;
                         }
+                        let chunk_end = (chunk_start + FRAME_CHUNK_SIZE).min(total_frames);
+                        let mut encoded_chunk = Vec::with_capacity(chunk_end - chunk_start);
+                        let mut saw_error = false;
 
-                        let start_sample = frame_index as u64 * u64::from(block_size);
-                        let frame_samples =
-                            (total_samples - start_sample).min(u64::from(block_size)) as usize;
-                        let sample_start =
-                            frame_index * usize::from(block_size) * channels_in_scope;
-                        let sample_end = sample_start + frame_samples * channels_in_scope;
-                        let frame = encode_frame(
-                            &samples[sample_start..sample_end],
-                            wav_channels,
-                            bits_per_sample,
-                            sample_rate,
-                            frame_index as u64,
-                            profile,
-                        );
-                        if sender.send((frame_index, frame)).is_err() {
-                            break;
+                        for frame_index in chunk_start..chunk_end {
+                            let start_sample = frame_index as u64 * u64::from(block_size);
+                            let frame_samples =
+                                (total_samples - start_sample).min(u64::from(block_size)) as usize;
+                            let sample_start =
+                                frame_index * usize::from(block_size) * channels_in_scope;
+                            let sample_end = sample_start + frame_samples * channels_in_scope;
+                            let frame = encode_frame(
+                                &samples[sample_start..sample_end],
+                                wav_channels,
+                                bits_per_sample,
+                                sample_rate,
+                                frame_index as u64,
+                                profile,
+                            );
+                            saw_error |= frame.is_err();
+                            encoded_chunk.push((frame_index, frame));
+                            if saw_error {
+                                break;
+                            }
+                        }
+                        if sender.send(encoded_chunk).is_err() {
+                            return;
+                        }
+                        if saw_error {
+                            return;
                         }
                     }
                 });
             }
 
             drop(sender);
-            for _ in 0..total_frames {
-                let (frame_index, frame) = receiver.recv().map_err(|_| {
+            let mut next_expected = 0usize;
+            let mut pending: BTreeMap<usize, EncodedFrame> = BTreeMap::new();
+            while next_expected < total_frames {
+                let encoded_chunk = receiver.recv().map_err(|_| {
                     Error::Thread(
                         "frame worker channel closed before all frames were encoded".into(),
                     )
                 })?;
-                results[frame_index] = Some(frame);
+                for (frame_index, frame) in encoded_chunk {
+                    let frame = frame?;
+                    if frame_index == next_expected {
+                        writer.write_frame(&frame.bytes)?;
+                        next_expected += 1;
+                        while let Some(frame) = pending.remove(&next_expected) {
+                            writer.write_frame(&frame.bytes)?;
+                            next_expected += 1;
+                        }
+                    } else {
+                        pending.insert(frame_index, frame);
+                    }
+                }
             }
 
             Ok(())
-        })?;
-
-        results
-            .into_iter()
-            .map(|frame| frame.ok_or_else(|| Error::Thread("missing encoded frame".into()))?)
-            .collect()
+        })
     }
 }
 
