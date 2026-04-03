@@ -19,6 +19,14 @@ cargo run -p flacx-cli -- encode input.wav output.flac --level 8 --threads 4
 - `--threads`
 - `--block-size`
 
+## Progress display
+
+- interactive terminals show a live progress bar during encode
+- redirected or non-interactive runs do not emit progress UI
+- progress comes from the library's encoder-backed progress reporting on the
+  existing fast encode path
+- this crate explicitly enables the `flacx` `progress` feature
+
 ## Workspace relationship
 
 - `crates/flacx` provides the reusable Rust API

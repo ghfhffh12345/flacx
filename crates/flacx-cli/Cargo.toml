@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 clap.workspace = true
-flacx = { path = "../flacx" }
+flacx = { path = "../flacx", features = ["progress"] }
 
 [[bin]]
 name = "flacx"

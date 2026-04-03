@@ -14,6 +14,7 @@ const MAX_ESCAPE_BITS: u8 = 31;
 
 pub(crate) struct EncodedFrame {
     pub(crate) bytes: Vec<u8>,
+    pub(crate) sample_count: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,7 +238,10 @@ fn serialize_frame(
     frame.extend_from_slice(&subframes.into_writer());
     let footer_crc = crc16(&frame);
     frame.extend_from_slice(&footer_crc.to_be_bytes());
-    Ok(EncodedFrame { bytes: frame })
+    Ok(EncodedFrame {
+        bytes: frame,
+        sample_count: analysis.block_size,
+    })
 }
 
 fn encode_frame_header(

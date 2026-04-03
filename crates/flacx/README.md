@@ -33,6 +33,22 @@ FlacEncoder::new(options)
 - `encode_file`
 - `encode_bytes`
 
+## Optional progress feature
+
+Progress support is behind the optional `progress` Cargo feature and is
+disabled by default.
+
+```toml
+[dependencies]
+flacx = { version = "0.1.0", features = ["progress"] }
+```
+
+When enabled, the additional progress-specific API surface includes:
+
+- `EncodeProgress`
+- `FlacEncoder::encode_with_progress`
+- `FlacEncoder::encode_file_with_progress`
+
 ## Current scope
 
 - WAV-to-FLAC encoding only
@@ -50,6 +66,12 @@ FlacEncoder::new(options)
 
 The CLI lives in a separate workspace crate, `flacx-cli`, and is not bundled
 into the publishable library package.
+
+## Progress note
+
+`FlacEncoder` can optionally report real encode progress while keeping the
+existing fast encode path intact. The sibling CLI crate explicitly enables this
+feature and uses that signal to render a TTY-only progress bar by default.
 
 ## Stability note
 

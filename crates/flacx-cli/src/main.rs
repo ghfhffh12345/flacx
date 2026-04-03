@@ -4,12 +4,13 @@
 //! reusing the same encode pipeline and workspace version.
 //!
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     process::ExitCode,
 };
 
 use clap::{Args, Parser, Subcommand};
-use flacx::{EncodeOptions, FlacEncoder, level::Level};
+use flacx::{EncodeOptions, level::Level};
+use flacx_cli::{EncodeCommand, encode_command};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,6 +73,13 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         options = options.with_block_size(block_size);
     }
 
-    FlacEncoder::new(options).encode_file(args.input, args.output)?;
+    let interactive = io::stderr().is_terminal();
+    let mut stderr = io::stderr().lock();
+    let command = EncodeCommand {
+        input: args.input,
+        output: args.output,
+        options,
+    };
+    encode_command(&command, interactive, &mut stderr)?;
     Ok(())
 }
