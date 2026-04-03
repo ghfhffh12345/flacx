@@ -1,6 +1,7 @@
 use std::{fs, process::Command};
 
 use flacx::{EncodeOptions, FlacEncoder, level::Level};
+use flacx_cli::{EncodeCommand, encode_command};
 
 #[path = "../../flacx/tests/support/mod.rs"]
 mod support;
@@ -49,6 +50,10 @@ fn encode_command_matches_library_output() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains('\r'),
+        "non-interactive stderr should not contain live progress output"
+    );
 
     let cli_bytes = fs::read(&output_path).unwrap();
     let library_bytes = FlacEncoder::new(
@@ -60,6 +65,35 @@ fn encode_command_matches_library_output() {
     .encode_bytes(&wav)
     .unwrap();
     assert_eq!(cli_bytes, library_bytes);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn encode_command_renders_progress_bar_when_interactive() {
+    let samples = sample_fixture(1, 2_048);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
+    let input_path = unique_temp_path("wav");
+    let output_path = unique_temp_path("flac");
+    fs::write(&input_path, &wav).unwrap();
+
+    let command = EncodeCommand {
+        input: input_path.clone(),
+        output: output_path.clone(),
+        options: EncodeOptions::default()
+            .with_level(Level::Level0)
+            .with_threads(1)
+            .with_block_size(576),
+    };
+    let mut stderr = Vec::new();
+
+    encode_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains('\r'));
+    assert!(stderr.contains("100.00%"));
+    assert!(stderr.ends_with('\n'));
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);

@@ -6,6 +6,9 @@
 //! Rust API and the sibling `flacx-cli` crate. The CLI remains a thin adapter
 //! over the same library entrypoints used by Rust callers.
 //!
+//! Progress reporting is available through the optional `progress` Cargo
+//! feature. Default builds exclude the progress-specific API surface.
+//!
 //! # Quick start
 //!
 //! ```no_run
@@ -26,6 +29,8 @@ pub mod level;
 pub mod metadata;
 pub mod wav;
 
+#[cfg(feature = "progress")]
+pub use encoder::EncodeProgress;
 pub use encoder::{EncodeOptions, EncodeSummary, FlacEncoder, encode_bytes, encode_file};
 pub use error::{Error, Result};
 
@@ -35,3 +40,12 @@ pub use encoder::{Encoder, EncoderConfig};
 pub(crate) mod crc;
 mod flac_writer;
 mod frame;
+
+#[cfg(not(feature = "progress"))]
+#[doc = r#"```compile_fail
+use flacx::EncodeProgress;
+
+fn main() {}
+```"#]
+#[doc(hidden)]
+pub struct _ProgressFeatureDisabledDoc;

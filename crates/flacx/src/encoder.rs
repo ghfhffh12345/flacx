@@ -80,6 +80,65 @@ pub struct EncodeSummary {
     pub bits_per_sample: u8,
 }
 
+#[cfg(feature = "progress")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodeProgress {
+    pub processed_samples: u64,
+    pub total_samples: u64,
+    pub completed_frames: usize,
+    pub total_frames: usize,
+}
+
+trait ProgressSink {
+    fn on_frame(
+        &mut self,
+        processed_samples: u64,
+        total_samples: u64,
+        completed_frames: usize,
+        total_frames: usize,
+    ) -> Result<()>;
+}
+
+struct NoProgress;
+
+impl ProgressSink for NoProgress {
+    fn on_frame(
+        &mut self,
+        _processed_samples: u64,
+        _total_samples: u64,
+        _completed_frames: usize,
+        _total_frames: usize,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "progress")]
+struct CallbackProgress<F> {
+    callback: F,
+}
+
+#[cfg(feature = "progress")]
+impl<F> ProgressSink for CallbackProgress<F>
+where
+    F: FnMut(EncodeProgress) -> Result<()>,
+{
+    fn on_frame(
+        &mut self,
+        processed_samples: u64,
+        total_samples: u64,
+        completed_frames: usize,
+        total_frames: usize,
+    ) -> Result<()> {
+        (self.callback)(EncodeProgress {
+            processed_samples,
+            total_samples,
+            completed_frames,
+            total_frames,
+        })
+    }
+}
+
 /// Primary library entrypoint for WAV-to-FLAC conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlacEncoder {
@@ -126,7 +185,27 @@ impl FlacEncoder {
         W: Write + Seek,
     {
         let wav = read_wav(input)?;
-        self.encode_wav_data_to_flac(wav, output)
+        let mut progress = NoProgress;
+        self.encode_wav_data_to_flac(wav, output, &mut progress)
+    }
+
+    #[cfg(feature = "progress")]
+    pub fn encode_with_progress<R, W, F>(
+        &self,
+        input: R,
+        output: W,
+        mut on_progress: F,
+    ) -> Result<EncodeSummary>
+    where
+        R: Read + Seek,
+        W: Write + Seek,
+        F: FnMut(EncodeProgress) -> Result<()>,
+    {
+        let wav = read_wav(input)?;
+        let mut progress = CallbackProgress {
+            callback: &mut on_progress,
+        };
+        self.encode_wav_data_to_flac(wav, output, &mut progress)
     }
 
     pub fn encode_file<P, Q>(&self, input_path: P, output_path: Q) -> Result<EncodeSummary>
@@ -135,6 +214,25 @@ impl FlacEncoder {
         Q: AsRef<Path>,
     {
         self.encode(File::open(input_path)?, File::create(output_path)?)
+    }
+
+    #[cfg(feature = "progress")]
+    pub fn encode_file_with_progress<P, Q, F>(
+        &self,
+        input_path: P,
+        output_path: Q,
+        on_progress: F,
+    ) -> Result<EncodeSummary>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+        F: FnMut(EncodeProgress) -> Result<()>,
+    {
+        self.encode_with_progress(
+            File::open(input_path)?,
+            File::create(output_path)?,
+            on_progress,
+        )
     }
 
     pub fn encode_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
@@ -155,13 +253,16 @@ impl FlacEncoder {
         self.encode_bytes(input)
     }
 
-    fn encode_wav_data_to_flac<W: Write + Seek>(
+    fn encode_wav_data_to_flac<W, P>(
         &self,
         wav: WavData,
         output: W,
-    ) -> Result<EncodeSummary> {
-        validate_stream(&wav.spec, self.options.block_size)?;
-
+        progress: &mut P,
+    ) -> Result<EncodeSummary>
+    where
+        W: Write + Seek,
+        P: ProgressSink,
+    {
         let profile = self.options.level.profile();
         let block_size = self.options.block_size;
         let total_frames = if wav.spec.total_samples == 0 {
@@ -169,38 +270,39 @@ impl FlacEncoder {
         } else {
             wav.spec.total_samples.div_ceil(u64::from(block_size)) as usize
         };
-
-        let mut stream_info = StreamInfo::new(
-            wav.spec.sample_rate,
-            wav.spec.channels,
-            wav.spec.bits_per_sample,
-            wav.spec.total_samples,
-            [0; 16],
-        );
-        stream_info.min_block_size = block_size;
-        stream_info.max_block_size = block_size;
-
-        let mut writer = FlacWriter::new(output, stream_info)?;
+        let mut writer = self.init_flac_writer(wav.spec, output)?;
 
         if total_frames == 0 {
             let (_, stream_info) = writer.finalize()?;
             return Ok(summary_from_stream_info(stream_info, 0));
         }
 
-        self.encode_frames_in_parallel(wav.spec, wav.samples, block_size, profile, &mut writer)?;
+        self.encode_frames_in_parallel(
+            wav.spec,
+            wav.samples,
+            block_size,
+            profile,
+            &mut writer,
+            progress,
+        )?;
 
         let (_, stream_info) = writer.finalize()?;
         Ok(summary_from_stream_info(stream_info, total_frames))
     }
 
-    fn encode_frames_in_parallel<W: Write + Seek>(
+    fn encode_frames_in_parallel<W, P>(
         &self,
         spec: WavSpec,
         samples: Vec<i32>,
         block_size: u16,
         profile: LevelProfile,
         writer: &mut FlacWriter<W>,
-    ) -> Result<()> {
+        progress: &mut P,
+    ) -> Result<()>
+    where
+        W: Write + Seek,
+        P: ProgressSink,
+    {
         let total_frames = spec.total_samples.div_ceil(u64::from(block_size)) as usize;
         let worker_count = self.options.threads.max(1).min(total_frames.max(1));
         let next_frame = Arc::new(AtomicUsize::new(0));
@@ -262,6 +364,7 @@ impl FlacEncoder {
 
             drop(sender);
             let mut next_expected = 0usize;
+            let mut processed_samples = 0u64;
             let mut pending: BTreeMap<usize, EncodedFrame> = BTreeMap::new();
             while next_expected < total_frames {
                 let encoded_chunk = receiver.recv().map_err(|_| {
@@ -272,10 +375,26 @@ impl FlacEncoder {
                 for (frame_index, frame) in encoded_chunk {
                     let frame = frame?;
                     if frame_index == next_expected {
-                        writer.write_frame(&frame.bytes)?;
+                        processed_samples = write_encoded_frame(
+                            writer,
+                            &frame,
+                            processed_samples,
+                            spec.total_samples,
+                            next_expected + 1,
+                            total_frames,
+                            progress,
+                        )?;
                         next_expected += 1;
                         while let Some(frame) = pending.remove(&next_expected) {
-                            writer.write_frame(&frame.bytes)?;
+                            processed_samples = write_encoded_frame(
+                                writer,
+                                &frame,
+                                processed_samples,
+                                spec.total_samples,
+                                next_expected + 1,
+                                total_frames,
+                                progress,
+                            )?;
                             next_expected += 1;
                         }
                     } else {
@@ -286,6 +405,22 @@ impl FlacEncoder {
 
             Ok(())
         })
+    }
+
+    fn init_flac_writer<W: Write + Seek>(&self, spec: WavSpec, output: W) -> Result<FlacWriter<W>> {
+        validate_stream(&spec, self.options.block_size)?;
+
+        let mut stream_info = StreamInfo::new(
+            spec.sample_rate,
+            spec.channels,
+            spec.bits_per_sample,
+            spec.total_samples,
+            [0; 16],
+        );
+        stream_info.min_block_size = self.options.block_size;
+        stream_info.max_block_size = self.options.block_size;
+
+        Ok(FlacWriter::new(output, stream_info)?)
     }
 }
 
@@ -306,6 +441,30 @@ pub type EncoderConfig = EncodeOptions;
 
 #[deprecated(note = "Use FlacEncoder instead.")]
 pub type Encoder = FlacEncoder;
+
+fn write_encoded_frame<W, P>(
+    writer: &mut FlacWriter<W>,
+    frame: &EncodedFrame,
+    processed_samples: u64,
+    total_samples: u64,
+    completed_frames: usize,
+    total_frames: usize,
+    progress: &mut P,
+) -> Result<u64>
+where
+    W: Write + Seek,
+    P: ProgressSink,
+{
+    writer.write_frame(&frame.bytes)?;
+    let processed_samples = processed_samples + u64::from(frame.sample_count);
+    progress.on_frame(
+        processed_samples,
+        total_samples,
+        completed_frames,
+        total_frames,
+    )?;
+    Ok(processed_samples)
+}
 
 fn validate_stream(spec: &WavSpec, block_size: u16) -> Result<()> {
     if spec.sample_rate == 0 {

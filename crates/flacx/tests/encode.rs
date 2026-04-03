@@ -93,3 +93,43 @@ fn public_api_requires_seekable_io_but_accepts_cursor_inputs() {
     assert_eq!(summary.total_samples, 2_048);
     assert!(summary.frame_count >= 1);
 }
+
+#[cfg(feature = "progress")]
+#[test]
+fn progress_encode_path_matches_default_output_and_reports_monotonic_updates() {
+    let samples = sample_fixture(2, 5_111);
+    let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
+    let encoder = FlacEncoder::new(
+        EncodeOptions::default()
+            .with_threads(2)
+            .with_block_size(576),
+    );
+    let expected = encoder.encode_bytes(&wav).unwrap();
+
+    let mut output = Cursor::new(Vec::new());
+    let mut progress_updates = Vec::new();
+    let summary = encoder
+        .encode_with_progress(Cursor::new(&wav), &mut output, |progress| {
+            progress_updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(output.into_inner(), expected);
+    assert_eq!(summary.total_samples, 5_111);
+    assert!(!progress_updates.is_empty());
+    assert_eq!(
+        progress_updates.last().unwrap().processed_samples,
+        summary.total_samples
+    );
+    assert!(
+        progress_updates
+            .windows(2)
+            .all(|pair| pair[0].processed_samples <= pair[1].processed_samples)
+    );
+    assert!(
+        progress_updates
+            .windows(2)
+            .all(|pair| pair[0].completed_frames <= pair[1].completed_frames)
+    );
+}
