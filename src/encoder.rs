@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
+    fs::File,
     io::{Cursor, Read, Seek, Write},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -20,14 +22,15 @@ use crate::{
 
 const FRAME_CHUNK_SIZE: usize = 8;
 
+/// User-facing encoder options for WAV-to-FLAC conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EncoderConfig {
+pub struct EncodeOptions {
     pub level: Level,
     pub threads: usize,
     pub block_size: u16,
 }
 
-impl Default for EncoderConfig {
+impl Default for EncodeOptions {
     fn default() -> Self {
         let level = Level::Level8;
         let profile = level.profile();
@@ -38,6 +41,28 @@ impl Default for EncoderConfig {
                 .unwrap_or(1),
             block_size: profile.block_size,
         }
+    }
+}
+
+impl EncodeOptions {
+    #[must_use]
+    pub fn with_level(mut self, level: Level) -> Self {
+        let profile = level.profile();
+        self.level = level;
+        self.block_size = profile.block_size;
+        self
+    }
+
+    #[must_use]
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_block_size(mut self, block_size: u16) -> Self {
+        self.block_size = block_size;
+        self
     }
 }
 
@@ -55,51 +80,47 @@ pub struct EncodeSummary {
     pub bits_per_sample: u8,
 }
 
+/// Primary library entrypoint for WAV-to-FLAC conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Encoder {
-    config: EncoderConfig,
+pub struct FlacEncoder {
+    options: EncodeOptions,
 }
 
-impl Default for Encoder {
+impl Default for FlacEncoder {
     fn default() -> Self {
         Self {
-            config: EncoderConfig::default(),
+            options: EncodeOptions::default(),
         }
     }
 }
 
-impl Encoder {
+impl FlacEncoder {
     #[must_use]
-    pub fn new(config: EncoderConfig) -> Self {
-        Self { config }
+    pub fn new(options: EncodeOptions) -> Self {
+        Self { options }
     }
 
     #[must_use]
-    pub fn with_level(mut self, level: Level) -> Self {
-        let profile = level.profile();
-        self.config.level = level;
-        self.config.block_size = profile.block_size;
-        self
+    pub fn options(&self) -> EncodeOptions {
+        self.options
     }
 
     #[must_use]
-    pub fn with_threads(mut self, threads: usize) -> Self {
-        self.config.threads = threads.max(1);
-        self
+    pub fn with_level(self, level: Level) -> Self {
+        Self::new(self.options.with_level(level))
     }
 
     #[must_use]
-    pub fn with_block_size(mut self, block_size: u16) -> Self {
-        self.config.block_size = block_size;
-        self
+    pub fn with_threads(self, threads: usize) -> Self {
+        Self::new(self.options.with_threads(threads))
     }
 
     #[must_use]
-    pub fn config(&self) -> EncoderConfig {
-        self.config
+    pub fn with_block_size(self, block_size: u16) -> Self {
+        Self::new(self.options.with_block_size(block_size))
     }
 
-    pub fn encode_wav_to_flac<R, W>(&self, input: R, output: W) -> Result<EncodeSummary>
+    pub fn encode<R, W>(&self, input: R, output: W) -> Result<EncodeSummary>
     where
         R: Read + Seek,
         W: Write + Seek,
@@ -108,10 +129,30 @@ impl Encoder {
         self.encode_wav_data_to_flac(wav, output)
     }
 
-    pub fn encode_wav_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
+    pub fn encode_file<P, Q>(&self, input_path: P, output_path: Q) -> Result<EncodeSummary>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        self.encode(File::open(input_path)?, File::create(output_path)?)
+    }
+
+    pub fn encode_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
         let mut output = Cursor::new(Vec::new());
-        self.encode_wav_to_flac(Cursor::new(input), &mut output)?;
+        self.encode(Cursor::new(input), &mut output)?;
         Ok(output.into_inner())
+    }
+
+    pub fn encode_wav_to_flac<R, W>(&self, input: R, output: W) -> Result<EncodeSummary>
+    where
+        R: Read + Seek,
+        W: Write + Seek,
+    {
+        self.encode(input, output)
+    }
+
+    pub fn encode_wav_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
+        self.encode_bytes(input)
     }
 
     fn encode_wav_data_to_flac<W: Write + Seek>(
@@ -119,10 +160,10 @@ impl Encoder {
         wav: WavData,
         output: W,
     ) -> Result<EncodeSummary> {
-        validate_stream(&wav.spec, self.config.block_size)?;
+        validate_stream(&wav.spec, self.options.block_size)?;
 
-        let profile = self.config.level.profile();
-        let block_size = self.config.block_size;
+        let profile = self.options.level.profile();
+        let block_size = self.options.block_size;
         let total_frames = if wav.spec.total_samples == 0 {
             0
         } else {
@@ -161,7 +202,7 @@ impl Encoder {
         writer: &mut FlacWriter<W>,
     ) -> Result<()> {
         let total_frames = spec.total_samples.div_ceil(u64::from(block_size)) as usize;
-        let worker_count = self.config.threads.max(1).min(total_frames.max(1));
+        let worker_count = self.options.threads.max(1).min(total_frames.max(1));
         let next_frame = Arc::new(AtomicUsize::new(0));
         let samples: Arc<[i32]> = Arc::from(samples);
         let channels = usize::from(spec.channels);
@@ -248,6 +289,24 @@ impl Encoder {
     }
 }
 
+pub fn encode_file<P, Q>(input_path: P, output_path: Q) -> Result<EncodeSummary>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    FlacEncoder::default().encode_file(input_path, output_path)
+}
+
+pub fn encode_bytes(input: &[u8]) -> Result<Vec<u8>> {
+    FlacEncoder::default().encode_bytes(input)
+}
+
+#[deprecated(note = "Use EncodeOptions instead.")]
+pub type EncoderConfig = EncodeOptions;
+
+#[deprecated(note = "Use FlacEncoder instead.")]
+pub type Encoder = FlacEncoder;
+
 fn validate_stream(spec: &WavSpec, block_size: u16) -> Result<()> {
     if spec.sample_rate == 0 {
         return Err(Error::UnsupportedFlac(
@@ -295,5 +354,24 @@ fn summary_from_stream_info(stream_info: StreamInfo, frame_count: usize) -> Enco
         sample_rate: stream_info.sample_rate,
         channels: stream_info.channels,
         bits_per_sample: stream_info.bits_per_sample,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EncodeOptions;
+    use crate::level::Level;
+
+    #[test]
+    fn with_threads_clamps_to_one() {
+        assert_eq!(EncodeOptions::default().with_threads(0).threads, 1);
+    }
+
+    #[test]
+    fn with_level_resets_block_size_to_level_default() {
+        let options = EncodeOptions::default()
+            .with_block_size(576)
+            .with_level(Level::Level6);
+        assert_eq!(options.block_size, Level::Level6.profile().block_size);
     }
 }

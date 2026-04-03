@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use flacx::{Encoder, level::Level};
+use flacx::{EncodeOptions, FlacEncoder, level::Level};
 
 const DEFAULT_REPEATS: usize = 3;
 const PINNED_CORES: usize = 8;
@@ -221,20 +221,20 @@ fn encode_flacx(
     output_path: &Path,
 ) -> Result<TimedEncode, Box<dyn std::error::Error>> {
     let start = Instant::now();
-    benchmark_encoder()?.encode_wav_to_flac(File::open(wav_path)?, File::create(output_path)?)?;
+    benchmark_encoder()?.encode(File::open(wav_path)?, File::create(output_path)?)?;
     Ok(TimedEncode {
         encoded_bytes: encoded_size(output_path)?,
         elapsed_seconds: start.elapsed().as_secs_f64(),
     })
 }
 
-fn benchmark_encoder() -> Result<Encoder, Box<dyn std::error::Error>> {
-    let mut encoder = Encoder::default();
+fn benchmark_encoder() -> Result<FlacEncoder, Box<dyn std::error::Error>> {
+    let mut options = EncodeOptions::default();
     if let Some(level) = env::var("FLACX_LEVEL").ok() {
         let level = level.parse::<u8>()?;
-        encoder = encoder.with_level(Level::try_from(level).map_err(|_| "invalid FLACX_LEVEL")?);
+        options = options.with_level(Level::try_from(level).map_err(|_| "invalid FLACX_LEVEL")?);
     }
-    Ok(encoder)
+    Ok(FlacEncoder::new(options))
 }
 
 fn encode_baseline_flac(
