@@ -15,3 +15,4 @@ flacx = { path = "../flacx" }
 [[bin]]
 name = "flacx"
 path = "src/main.rs"
+doc = false

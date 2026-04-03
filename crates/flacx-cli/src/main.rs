@@ -1,3 +1,8 @@
+//! Command-line WAV-to-FLAC encoding built on the `flacx` workspace library.
+//!
+//! This crate stays separate from the publishable library package while
+//! reusing the same encode pipeline and workspace version.
+//!
 use std::{
     io::{self, Write},
     process::ExitCode,

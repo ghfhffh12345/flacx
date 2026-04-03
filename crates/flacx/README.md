@@ -37,7 +37,7 @@ FlacEncoder::new(options)
 
 - WAV-to-FLAC encoding only
 - seekable input/output API
-- current supported WAV subset from the v4 engine
+- current supported WAV subset of the encoder
 
 ## Out of scope
 
@@ -53,5 +53,6 @@ into the publishable library package.
 
 ## Stability note
 
-v5 changes package structure and publication readiness only. The encode engine,
-behavior, and regression targets remain the same as v4.
+The package layout and documentation may change independently from the encode
+engine. This crate documents the current workspace behavior without relying on
+internal milestone labels.
