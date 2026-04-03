@@ -92,7 +92,9 @@ fn encode_command_renders_progress_bar_when_interactive() {
 
     let stderr = String::from_utf8(stderr).unwrap();
     assert!(stderr.contains('\r'));
-    assert!(stderr.contains("100.00%"));
+    assert!(stderr.contains("100.0%"));
+    assert!(stderr.contains("ETA"));
+    assert!(stderr.contains("Rate"));
     assert!(stderr.ends_with('\n'));
 
     let _ = fs::remove_file(input_path);

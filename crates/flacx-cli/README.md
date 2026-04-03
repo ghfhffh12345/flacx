@@ -26,6 +26,10 @@ cargo run -p flacx-cli -- encode input.wav output.flac --level 8 --threads 4
 - progress comes from the library's encoder-backed progress reporting on the
   existing fast encode path
 - this crate explicitly enables the `flacx` `progress` feature
+- the progress line stays single-line and ASCII-compatible, with percent plus
+  `ETA` and `Rate`
+- `ETA` and `Rate` stay in a short warm-up state until the renderer has seen
+  two advancing updates and at least 250 ms of elapsed encode time
 
 ## Workspace relationship
 
