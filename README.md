@@ -12,7 +12,6 @@ and a separate **CLI crate** built on the same encode pipeline.
 ├─ crates/
 │  ├─ flacx/      # publishable library crate
 │  └─ flacx-cli/  # non-published CLI crate
-├─ docs/
 ├─ test-wavs/
 └─ benchmarks/
 ```
@@ -60,6 +59,9 @@ Supported CLI shape:
 - `--threads`
 - `--block-size`
 
+See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for CLI usage
+details.
+
 ## Workspace commands
 
 ```bash
@@ -69,20 +71,13 @@ cargo run -p flacx-cli -- --help
 cargo run -p flacx --release --example benchmark
 ```
 
-## What changed in v5
-
-- single combined package → Cargo workspace
-- library and CLI moved into separate crates
-- only the library crate is prepared for crates.io publication
-- package/layout cleanup only; codec behavior is unchanged
-
 ## Performance note
 
 The library and CLI still use the same tuned encode engine. The `test-wavs/`
 benchmark contract remains the regression baseline for throughput and encoded
 size.
 
-## Migration
+## Documentation
 
-- [`docs/migration-v4.md`](docs/migration-v4.md) — v4 API redesign
-- [`docs/migration-v5.md`](docs/migration-v5.md) — v5 workspace/package split
+- [`crates/flacx/README.md`](crates/flacx/README.md) — library crate usage
+- [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) — CLI crate usage
