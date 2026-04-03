@@ -3,14 +3,12 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     process::Command,
-    time::Instant,
 };
 
 use flacx::Encoder;
 
 const DEFAULT_REPEATS: usize = 3;
 const PINNED_CORES: usize = 8;
-const MIB: f64 = 1024.0 * 1024.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pin_current_process_to_first_n_cores(PINNED_CORES)?;
@@ -27,27 +25,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn run_single_input(wav_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let output_path = wav_path.with_extension("flacx.flac");
     let baseline_output_path = wav_path.with_extension("baseline.flac");
-    let input_bytes = fs::metadata(wav_path)?.len() as f64;
+    let input_bytes = fs::metadata(wav_path)?.len();
 
-    let start = Instant::now();
-    let summary = Encoder::default().encode_wav_to_flac(File::open(wav_path)?, File::create(&output_path)?)?;
-    let ours_seconds = start.elapsed().as_secs_f64();
+    let flacx_bytes = encode_flacx(wav_path, &output_path)?;
+    let flacx_ratio = size_ratio(flacx_bytes, input_bytes);
 
     println!(
-        "flacx(single): frames={} samples={} throughput={:.2} MiB/s",
-        summary.frame_count,
-        summary.total_samples,
-        throughput_mib_s(input_bytes, ours_seconds)
+        "flacx(single): encoded={} B ratio={:.6}",
+        flacx_bytes, flacx_ratio
     );
 
-    if let Some(tool) = baseline_tool() {
-        let baseline_seconds = run_baseline(tool, wav_path, &baseline_output_path)?;
+    if flac_available() {
+        let baseline_bytes = encode_baseline_flac(wav_path, &baseline_output_path)?;
+        let baseline_ratio = size_ratio(baseline_bytes, input_bytes);
+        let delta_bytes = signed_delta(flacx_bytes, baseline_bytes);
+        let delta_ratio = flacx_ratio - baseline_ratio;
         println!(
-            "baseline(single, {tool}): throughput={:.2} MiB/s",
-            throughput_mib_s(input_bytes, baseline_seconds)
+            "baseline(single, flac -f -8): encoded={} B ratio={:.6} delta={:+} B ({:+.6} ratio)",
+            baseline_bytes, baseline_ratio, delta_bytes, delta_ratio
         );
     } else {
-        println!("No external baseline encoder found (`flac` or `ffmpeg`).");
+        println!("baseline(single, flac -f -8): unavailable (`flac` not found)");
     }
 
     let _ = fs::remove_file(output_path);
@@ -57,12 +55,18 @@ fn run_single_input(wav_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_locked_corpus() -> Result<(), Box<dyn std::error::Error>> {
     let corpus = load_locked_corpus(Path::new("benchmarks/locked-corpus.txt"))?;
-    let baseline = baseline_tool();
-    let mut flacx_scores = Vec::new();
-    let mut baseline_scores = Vec::new();
+    if !flac_available() {
+        return Err(
+            "locked-corpus ratio benchmark requires `flac -f -8`, but `flac` was not found".into(),
+        );
+    }
+    let mut flacx_case_medians = Vec::new();
+    let mut baseline_case_medians = Vec::new();
+    let mut flacx_case_ratios = Vec::new();
+    let mut baseline_case_ratios = Vec::new();
 
     println!(
-        "locked corpus: {} cases, {} repeats, pinned cores={} (best effort)",
+        "locked corpus: {} cases, {} repeats, pinned cores={} (best effort), baseline=flac -f -8",
         corpus.len(),
         DEFAULT_REPEATS,
         PINNED_CORES
@@ -72,54 +76,71 @@ fn run_locked_corpus() -> Result<(), Box<dyn std::error::Error>> {
         let wav_bytes = case.to_wav_bytes();
         let wav_path = temp_path(&format!("{}-input", case.name), "wav");
         fs::write(&wav_path, &wav_bytes)?;
-        let input_bytes = wav_bytes.len() as f64;
+        let input_bytes = wav_bytes.len() as u64;
 
         let mut case_flacx = Vec::new();
         let mut case_baseline = Vec::new();
         for repeat in 0..DEFAULT_REPEATS {
             let flacx_output = temp_path(&format!("{}-flacx-{repeat}", case.name), "flac");
-            let start = Instant::now();
-            Encoder::default().encode_wav_to_flac(File::open(&wav_path)?, File::create(&flacx_output)?)?;
-            let seconds = start.elapsed().as_secs_f64();
-            case_flacx.push(throughput_mib_s(input_bytes, seconds));
+            let flacx_bytes = encode_flacx(&wav_path, &flacx_output)?;
+            case_flacx.push(flacx_bytes);
             let _ = fs::remove_file(flacx_output);
 
-            if let Some(tool) = baseline {
-                let baseline_output = temp_path(&format!("{}-baseline-{repeat}", case.name), "flac");
-                let seconds = run_baseline(tool, &wav_path, &baseline_output)?;
-                case_baseline.push(throughput_mib_s(input_bytes, seconds));
-                let _ = fs::remove_file(baseline_output);
-            }
+            let baseline_output = temp_path(&format!("{}-baseline-{repeat}", case.name), "flac");
+            let baseline_bytes = encode_baseline_flac(&wav_path, &baseline_output)?;
+            case_baseline.push(baseline_bytes);
+            let _ = fs::remove_file(baseline_output);
         }
 
-        let flacx_median = median(&mut case_flacx);
-        flacx_scores.push(flacx_median);
+        let flacx_bytes = stable_size(&case_flacx, &case.name, "flacx")?;
+        let baseline_bytes = stable_size(&case_baseline, &case.name, "baseline")?;
+        let flacx_ratio = size_ratio(flacx_bytes, input_bytes);
+        let baseline_ratio = size_ratio(baseline_bytes, input_bytes);
+        let delta_bytes = signed_delta(flacx_bytes, baseline_bytes);
+        let delta_ratio = flacx_ratio - baseline_ratio;
 
-        if !case_baseline.is_empty() {
-            let baseline_median = median(&mut case_baseline);
-            baseline_scores.push(baseline_median);
-            println!(
-                "case={:<16} flacx={:>8.2} MiB/s baseline={:>8.2} MiB/s",
-                case.name, flacx_median, baseline_median
-            );
-        } else {
-            println!("case={:<16} flacx={:>8.2} MiB/s baseline=N/A", case.name, flacx_median);
-        }
+        flacx_case_medians.push(flacx_bytes as f64);
+        baseline_case_medians.push(baseline_bytes as f64);
+        flacx_case_ratios.push(flacx_ratio);
+        baseline_case_ratios.push(baseline_ratio);
+
+        println!(
+            "case={:<16} flacx={:>8} B ratio={:.6} baseline={:>8} B ratio={:.6} delta={:+} B ({:+.6} ratio)",
+            case.name,
+            flacx_bytes,
+            flacx_ratio,
+            baseline_bytes,
+            baseline_ratio,
+            delta_bytes,
+            delta_ratio
+        );
 
         let _ = fs::remove_file(&wav_path);
     }
 
-    let flacx_median = median(&mut flacx_scores);
-    println!("median(flacx)   = {:.2} MiB/s", flacx_median);
-    if !baseline_scores.is_empty() {
-        let baseline_median = median(&mut baseline_scores);
-        println!("median(baseline)= {:.2} MiB/s", baseline_median);
-        if flacx_median < baseline_median {
-            return Err(format!(
-                "locked-corpus median throughput regressed: flacx={flacx_median:.2} MiB/s baseline={baseline_median:.2} MiB/s"
-            )
-            .into());
-        }
+    let flacx_median_bytes = median(&mut flacx_case_medians);
+    let baseline_median_bytes = median(&mut baseline_case_medians);
+    let flacx_median_ratio = median(&mut flacx_case_ratios);
+    let baseline_median_ratio = median(&mut baseline_case_ratios);
+    let median_delta_bytes = flacx_median_bytes - baseline_median_bytes;
+    let median_delta_ratio = flacx_median_ratio - baseline_median_ratio;
+    println!(
+        "corpus-median: flacx={:.1} B ratio={:.6} baseline={:.1} B ratio={:.6} delta={:+.1} B ({:+.6} ratio)",
+        flacx_median_bytes,
+        flacx_median_ratio,
+        baseline_median_bytes,
+        baseline_median_ratio,
+        median_delta_bytes,
+        median_delta_ratio
+    );
+
+    if flacx_median_bytes > baseline_median_bytes * 1.05
+        || flacx_median_ratio > baseline_median_ratio * 1.05
+    {
+        return Err(format!(
+            "locked-corpus median encoded size/ratio regressed: flacx={flacx_median_bytes:.1} B ({flacx_median_ratio:.6}) baseline={baseline_median_bytes:.1} B ({baseline_median_ratio:.6})"
+        )
+        .into());
     }
 
     Ok(())
@@ -128,7 +149,10 @@ fn run_locked_corpus() -> Result<(), Box<dyn std::error::Error>> {
 fn load_locked_corpus(path: &Path) -> Result<Vec<CorpusCase>, Box<dyn std::error::Error>> {
     let raw = fs::read_to_string(path)?;
     let mut cases = Vec::new();
-    for line in raw.lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#')) {
+    for line in raw
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+    {
         let parts: Vec<_> = line.split(',').map(str::trim).collect();
         if parts.len() != 6 {
             return Err(format!("invalid corpus line: {line}").into());
@@ -158,7 +182,9 @@ struct CorpusCase {
 impl CorpusCase {
     fn to_wav_bytes(&self) -> Vec<u8> {
         let frames = (self.sample_rate as f32 * self.duration_seconds) as usize;
-        let samples = self.pattern.samples(frames, self.channels, self.bits_per_sample);
+        let samples = self
+            .pattern
+            .samples(frames, self.channels, self.bits_per_sample);
         pcm_wav_bytes(
             self.bits_per_sample,
             self.channels,
@@ -216,7 +242,11 @@ impl Pattern {
                     }
                     Self::Impulse => {
                         if frame % 400 == 0 {
-                            if channel == 0 { soft_limit } else { -soft_limit }
+                            if channel == 0 {
+                                soft_limit
+                            } else {
+                                -soft_limit
+                            }
                         } else {
                             ((frame as i32 * (channel as i32 + 1) * 17) % 128) - 64
                         }
@@ -225,8 +255,7 @@ impl Pattern {
                     Self::Ramp => {
                         let period = 1024i32;
                         let centered = i64::from((frame as i32 % period) - (period / 2));
-                        let scaled =
-                            (centered * i64::from(soft_limit)) / i64::from(period / 2);
+                        let scaled = (centered * i64::from(soft_limit)) / i64::from(period / 2);
                         scaled as i32
                     }
                     Self::Noise => {
@@ -250,7 +279,12 @@ impl Pattern {
     }
 }
 
-fn pcm_wav_bytes(bits_per_sample: u16, channels: u16, sample_rate: u32, samples: &[i32]) -> Vec<u8> {
+fn pcm_wav_bytes(
+    bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+) -> Vec<u8> {
     let bytes_per_sample = usize::from(bits_per_sample / 8);
     let block_align = usize::from(channels) * bytes_per_sample;
     let data_bytes = samples.len() * bytes_per_sample;
@@ -293,52 +327,73 @@ fn pcm_wav_bytes(bits_per_sample: u16, channels: u16, sample_rate: u32, samples:
     bytes
 }
 
-fn baseline_tool() -> Option<&'static str> {
-    if Command::new("flac").arg("--version").output().is_ok() {
-        Some("flac")
-    } else if Command::new("ffmpeg").arg("-version").output().is_ok() {
-        Some("ffmpeg")
-    } else {
-        None
-    }
+fn flac_available() -> bool {
+    Command::new("flac")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
-fn run_baseline(tool: &str, wav_path: &Path, output_path: &Path) -> Result<f64, Box<dyn std::error::Error>> {
-    let start = Instant::now();
-    let status = match tool {
-        "flac" => Command::new("flac")
-            .args([
-                "-f",
-                "-8",
-                "-o",
-                output_path.to_str().ok_or("invalid output path")?,
-                wav_path.to_str().ok_or("invalid wav path")?,
-            ])
-            .status()?,
-        "ffmpeg" => Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-v",
-                "error",
-                "-i",
-                wav_path.to_str().ok_or("invalid wav path")?,
-                "-c:a",
-                "flac",
-                output_path.to_str().ok_or("invalid output path")?,
-            ])
-            .status()?,
-        _ => return Err("unsupported baseline tool".into()),
-    };
-
-    if !status.success() {
-        return Err(format!("baseline encoder `{tool}` failed").into());
-    }
-
-    Ok(start.elapsed().as_secs_f64())
+fn encode_flacx(wav_path: &Path, output_path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
+    Encoder::default().encode_wav_to_flac(File::open(wav_path)?, File::create(output_path)?)?;
+    encoded_size(output_path)
 }
 
-fn throughput_mib_s(input_bytes: f64, seconds: f64) -> f64 {
-    input_bytes / seconds / MIB
+fn encode_baseline_flac(
+    wav_path: &Path,
+    output_path: &Path,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let output = Command::new("flac")
+        .args([
+            "-f",
+            "-8",
+            "--totally-silent",
+            "-o",
+            output_path.to_str().ok_or("invalid output path")?,
+            wav_path.to_str().ok_or("invalid wav path")?,
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let status = output.status.code().map_or_else(
+            || "terminated by signal".to_string(),
+            |code| code.to_string(),
+        );
+        return Err(
+            format!("baseline encoder `flac -f -8` failed (status {status}): {stderr}").into(),
+        );
+    }
+
+    encoded_size(output_path)
+}
+
+fn encoded_size(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(fs::metadata(path)?.len())
+}
+
+fn size_ratio(encoded_bytes: u64, source_bytes: u64) -> f64 {
+    encoded_bytes as f64 / source_bytes as f64
+}
+
+fn signed_delta(left: u64, right: u64) -> i64 {
+    left as i64 - right as i64
+}
+
+fn stable_size(
+    values: &[u64],
+    case_name: &str,
+    label: &str,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let first = values.first().copied().ok_or("missing benchmark samples")?;
+    if values.iter().any(|&value| value != first) {
+        return Err(format!(
+            "case `{case_name}` produced unstable {label} sizes across repeats: {values:?}"
+        )
+        .into());
+    }
+    Ok(first)
 }
 
 fn median(values: &mut [f64]) -> f64 {
@@ -363,12 +418,18 @@ mod tests {
     fn ramp_pattern_stays_within_24bit_soft_limit() {
         let samples = Pattern::Ramp.samples(96_000, 1, 24);
         let soft_limit = (((1i64 << 23) - 1) as f64 * 0.80) as i32;
-        assert!(samples.into_iter().all(|sample| (-soft_limit..=soft_limit).contains(&sample)));
+        assert!(
+            samples
+                .into_iter()
+                .all(|sample| (-soft_limit..=soft_limit).contains(&sample))
+        );
     }
 }
 
 #[cfg(windows)]
-fn pin_current_process_to_first_n_cores(core_count: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn pin_current_process_to_first_n_cores(
+    core_count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::ffi::c_void;
 
     unsafe extern "system" {
@@ -392,6 +453,8 @@ fn pin_current_process_to_first_n_cores(core_count: usize) -> Result<(), Box<dyn
 }
 
 #[cfg(not(windows))]
-fn pin_current_process_to_first_n_cores(_core_count: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn pin_current_process_to_first_n_cores(
+    _core_count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }

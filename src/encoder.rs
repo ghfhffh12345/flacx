@@ -1,9 +1,9 @@
 use std::{
     io::{Cursor, Read, Seek, Write},
     sync::{
+        Arc,
         atomic::{AtomicUsize, Ordering},
         mpsc,
-        Arc,
     },
     thread,
 };
@@ -11,10 +11,10 @@ use std::{
 use crate::{
     error::{Error, Result},
     flac_writer::FlacWriter,
-    frame::{encode_frame, sample_rate_is_representable, EncodedFrame},
+    frame::{EncodedFrame, encode_frame, sample_rate_is_representable},
     level::{Level, LevelProfile},
     metadata::StreamInfo,
-    wav::{read_wav, WavData, WavSpec},
+    wav::{WavData, WavSpec, read_wav},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +111,11 @@ impl Encoder {
         Ok(output.into_inner())
     }
 
-    fn encode_wav_data_to_flac<W: Write + Seek>(&self, wav: WavData, output: W) -> Result<EncodeSummary> {
+    fn encode_wav_data_to_flac<W: Write + Seek>(
+        &self,
+        wav: WavData,
+        output: W,
+    ) -> Result<EncodeSummary> {
         validate_stream(&wav.spec, self.config.block_size)?;
 
         let profile = self.config.level.profile();
@@ -162,9 +166,9 @@ impl Encoder {
         let sample_rate = wav.spec.sample_rate;
         let bits_per_sample = wav.spec.bits_per_sample;
         let total_samples = wav.spec.total_samples;
-        let max_fixed_order = profile.max_fixed_order.min(4);
 
-        let mut results: Vec<Option<Result<EncodedFrame>>> = (0..total_frames).map(|_| None).collect();
+        let mut results: Vec<Option<Result<EncodedFrame>>> =
+            (0..total_frames).map(|_| None).collect();
 
         thread::scope(|scope| -> Result<()> {
             let (sender, receiver) = mpsc::channel();
@@ -183,8 +187,10 @@ impl Encoder {
                         }
 
                         let start_sample = frame_index as u64 * u64::from(block_size);
-                        let frame_samples = (total_samples - start_sample).min(u64::from(block_size)) as usize;
-                        let sample_start = frame_index * usize::from(block_size) * channels_in_scope;
+                        let frame_samples =
+                            (total_samples - start_sample).min(u64::from(block_size)) as usize;
+                        let sample_start =
+                            frame_index * usize::from(block_size) * channels_in_scope;
                         let sample_end = sample_start + frame_samples * channels_in_scope;
                         let frame = encode_frame(
                             &samples[sample_start..sample_end],
@@ -192,7 +198,7 @@ impl Encoder {
                             bits_per_sample,
                             sample_rate,
                             frame_index as u64,
-                            max_fixed_order,
+                            profile,
                         );
                         if sender.send((frame_index, frame)).is_err() {
                             break;
@@ -204,7 +210,9 @@ impl Encoder {
             drop(sender);
             for _ in 0..total_frames {
                 let (frame_index, frame) = receiver.recv().map_err(|_| {
-                    Error::Thread("frame worker channel closed before all frames were encoded".into())
+                    Error::Thread(
+                        "frame worker channel closed before all frames were encoded".into(),
+                    )
                 })?;
                 results[frame_index] = Some(frame);
             }
@@ -221,7 +229,9 @@ impl Encoder {
 
 fn validate_stream(spec: &WavSpec, block_size: u16) -> Result<()> {
     if spec.sample_rate == 0 {
-        return Err(Error::UnsupportedFlac("sample rate 0 is not allowed".into()));
+        return Err(Error::UnsupportedFlac(
+            "sample rate 0 is not allowed".into(),
+        ));
     }
 
     if block_size < 16 {

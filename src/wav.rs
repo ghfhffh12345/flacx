@@ -57,7 +57,8 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
             Err(error) => return Err(error.into()),
         }
 
-        let chunk_size = u32::from_le_bytes(chunk_header[4..8].try_into().expect("fixed chunk header"));
+        let chunk_size =
+            u32::from_le_bytes(chunk_header[4..8].try_into().expect("fixed chunk header"));
         let chunk_start = reader.stream_position()?;
 
         match &chunk_header[..4] {
@@ -87,7 +88,9 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
 
     let expected_block_align = format.channels * (format.bits_per_sample / 8);
     if format.block_align != expected_block_align {
-        return Err(Error::InvalidWav("fmt block alignment does not match channels * bytes/sample"));
+        return Err(Error::InvalidWav(
+            "fmt block alignment does not match channels * bytes/sample",
+        ));
     }
 
     let block_align = u32::from(format.block_align);
@@ -96,7 +99,9 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
     }
 
     if data_size % block_align != 0 {
-        return Err(Error::InvalidWav("data chunk is not aligned to the sample frame size"));
+        return Err(Error::InvalidWav(
+            "data chunk is not aligned to the sample frame size",
+        ));
     }
 
     reader.seek(SeekFrom::Start(data_offset))?;
@@ -174,7 +179,9 @@ fn validate_format(format: FormatChunk) -> Result<()> {
     let expected_byte_rate =
         format.sample_rate * u32::from(format.channels) * u32::from(format.bits_per_sample / 8);
     if format.byte_rate != expected_byte_rate {
-        return Err(Error::InvalidWav("fmt byte rate does not match the PCM payload shape"));
+        return Err(Error::InvalidWav(
+            "fmt byte rate does not match the PCM payload shape",
+        ));
     }
 
     Ok(())
@@ -219,9 +226,14 @@ fn read_u32_le<R: Read>(reader: &mut R) -> Result<u32> {
 mod tests {
     use std::io::Cursor;
 
-    use super::{read_wav, WavData, WavSpec};
+    use super::{WavData, WavSpec, read_wav};
 
-    fn pcm_wav_bytes(bits_per_sample: u16, channels: u16, sample_rate: u32, samples: &[i32]) -> Vec<u8> {
+    fn pcm_wav_bytes(
+        bits_per_sample: u16,
+        channels: u16,
+        sample_rate: u32,
+        samples: &[i32],
+    ) -> Vec<u8> {
         let bytes_per_sample = usize::from(bits_per_sample / 8);
         let block_align = usize::from(channels) * bytes_per_sample;
         let data_bytes = samples.len() * bytes_per_sample;
