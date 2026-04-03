@@ -121,7 +121,14 @@ name = "flacx"
 version = "0.1.0"
 dependencies = [
  "bitstream-io",
+]
+
+[[package]]
+name = "flacx-cli"
+version = "0.1.0"
+dependencies = [
  "clap",
+ "flacx",
 ]
 
 [[package]]

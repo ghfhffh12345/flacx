@@ -1,0 +1,17 @@
+[package]
+name = "flacx-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line WAV-to-FLAC encoder powered by the flacx library."
+publish = false
+
+[dependencies]
+clap.workspace = true
+flacx = { path = "../flacx" }
+
+[[bin]]
+name = "flacx"
+path = "src/main.rs"

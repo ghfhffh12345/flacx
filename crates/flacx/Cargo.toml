@@ -1,0 +1,15 @@
+[package]
+name = "flacx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "High-performance WAV-to-FLAC encoding library in Rust."
+readme = "README.md"
+keywords = ["audio", "flac", "wav", "encoder"]
+categories = ["compression", "multimedia::audio"]
+
+[dependencies]
+bitstream-io.workspace = true
+
