@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     io::Cursor,
     path::PathBuf,
     process::Command,
@@ -9,7 +8,12 @@ use std::{
 
 use flacx::Encoder;
 
-fn pcm_wav_bytes(bits_per_sample: u16, channels: u16, sample_rate: u32, samples: &[i32]) -> Vec<u8> {
+fn pcm_wav_bytes(
+    bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+) -> Vec<u8> {
     let bytes_per_sample = usize::from(bits_per_sample / 8);
     let block_align = usize::from(channels) * bytes_per_sample;
     let data_bytes = samples.len() * bytes_per_sample;
@@ -71,7 +75,12 @@ fn unique_temp_path(extension: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    env::temp_dir().join(format!("flacx-test-{}-{}.{}", std::process::id(), timestamp, extension))
+    env::temp_dir().join(format!(
+        "flacx-test-{}-{}.{}",
+        std::process::id(),
+        timestamp,
+        extension
+    ))
 }
 
 fn ffmpeg_available() -> bool {
@@ -149,7 +158,10 @@ fn decode_with_ffmpeg(flac_bytes: &[u8], bits_per_sample: u16) -> Vec<i32> {
 fn patches_streaminfo_after_encoding() {
     let samples = sample_fixture(2, 5_000);
     let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
-    let flac = Encoder::default().with_threads(2).encode_wav_bytes(&wav).unwrap();
+    let flac = Encoder::default()
+        .with_threads(2)
+        .encode_wav_bytes(&wav)
+        .unwrap();
 
     assert_eq!(&flac[..4], b"fLaC");
     assert_eq!(&flac[4..8], &[0x80, 0x00, 0x00, 0x22]);
@@ -169,8 +181,14 @@ fn produces_identical_output_across_thread_counts() {
     let samples = sample_fixture(2, 8_192);
     let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
 
-    let single_threaded = Encoder::default().with_threads(1).encode_wav_bytes(&wav).unwrap();
-    let multi_threaded = Encoder::default().with_threads(4).encode_wav_bytes(&wav).unwrap();
+    let single_threaded = Encoder::default()
+        .with_threads(1)
+        .encode_wav_bytes(&wav)
+        .unwrap();
+    let multi_threaded = Encoder::default()
+        .with_threads(4)
+        .encode_wav_bytes(&wav)
+        .unwrap();
 
     assert_eq!(single_threaded, multi_threaded);
 }
@@ -200,6 +218,19 @@ fn round_trips_24bit_mono_with_ffmpeg_oracle() {
         .unwrap();
 
     let decoded = decode_with_ffmpeg(&flac, 24);
+    assert_eq!(decoded, samples);
+}
+
+#[test]
+fn round_trips_constant_16bit_mono_with_ffmpeg_oracle() {
+    let samples = vec![12_345; 6_144];
+    let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
+    let flac = Encoder::default()
+        .with_threads(2)
+        .encode_wav_bytes(&wav)
+        .unwrap();
+
+    let decoded = decode_with_ffmpeg(&flac, 16);
     assert_eq!(decoded, samples);
 }
 

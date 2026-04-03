@@ -13,7 +13,12 @@ pub(crate) struct FlacWriter<W: Seek + Write> {
 impl<W: Seek + Write> FlacWriter<W> {
     pub(crate) fn new(mut writer: W, stream_info: StreamInfo) -> io::Result<Self> {
         writer.write_all(b"fLaC")?;
-        writer.write_all(&[0x80, STREAMINFO_LENGTH[0], STREAMINFO_LENGTH[1], STREAMINFO_LENGTH[2]])?;
+        writer.write_all(&[
+            0x80,
+            STREAMINFO_LENGTH[0],
+            STREAMINFO_LENGTH[1],
+            STREAMINFO_LENGTH[2],
+        ])?;
         let streaminfo_offset = writer.stream_position()?;
         writer.write_all(&stream_info.to_bytes())?;
 
