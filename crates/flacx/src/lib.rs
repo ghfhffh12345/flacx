@@ -1,12 +1,10 @@
-//! High-performance WAV-to-FLAC encoding for Rust.
+//! High-performance WAV/FLAC conversion for Rust.
 //!
-//! `flacx` exposes a small encoder façade over a staged encode pipeline:
-//! input loading, encode planning, frame modelling, stream writing, and
-//! optional progress reporting.
+//! `flacx` exposes small encode/decode façades over staged audio pipelines.
 //!
 //! Default builds exclude progress-specific API surface.
 //!
-//! # Quick start
+//! # Encode
 //!
 //! ```no_run
 //! use flacx::{Encoder, EncoderConfig, level::Level};
@@ -20,21 +18,36 @@
 //!     .encode_file("input.wav", "output.flac")
 //!     .unwrap();
 //! ```
+//!
+//! # Decode
+//!
+//! ```no_run
+//! use flacx::Decoder;
+//!
+//! Decoder::new()
+//!     .decode_file("input.flac", "output.wav")
+//!     .unwrap();
+//! ```
 
 mod config;
 mod crc;
+mod decode;
 mod encoder;
 mod error;
 mod input;
 mod model;
 mod plan;
 mod progress;
+mod read;
+mod reconstruct;
 mod stream_info;
+mod wav_output;
 mod write;
 
 pub mod level;
 
 pub use config::{EncoderBuilder, EncoderConfig};
+pub use decode::{DecodeSummary, Decoder, decode_bytes, decode_file};
 pub use encoder::{EncodeSummary, Encoder, encode_bytes, encode_file};
 pub use error::{Error, Result};
 

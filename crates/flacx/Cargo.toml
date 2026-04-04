@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "High-performance WAV-to-FLAC encoding library in Rust."
+description = "High-performance WAV/FLAC conversion library in Rust."
 readme = "README.md"
-keywords = ["audio", "flac", "wav", "encoder"]
+keywords = ["audio", "flac", "wav", "codec"]
 categories = ["compression", "multimedia::audio"]
 
 [features]

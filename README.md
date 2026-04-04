@@ -1,9 +1,9 @@
 # flacx workspace
 
-High-performance WAV-to-FLAC encoding in Rust.
+High-performance WAV/FLAC conversion in Rust.
 
 The repository is now a Cargo workspace with a publishable **library crate**
-and a separate **CLI crate** built on the same encode pipeline.
+and a separate **CLI crate** built on the same encode/decode pipeline.
 
 ## Workspace layout
 
@@ -41,6 +41,16 @@ Encoder::new(config)
     .unwrap();
 ```
 
+And decode FLAC back to WAV:
+
+```rust
+use flacx::Decoder;
+
+Decoder::new()
+    .decode_file("input.flac", "output.wav")
+    .unwrap();
+```
+
 See [`crates/flacx/README.md`](crates/flacx/README.md) for the crate-focused
 usage guide.
 
@@ -50,14 +60,17 @@ Run the workspace CLI crate:
 
 ```bash
 cargo run -p flacx-cli -- encode input.wav output.flac --level 8 --threads 4
+cargo run -p flacx-cli -- decode input.flac output.wav
 ```
 
 Supported CLI shape:
 
 - `flacx encode <input> <output>`
-- `--level`
-- `--threads`
-- `--block-size`
+- `flacx decode <input> <output>`
+- encode-only flags:
+  - `--level`
+  - `--threads`
+  - `--block-size`
 
 See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for CLI usage
 details.
@@ -73,9 +86,9 @@ cargo run -p flacx --release --example benchmark
 
 ## Performance note
 
-The library and CLI still use the same tuned encode engine. The `test-wavs/`
-benchmark contract remains the regression baseline for throughput and encoded
-size.
+The library and CLI still use the same tuned encode engine, and now add a
+matching narrow decode path. The `test-wavs/` benchmark contract remains the
+regression baseline for throughput and encoded size on the encode side.
 
 ## Releases
 

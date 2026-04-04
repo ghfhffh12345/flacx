@@ -1,6 +1,6 @@
 //! Command-line support utilities for the `flacx-cli` crate.
 //!
-//! `flacx-cli` provides the command-line interface for WAV-to-FLAC encoding in
+//! `flacx-cli` provides the command-line interface for WAV/FLAC conversion in
 //! this workspace. It stays separate from the publishable `flacx` library
 //! crate while reusing the same encode pipeline and workspace version.
 //!
@@ -11,9 +11,11 @@
 //! # Command shape
 //!
 //! - `flacx encode <input> <output>`
-//! - `--level`
-//! - `--threads`
-//! - `--block-size`
+//! - `flacx decode <input> <output>`
+//! - encode-only flags:
+//!   - `--level`
+//!   - `--threads`
+//!   - `--block-size`
 
 use std::{
     io::Write,
@@ -21,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use flacx::{EncodeProgress, Encoder, EncoderConfig, Result};
+use flacx::{DecodeSummary, Decoder, EncodeProgress, Encoder, EncoderConfig, Result};
 
 const PROGRESS_BAR_WIDTH: usize = 24;
 const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
@@ -31,6 +33,12 @@ pub struct EncodeCommand {
     pub input: PathBuf,
     pub output: PathBuf,
     pub config: EncoderConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeCommand {
+    pub input: PathBuf,
+    pub output: PathBuf,
 }
 
 pub fn encode_command(
@@ -58,6 +66,10 @@ pub fn encode_command(
             Err(error)
         }
     }
+}
+
+pub fn decode_command(command: &DecodeCommand) -> Result<DecodeSummary> {
+    Decoder::new().decode_file(&command.input, &command.output)
 }
 
 struct ProgressRenderer<W: Write> {

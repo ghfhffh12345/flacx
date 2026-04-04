@@ -151,3 +151,23 @@ pub fn decode_with_ffmpeg(flac_bytes: &[u8], bits_per_sample: u16) -> Vec<i32> {
         _ => unreachable!(),
     }
 }
+
+pub fn corrupt_magic(flac_bytes: &[u8]) -> Vec<u8> {
+    let mut bytes = flac_bytes.to_vec();
+    if bytes.len() >= 4 {
+        bytes[..4].copy_from_slice(b"bad!");
+    }
+    bytes
+}
+
+pub fn truncate_bytes(bytes: &[u8], len: usize) -> Vec<u8> {
+    bytes[..bytes.len().min(len)].to_vec()
+}
+
+pub fn corrupt_last_frame_crc(flac_bytes: &[u8]) -> Vec<u8> {
+    let mut bytes = flac_bytes.to_vec();
+    if let Some(last) = bytes.last_mut() {
+        *last ^= 0x01;
+    }
+    bytes
+}
