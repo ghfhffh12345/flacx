@@ -12,11 +12,13 @@ use clap::{Args, Parser, Subcommand};
 use flacx::{EncoderConfig, level::Level};
 use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 
+const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Parser)]
 #[command(
     name = "flacx",
     about = "WAV/FLAC conversion using the flacx library",
-    version,
+    version = CLI_VERSION,
     propagate_version = true
 )]
 struct Cli {
