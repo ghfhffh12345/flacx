@@ -1,4 +1,4 @@
-//! Command-line WAV-to-FLAC encoding built on the `flacx` workspace library.
+//! Command-line WAV/FLAC conversion built on the `flacx` workspace library.
 //!
 //! This crate stays separate from the publishable library package while
 //! reusing the same encode pipeline and workspace version.
@@ -10,12 +10,12 @@ use std::{
 
 use clap::{Args, Parser, Subcommand};
 use flacx::{EncoderConfig, level::Level};
-use flacx_cli::{EncodeCommand, encode_command};
+use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "flacx",
-    about = "WAV-to-FLAC encoding using the flacx library",
+    about = "WAV/FLAC conversion using the flacx library",
     version,
     propagate_version = true
 )]
@@ -28,6 +28,8 @@ struct Cli {
 enum Commands {
     /// Encode a supported WAV file to FLAC.
     Encode(EncodeArgs),
+    /// Decode a supported FLAC file to WAV.
+    Decode(DecodeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -47,6 +49,14 @@ struct EncodeArgs {
     block_size: Option<u16>,
 }
 
+#[derive(Debug, Args)]
+struct DecodeArgs {
+    /// Input FLAC path.
+    input: std::path::PathBuf,
+    /// Output WAV path.
+    output: std::path::PathBuf,
+}
+
 fn main() -> ExitCode {
     if let Err(error) = run() {
         let _ = writeln!(io::stderr(), "{error}");
@@ -59,6 +69,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Commands::Encode(args) => encode(args)?,
+        Commands::Decode(args) => decode(args)?,
     }
     Ok(())
 }
@@ -81,5 +92,13 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         config,
     };
     encode_command(&command, interactive, &mut stderr)?;
+    Ok(())
+}
+
+fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    decode_command(&DecodeCommand {
+        input: args.input,
+        output: args.output,
+    })?;
     Ok(())
 }

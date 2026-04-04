@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Command-line WAV-to-FLAC encoder powered by the flacx library."
+description = "Command-line WAV/FLAC converter powered by the flacx library."
 publish = false
 
 [dependencies]

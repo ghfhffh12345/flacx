@@ -86,6 +86,27 @@ impl StreamInfo {
     }
 
     #[inline]
+    pub fn from_bytes(bytes: [u8; 34]) -> Self {
+        let mut packed_bytes = [0u8; 8];
+        packed_bytes.copy_from_slice(&bytes[10..18]);
+        let packed = u64::from_be_bytes(packed_bytes);
+
+        Self {
+            min_block_size: u16::from_be_bytes([bytes[0], bytes[1]]),
+            max_block_size: u16::from_be_bytes([bytes[2], bytes[3]]),
+            min_frame_size: u32::from_be_bytes([0, bytes[4], bytes[5], bytes[6]]),
+            max_frame_size: u32::from_be_bytes([0, bytes[7], bytes[8], bytes[9]]),
+            sample_rate: ((packed >> 44) & 0x000f_ffff) as u32,
+            channels: (((packed >> 41) & 0x7) as u8) + 1,
+            bits_per_sample: (((packed >> 36) & 0x1f) as u8) + 1,
+            total_samples: packed & ((1u64 << 36) - 1),
+            md5: bytes[18..34]
+                .try_into()
+                .expect("fixed STREAMINFO md5 slice"),
+        }
+    }
+
+    #[inline]
     const fn u24_be_bytes(value: u32) -> [u8; 3] {
         let [_, b1, b2, b3] = value.to_be_bytes();
         [b1, b2, b3]
@@ -164,6 +185,7 @@ mod tests {
                 case.md5,
             );
             assert_streaminfo_layout(&streaminfo, case);
+            assert_eq!(StreamInfo::from_bytes(streaminfo.to_bytes()), streaminfo);
         }
     }
 

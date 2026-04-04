@@ -1,9 +1,10 @@
 # flacx
 
-High-performance WAV-to-FLAC encoding for Rust.
+High-performance WAV/FLAC conversion for Rust.
 
 `flacx` is the publishable library crate in the workspace. It provides the
-shared encode pipeline used by both Rust callers and the sibling CLI crate.
+shared encode/decode pipeline used by both Rust callers and the sibling CLI
+crate.
 
 ## Add to your project
 
@@ -26,12 +27,23 @@ Encoder::new(config)
     .unwrap();
 ```
 
+```rust
+use flacx::Decoder;
+
+Decoder::new()
+    .decode_file("input.flac", "output.wav")
+    .unwrap();
+```
+
 ## Primary API surface
 
 - `EncoderConfig`
 - `Encoder`
+- `Decoder`
 - `encode_file`
 - `encode_bytes`
+- `decode_file`
+- `decode_bytes`
 
 ## Optional progress feature
 
@@ -51,16 +63,17 @@ When enabled, the additional progress-specific API surface includes:
 
 ## Current scope
 
-- WAV-to-FLAC encoding only
+- WAV-to-FLAC encoding
+- FLAC-to-WAV decoding
 - seekable input/output API
-- current supported WAV subset of the encoder
+- current supported narrow encode/decode subset
 
 ## Out of scope
 
-- decoding
 - metadata editing
 - non-seekable output
-- broader WAV support beyond the current engine envelope
+- broader transcoding beyond WAV <-> FLAC
+- broader format support beyond the current engine envelope
 
 ## Workspace note
 

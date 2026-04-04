@@ -1,7 +1,0 @@
-# name,channels,bits_per_sample,sample_rate,duration_seconds,pattern
-music_like,2,16,44100,1.5,music
-speech_like,1,16,16000,1.5,speech
-transient_rich,2,16,48000,1.0,impulse
-constant_bed,1,16,44100,1.0,constant
-ramp_24_mono,1,24,96000,0.75,ramp
-noise_24_stereo,2,24,48000,1.0,noise
