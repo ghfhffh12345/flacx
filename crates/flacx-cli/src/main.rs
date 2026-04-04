@@ -9,7 +9,7 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
-use flacx::{EncodeOptions, level::Level};
+use flacx::{EncoderConfig, level::Level};
 use flacx_cli::{EncodeCommand, encode_command};
 
 #[derive(Debug, Parser)]
@@ -65,12 +65,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let level = Level::try_from(args.level).map_err(|_| "invalid level")?;
-    let mut options = EncodeOptions::default().with_level(level);
+    let mut config = EncoderConfig::default().with_level(level);
     if let Some(threads) = args.threads {
-        options = options.with_threads(threads);
+        config = config.with_threads(threads);
     }
     if let Some(block_size) = args.block_size {
-        options = options.with_block_size(block_size);
+        config = config.with_block_size(block_size);
     }
 
     let interactive = io::stderr().is_terminal();
@@ -78,7 +78,7 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let command = EncodeCommand {
         input: args.input,
         output: args.output,
-        options,
+        config,
     };
     encode_command(&command, interactive, &mut stderr)?;
     Ok(())

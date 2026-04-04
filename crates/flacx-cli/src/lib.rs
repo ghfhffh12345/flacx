@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use flacx::{EncodeOptions, EncodeProgress, Result};
+use flacx::{EncodeProgress, Encoder, EncoderConfig, Result};
 
 const PROGRESS_BAR_WIDTH: usize = 24;
 const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
@@ -30,7 +30,7 @@ const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
 pub struct EncodeCommand {
     pub input: PathBuf,
     pub output: PathBuf,
-    pub options: EncodeOptions,
+    pub config: EncoderConfig,
 }
 
 pub fn encode_command(
@@ -39,7 +39,7 @@ pub fn encode_command(
     stderr: &mut impl Write,
 ) -> Result<()> {
     let mut progress = ProgressRenderer::new(stderr, interactive);
-    let result = flacx::FlacEncoder::new(command.options).encode_file_with_progress(
+    let result = Encoder::new(command.config).encode_file_with_progress(
         &command.input,
         &command.output,
         |update| {
