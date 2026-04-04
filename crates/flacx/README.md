@@ -15,21 +15,21 @@ flacx = "0.1.0"
 ## Quick start
 
 ```rust
-use flacx::{EncodeOptions, FlacEncoder, level::Level};
+use flacx::{Encoder, EncoderConfig, level::Level};
 
-let options = EncodeOptions::default()
+let config = EncoderConfig::default()
     .with_level(Level::Level8)
     .with_threads(4);
 
-FlacEncoder::new(options)
+Encoder::new(config)
     .encode_file("input.wav", "output.flac")
     .unwrap();
 ```
 
 ## Primary API surface
 
-- `EncodeOptions`
-- `FlacEncoder`
+- `EncoderConfig`
+- `Encoder`
 - `encode_file`
 - `encode_bytes`
 
@@ -46,8 +46,8 @@ flacx = { version = "0.1.0", features = ["progress"] }
 When enabled, the additional progress-specific API surface includes:
 
 - `EncodeProgress`
-- `FlacEncoder::encode_with_progress`
-- `FlacEncoder::encode_file_with_progress`
+- `Encoder::encode_with_progress`
+- `Encoder::encode_file_with_progress`
 
 ## Current scope
 
@@ -69,7 +69,7 @@ into the publishable library package.
 
 ## Progress note
 
-`FlacEncoder` can optionally report real encode progress while keeping the
+`Encoder` can optionally report real encode progress while keeping the
 existing fast encode path intact. The sibling CLI crate explicitly enables this
 feature and uses that signal to render a TTY-only progress bar by default.
 

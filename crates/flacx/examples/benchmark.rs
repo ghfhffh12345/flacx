@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use flacx::{EncodeOptions, FlacEncoder, level::Level};
+use flacx::{Encoder, EncoderConfig, level::Level};
 
 const DEFAULT_REPEATS: usize = 3;
 const PINNED_CORES: usize = 8;
@@ -231,13 +231,13 @@ fn encode_flacx(
     })
 }
 
-fn benchmark_encoder() -> Result<FlacEncoder, Box<dyn std::error::Error>> {
-    let mut options = EncodeOptions::default();
+fn benchmark_encoder() -> Result<Encoder, Box<dyn std::error::Error>> {
+    let mut config = EncoderConfig::default();
     if let Some(level) = env::var("FLACX_LEVEL").ok() {
         let level = level.parse::<u8>()?;
-        options = options.with_level(Level::try_from(level).map_err(|_| "invalid FLACX_LEVEL")?);
+        config = config.with_level(Level::try_from(level).map_err(|_| "invalid FLACX_LEVEL")?);
     }
-    Ok(FlacEncoder::new(options))
+    Ok(Encoder::new(config))
 }
 
 fn encode_baseline_flac(

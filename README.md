@@ -30,13 +30,13 @@ flacx = "0.1.0"
 Then encode WAV to FLAC from Rust:
 
 ```rust
-use flacx::{EncodeOptions, FlacEncoder, level::Level};
+use flacx::{Encoder, EncoderConfig, level::Level};
 
-let options = EncodeOptions::default()
+let config = EncoderConfig::default()
     .with_level(Level::Level8)
     .with_threads(4);
 
-FlacEncoder::new(options)
+Encoder::new(config)
     .encode_file("input.wav", "output.flac")
     .unwrap();
 ```

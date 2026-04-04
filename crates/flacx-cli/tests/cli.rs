@@ -1,6 +1,6 @@
 use std::{fs, process::Command};
 
-use flacx::{EncodeOptions, FlacEncoder, level::Level};
+use flacx::{Encoder, EncoderConfig, level::Level};
 use flacx_cli::{EncodeCommand, encode_command};
 
 #[path = "../../flacx/tests/support/mod.rs"]
@@ -56,8 +56,8 @@ fn encode_command_matches_library_output() {
     );
 
     let cli_bytes = fs::read(&output_path).unwrap();
-    let library_bytes = FlacEncoder::new(
-        EncodeOptions::default()
+    let library_bytes = Encoder::new(
+        EncoderConfig::default()
             .with_level(Level::Level0)
             .with_threads(1)
             .with_block_size(576),
@@ -81,7 +81,7 @@ fn encode_command_renders_progress_bar_when_interactive() {
     let command = EncodeCommand {
         input: input_path.clone(),
         output: output_path.clone(),
-        options: EncodeOptions::default()
+        config: EncoderConfig::default()
             .with_level(Level::Level0)
             .with_threads(1)
             .with_block_size(576),
