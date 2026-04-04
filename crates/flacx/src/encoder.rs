@@ -17,7 +17,7 @@ use crate::{
     input::{WavData, read_wav},
     model::encode_frame,
     plan::{EncodePlan, summary_from_stream_info},
-    progress::{NoProgress, ProgressSink},
+    progress::{NoProgress, ProgressSink, ProgressSnapshot},
     write::{EncodedFrame, FlacWriter},
 };
 
@@ -107,7 +107,7 @@ impl Encoder {
     where
         R: Read + Seek,
         W: Write + Seek,
-        F: FnMut(crate::progress::EncodeProgress) -> Result<()>,
+        F: FnMut(ProgressSnapshot) -> Result<()>,
     {
         let wav = read_wav(input)?;
         let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
@@ -132,7 +132,7 @@ impl Encoder {
     where
         P: AsRef<Path>,
         Q: AsRef<Path>,
-        F: FnMut(crate::progress::EncodeProgress) -> Result<()>,
+        F: FnMut(ProgressSnapshot) -> Result<()>,
     {
         self.encode_with_progress(
             File::open(input_path)?,
@@ -311,12 +311,12 @@ where
 {
     writer.write_frame(&frame.bytes)?;
     let processed_samples = processed_samples + u64::from(frame.sample_count);
-    progress.on_frame(
+    progress.on_frame(ProgressSnapshot {
         processed_samples,
         total_samples,
         completed_frames,
         total_frames,
-    )?;
+    })?;
     Ok(processed_samples)
 }
 

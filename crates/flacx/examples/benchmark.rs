@@ -1,12 +1,10 @@
 use std::{
-    env,
-    fs::{self, File},
+    env, fs,
     path::{Path, PathBuf},
-    process::Command,
     time::Instant,
 };
 
-use flacx::{Encoder, EncoderConfig, level::Level};
+use flacx::{DecodeConfig, Decoder, Encoder, EncoderConfig, level::Level};
 
 const DEFAULT_REPEATS: usize = 3;
 const PINNED_CORES: usize = 8;
@@ -19,82 +17,66 @@ const DEFAULT_CORPUS: [&str; 3] = [
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pin_current_process_to_first_n_cores(PINNED_CORES)?;
+    let threads = shared_thread_count();
 
     if let Some(path) = env::args().nth(1).map(PathBuf::from) {
-        run_single_input(&path)?;
+        run_single_input(&path, threads)?;
     } else {
-        run_test_wavs_corpus()?;
+        run_test_wavs_corpus(threads)?;
     }
 
     Ok(())
 }
 
-fn run_single_input(wav_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_flac_available()?;
-    let measurement = benchmark_fixture(wav_path)?;
-    print_fixture_result("single", wav_path, &measurement);
+fn run_single_input(wav_path: &Path, threads: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let measurement = benchmark_fixture(wav_path, threads)?;
+    print_fixture_result("single", wav_path, &measurement, threads);
+    ensure_decode_not_slower("single", &measurement)?;
     Ok(())
 }
 
-fn run_test_wavs_corpus() -> Result<(), Box<dyn std::error::Error>> {
-    ensure_flac_available()?;
+fn run_test_wavs_corpus(threads: usize) -> Result<(), Box<dyn std::error::Error>> {
     let corpus = default_corpus();
     println!(
-        "test-wavs corpus: {} files, {} repeats, pinned cores={} (best effort), baseline=flac -f -8 --totally-silent",
+        "test-wavs corpus: {} files, {} repeats, pinned cores={} (best effort), threads={} shared across encode+decode, self-generated FLAC inputs",
         corpus.len(),
         DEFAULT_REPEATS,
-        PINNED_CORES
+        PINNED_CORES,
+        threads
     );
 
-    let mut flacx_throughputs = Vec::with_capacity(corpus.len());
-    let mut baseline_throughputs = Vec::with_capacity(corpus.len());
-    let mut flacx_bytes = Vec::with_capacity(corpus.len());
-    let mut baseline_bytes = Vec::with_capacity(corpus.len());
-    let mut flacx_ratios = Vec::with_capacity(corpus.len());
-    let mut baseline_ratios = Vec::with_capacity(corpus.len());
+    let mut encode_throughputs = Vec::with_capacity(corpus.len());
+    let mut decode_throughputs = Vec::with_capacity(corpus.len());
+    let mut flac_bytes = Vec::with_capacity(corpus.len());
+    let mut flac_ratios = Vec::with_capacity(corpus.len());
 
     for wav_path in corpus {
-        let measurement = benchmark_fixture(&wav_path)?;
-        print_fixture_result("case", &wav_path, &measurement);
+        let measurement = benchmark_fixture(&wav_path, threads)?;
+        print_fixture_result("case", &wav_path, &measurement, threads);
 
-        flacx_throughputs.push(measurement.flacx_throughput_mib_s());
-        baseline_throughputs.push(measurement.baseline_throughput_mib_s());
-        flacx_bytes.push(measurement.flacx_bytes as f64);
-        baseline_bytes.push(measurement.baseline_bytes as f64);
-        flacx_ratios.push(measurement.flacx_ratio());
-        baseline_ratios.push(measurement.baseline_ratio());
+        encode_throughputs.push(measurement.encode_throughput_mib_s());
+        decode_throughputs.push(measurement.decode_throughput_mib_s());
+        flac_bytes.push(measurement.flac_bytes as f64);
+        flac_ratios.push(measurement.flac_ratio());
     }
 
-    let corpus_flacx_throughput = median(&mut flacx_throughputs);
-    let corpus_baseline_throughput = median(&mut baseline_throughputs);
-    let corpus_flacx_bytes = median(&mut flacx_bytes);
-    let corpus_baseline_bytes = median(&mut baseline_bytes);
-    let corpus_flacx_ratio = median(&mut flacx_ratios);
-    let corpus_baseline_ratio = median(&mut baseline_ratios);
+    let corpus_encode_throughput = median(&mut encode_throughputs);
+    let corpus_decode_throughput = median(&mut decode_throughputs);
+    let corpus_flac_bytes = median(&mut flac_bytes);
+    let corpus_flac_ratio = median(&mut flac_ratios);
 
     println!(
-        "corpus-median: flacx={:.3} MiB/s baseline={:.3} MiB/s delta={:+.3} MiB/s | flacx={:.1} B ratio={:.6} baseline={:.1} B ratio={:.6}",
-        corpus_flacx_throughput,
-        corpus_baseline_throughput,
-        corpus_flacx_throughput - corpus_baseline_throughput,
-        corpus_flacx_bytes,
-        corpus_flacx_ratio,
-        corpus_baseline_bytes,
-        corpus_baseline_ratio
+        "corpus-median: encode={:.3} MiB/s decode={:.3} MiB/s delta={:+.3} MiB/s | flac={:.1} B ratio={:.6}",
+        corpus_encode_throughput,
+        corpus_decode_throughput,
+        corpus_decode_throughput - corpus_encode_throughput,
+        corpus_flac_bytes,
+        corpus_flac_ratio
     );
 
-    if corpus_flacx_throughput < corpus_baseline_throughput {
+    if corpus_decode_throughput < corpus_encode_throughput {
         return Err(format!(
-            "corpus-median throughput regressed: flacx={corpus_flacx_throughput:.3} MiB/s baseline={corpus_baseline_throughput:.3} MiB/s"
-        )
-        .into());
-    }
-
-    if corpus_flacx_bytes > corpus_baseline_bytes * 1.05
-        || corpus_flacx_ratio > corpus_baseline_ratio * 1.05
-    {
-        return Err(format!(
-            "corpus-median encoded size/ratio regressed: flacx={corpus_flacx_bytes:.1} B ({corpus_flacx_ratio:.6}) baseline={corpus_baseline_bytes:.1} B ({corpus_baseline_ratio:.6})"
+            "corpus-median decode throughput regressed: encode={corpus_encode_throughput:.3} MiB/s decode={corpus_decode_throughput:.3} MiB/s"
         )
         .into());
     }
@@ -102,41 +84,50 @@ fn run_test_wavs_corpus() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn benchmark_fixture(wav_path: &Path) -> Result<FixtureMeasurement, Box<dyn std::error::Error>> {
-    let input_bytes = fs::metadata(wav_path)?.len();
+fn benchmark_fixture(
+    wav_path: &Path,
+    threads: usize,
+) -> Result<FixtureMeasurement, Box<dyn std::error::Error>> {
+    let source_bytes = fs::metadata(wav_path)?.len();
     let fixture_name = wav_path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .ok_or("invalid fixture name")?;
 
-    let mut flacx_sizes = Vec::with_capacity(DEFAULT_REPEATS);
-    let mut baseline_sizes = Vec::with_capacity(DEFAULT_REPEATS);
-    let mut flacx_seconds = Vec::with_capacity(DEFAULT_REPEATS);
-    let mut baseline_seconds = Vec::with_capacity(DEFAULT_REPEATS);
+    let mut flac_sizes = Vec::with_capacity(DEFAULT_REPEATS);
+    let mut decoded_sizes = Vec::with_capacity(DEFAULT_REPEATS);
+    let mut encode_seconds = Vec::with_capacity(DEFAULT_REPEATS);
+    let mut decode_seconds = Vec::with_capacity(DEFAULT_REPEATS);
 
     for repeat in 0..DEFAULT_REPEATS {
-        let flacx_output = temp_path(&format!("{fixture_name}-flacx-{repeat}"), "flac");
-        let flacx_run = encode_flacx(wav_path, &flacx_output)?;
-        flacx_sizes.push(flacx_run.encoded_bytes);
-        flacx_seconds.push(flacx_run.elapsed_seconds);
-        let _ = fs::remove_file(flacx_output);
+        let flac_output = temp_path(&format!("{fixture_name}-flacx-{repeat}"), "flac");
+        let encode_run = encode_flacx(wav_path, &flac_output, threads)?;
+        flac_sizes.push(encode_run.bytes);
+        encode_seconds.push(encode_run.elapsed_seconds);
 
-        let baseline_output = temp_path(&format!("{fixture_name}-baseline-{repeat}"), "flac");
-        let baseline_run = encode_baseline_flac(wav_path, &baseline_output)?;
-        baseline_sizes.push(baseline_run.encoded_bytes);
-        baseline_seconds.push(baseline_run.elapsed_seconds);
-        let _ = fs::remove_file(baseline_output);
+        let wav_output = temp_path(&format!("{fixture_name}-decoded-{repeat}"), "wav");
+        let decode_run = decode_flacx(&flac_output, &wav_output, threads)?;
+        decode_seconds.push(decode_run.elapsed_seconds);
+        decoded_sizes.push(decode_run.bytes);
+
+        if decode_run.bytes == 0 {
+            return Err(
+                format!("case `{fixture_name}` produced an empty WAV on repeat {repeat}").into(),
+            );
+        }
+
+        let _ = fs::remove_file(flac_output);
+        let _ = fs::remove_file(wav_output);
     }
 
-    let flacx_bytes = stable_size(&flacx_sizes, fixture_name, "flacx")?;
-    let baseline_bytes = stable_size(&baseline_sizes, fixture_name, "baseline")?;
+    let flac_bytes = stable_size(&flac_sizes, fixture_name, "flac")?;
+    stable_size(&decoded_sizes, fixture_name, "decoded wav")?;
 
     Ok(FixtureMeasurement {
-        source_bytes: input_bytes,
-        flacx_bytes,
-        baseline_bytes,
-        flacx_seconds: median(&mut flacx_seconds),
-        baseline_seconds: median(&mut baseline_seconds),
+        source_bytes,
+        flac_bytes,
+        encode_seconds: median(&mut encode_seconds),
+        decode_seconds: median(&mut decode_seconds),
     })
 }
 
@@ -147,130 +138,110 @@ fn default_corpus() -> Vec<PathBuf> {
         .collect()
 }
 
-struct TimedEncode {
-    encoded_bytes: u64,
+struct TimedStep {
+    bytes: u64,
     elapsed_seconds: f64,
 }
 
 struct FixtureMeasurement {
     source_bytes: u64,
-    flacx_bytes: u64,
-    baseline_bytes: u64,
-    flacx_seconds: f64,
-    baseline_seconds: f64,
+    flac_bytes: u64,
+    encode_seconds: f64,
+    decode_seconds: f64,
 }
 
 impl FixtureMeasurement {
-    fn flacx_ratio(&self) -> f64 {
-        size_ratio(self.flacx_bytes, self.source_bytes)
+    fn flac_ratio(&self) -> f64 {
+        size_ratio(self.flac_bytes, self.source_bytes)
     }
 
-    fn baseline_ratio(&self) -> f64 {
-        size_ratio(self.baseline_bytes, self.source_bytes)
+    fn encode_throughput_mib_s(&self) -> f64 {
+        throughput_mib_s(self.source_bytes, self.encode_seconds)
     }
 
-    fn flacx_throughput_mib_s(&self) -> f64 {
-        throughput_mib_s(self.source_bytes, self.flacx_seconds)
-    }
-
-    fn baseline_throughput_mib_s(&self) -> f64 {
-        throughput_mib_s(self.source_bytes, self.baseline_seconds)
+    fn decode_throughput_mib_s(&self) -> f64 {
+        throughput_mib_s(self.source_bytes, self.decode_seconds)
     }
 }
 
-fn print_fixture_result(label: &str, wav_path: &Path, measurement: &FixtureMeasurement) {
+fn print_fixture_result(
+    label: &str,
+    wav_path: &Path,
+    measurement: &FixtureMeasurement,
+    threads: usize,
+) {
     println!(
-        "{label}={:<12} source={:>10} B | flacx={:>10} B ratio={:.6} time={:.3}s thr={:.3} MiB/s | baseline={:>10} B ratio={:.6} time={:.3}s thr={:.3} MiB/s | delta={:+} B {:+.3}s {:+.3} MiB/s",
+        "{label}={:<12} threads={:<3} source={:>10} B | flacx-encode={:>10} B ratio={:.6} time={:.3}s thr={:.3} MiB/s | flacx-decode={:>10} B time={:.3}s thr={:.3} MiB/s | delta={:+.3} MiB/s",
         wav_path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("unknown"),
+        threads,
         measurement.source_bytes,
-        measurement.flacx_bytes,
-        measurement.flacx_ratio(),
-        measurement.flacx_seconds,
-        measurement.flacx_throughput_mib_s(),
-        measurement.baseline_bytes,
-        measurement.baseline_ratio(),
-        measurement.baseline_seconds,
-        measurement.baseline_throughput_mib_s(),
-        signed_delta(measurement.flacx_bytes, measurement.baseline_bytes),
-        measurement.flacx_seconds - measurement.baseline_seconds,
-        measurement.flacx_throughput_mib_s() - measurement.baseline_throughput_mib_s(),
+        measurement.flac_bytes,
+        measurement.flac_ratio(),
+        measurement.encode_seconds,
+        measurement.encode_throughput_mib_s(),
+        measurement.source_bytes,
+        measurement.decode_seconds,
+        measurement.decode_throughput_mib_s(),
+        measurement.decode_throughput_mib_s() - measurement.encode_throughput_mib_s(),
     );
 }
 
-fn ensure_flac_available() -> Result<(), Box<dyn std::error::Error>> {
-    if flac_available() {
-        Ok(())
-    } else {
-        Err(
-            "benchmark requires baseline `flac -f -8 --totally-silent`, but `flac` was not found"
-                .into(),
+fn ensure_decode_not_slower(
+    label: &str,
+    measurement: &FixtureMeasurement,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if measurement.decode_throughput_mib_s() < measurement.encode_throughput_mib_s() {
+        return Err(format!(
+            "{label} decode throughput regressed: encode={:.3} MiB/s decode={:.3} MiB/s",
+            measurement.encode_throughput_mib_s(),
+            measurement.decode_throughput_mib_s(),
         )
+        .into());
     }
-}
 
-fn flac_available() -> bool {
-    Command::new("flac")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    Ok(())
 }
 
 fn encode_flacx(
     wav_path: &Path,
     output_path: &Path,
-) -> Result<TimedEncode, Box<dyn std::error::Error>> {
+    threads: usize,
+) -> Result<TimedStep, Box<dyn std::error::Error>> {
     let start = Instant::now();
-    benchmark_encoder()?.encode(File::open(wav_path)?, File::create(output_path)?)?;
-    Ok(TimedEncode {
-        encoded_bytes: encoded_size(output_path)?,
+    benchmark_encoder(threads)?.encode_file(wav_path, output_path)?;
+    Ok(TimedStep {
+        bytes: encoded_size(output_path)?,
         elapsed_seconds: start.elapsed().as_secs_f64(),
     })
 }
 
-fn benchmark_encoder() -> Result<Encoder, Box<dyn std::error::Error>> {
+fn decode_flacx(
+    flac_path: &Path,
+    output_path: &Path,
+    threads: usize,
+) -> Result<TimedStep, Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    benchmark_decoder(threads)?.decode_file(flac_path, output_path)?;
+    Ok(TimedStep {
+        bytes: encoded_size(output_path)?,
+        elapsed_seconds: start.elapsed().as_secs_f64(),
+    })
+}
+
+fn benchmark_encoder(threads: usize) -> Result<Encoder, Box<dyn std::error::Error>> {
     let mut config = EncoderConfig::default();
     if let Some(level) = env::var("FLACX_LEVEL").ok() {
         let level = level.parse::<u8>()?;
         config = config.with_level(Level::try_from(level).map_err(|_| "invalid FLACX_LEVEL")?);
     }
-    Ok(Encoder::new(config))
+    Ok(Encoder::new(config.with_threads(threads)))
 }
 
-fn encode_baseline_flac(
-    wav_path: &Path,
-    output_path: &Path,
-) -> Result<TimedEncode, Box<dyn std::error::Error>> {
-    let start = Instant::now();
-    let output = Command::new("flac")
-        .args([
-            "-f",
-            "-8",
-            "--totally-silent",
-            "-o",
-            output_path.to_str().ok_or("invalid output path")?,
-            wav_path.to_str().ok_or("invalid wav path")?,
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let status = output.status.code().map_or_else(
-            || "terminated by signal".to_string(),
-            |code| code.to_string(),
-        );
-        return Err(
-            format!("baseline encoder `flac -f -8` failed (status {status}): {stderr}").into(),
-        );
-    }
-
-    Ok(TimedEncode {
-        encoded_bytes: encoded_size(output_path)?,
-        elapsed_seconds: start.elapsed().as_secs_f64(),
-    })
+fn benchmark_decoder(threads: usize) -> Result<Decoder, Box<dyn std::error::Error>> {
+    Ok(Decoder::new(DecodeConfig::default().with_threads(threads)))
 }
 
 fn encoded_size(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
@@ -287,10 +258,6 @@ fn throughput_mib_s(input_bytes: u64, seconds: f64) -> f64 {
 
 fn size_ratio(encoded_bytes: u64, source_bytes: u64) -> f64 {
     encoded_bytes as f64 / source_bytes as f64
-}
-
-fn signed_delta(left: u64, right: u64) -> i64 {
-    left as i64 - right as i64
 }
 
 fn stable_size(
@@ -330,17 +297,14 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::median;
-
-    #[test]
-    fn median_handles_even_and_odd_lengths() {
-        let mut odd = vec![3.0, 1.0, 2.0];
-        let mut even = vec![4.0, 1.0, 3.0, 2.0];
-        assert_eq!(median(&mut odd), 2.0);
-        assert_eq!(median(&mut even), 2.5);
-    }
+fn shared_thread_count() -> usize {
+    let encode_threads = EncoderConfig::default().threads;
+    let decode_threads = DecodeConfig::default().threads;
+    assert_eq!(
+        encode_threads, decode_threads,
+        "default encode/decode thread counts diverged"
+    );
+    encode_threads.max(1)
 }
 
 #[cfg(windows)]

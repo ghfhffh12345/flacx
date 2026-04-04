@@ -16,6 +16,8 @@
 //!   - `--level`
 //!   - `--threads`
 //!   - `--block-size`
+//! - decode-only flags:
+//!   - `--threads`
 
 use std::{
     io::Write,
@@ -23,7 +25,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use flacx::{DecodeSummary, Decoder, EncodeProgress, Encoder, EncoderConfig, Result};
+use flacx::{
+    DecodeConfig, DecodeSummary, Decoder, Encoder, EncoderConfig, ProgressSnapshot, Result,
+};
 
 const PROGRESS_BAR_WIDTH: usize = 24;
 const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
@@ -39,6 +43,7 @@ pub struct EncodeCommand {
 pub struct DecodeCommand {
     pub input: PathBuf,
     pub output: PathBuf,
+    pub config: DecodeConfig,
 }
 
 pub fn encode_command(
@@ -68,8 +73,31 @@ pub fn encode_command(
     }
 }
 
-pub fn decode_command(command: &DecodeCommand) -> Result<DecodeSummary> {
-    Decoder::new().decode_file(&command.input, &command.output)
+pub fn decode_command(
+    command: &DecodeCommand,
+    interactive: bool,
+    stderr: &mut impl Write,
+) -> Result<DecodeSummary> {
+    let mut progress = ProgressRenderer::new(stderr, interactive);
+    let result = Decoder::new(command.config).decode_file_with_progress(
+        &command.input,
+        &command.output,
+        |update| {
+            progress.observe(update)?;
+            Ok(())
+        },
+    );
+
+    match result {
+        Ok(summary) => {
+            progress.finish()?;
+            Ok(summary)
+        }
+        Err(error) => {
+            let _ = progress.end();
+            Err(error)
+        }
+    }
 }
 
 struct ProgressRenderer<W: Write> {
@@ -93,7 +121,7 @@ impl<W: Write> ProgressRenderer<W> {
         }
     }
 
-    fn observe(&mut self, progress: EncodeProgress) -> std::io::Result<()> {
+    fn observe(&mut self, progress: ProgressSnapshot) -> std::io::Result<()> {
         let elapsed = {
             let started_at = self.started_at.get_or_insert_with(Instant::now);
             started_at.elapsed()
@@ -103,7 +131,7 @@ impl<W: Write> ProgressRenderer<W> {
 
     fn observe_with_elapsed(
         &mut self,
-        progress: EncodeProgress,
+        progress: ProgressSnapshot,
         elapsed: Duration,
     ) -> std::io::Result<()> {
         if !self.interactive || progress.total_samples == 0 {
@@ -160,7 +188,7 @@ struct ProgressState {
 }
 
 impl ProgressState {
-    fn observe(&mut self, progress: EncodeProgress, elapsed: Duration) -> ProgressEstimate {
+    fn observe(&mut self, progress: ProgressSnapshot, elapsed: Duration) -> ProgressEstimate {
         let processed = progress.processed_samples.min(progress.total_samples);
         let advanced = match self.last_processed_samples {
             Some(previous) => processed > previous,
@@ -203,7 +231,7 @@ impl ProgressState {
     }
 }
 
-fn format_progress_line(progress: EncodeProgress, estimate: &ProgressEstimate) -> String {
+fn format_progress_line(progress: ProgressSnapshot, estimate: &ProgressEstimate) -> String {
     let processed = progress.processed_samples.min(progress.total_samples);
     let ratio = if progress.total_samples == 0 {
         1.0
@@ -270,13 +298,13 @@ mod tests {
     use std::time::Duration;
 
     use super::{ProgressEstimate, ProgressRenderer, ProgressState, format_progress_line};
-    use flacx::EncodeProgress;
+    use flacx::ProgressSnapshot;
 
     #[test]
     fn progress_renderer_is_silent_when_not_interactive() {
         let mut renderer = ProgressRenderer::new(Vec::new(), false);
         renderer
-            .observe(EncodeProgress {
+            .observe(ProgressSnapshot {
                 processed_samples: 50,
                 total_samples: 100,
                 completed_frames: 1,
@@ -293,7 +321,7 @@ mod tests {
         let mut renderer = ProgressRenderer::new(Vec::new(), true);
         renderer
             .observe_with_elapsed(
-                EncodeProgress {
+                ProgressSnapshot {
                     processed_samples: 50,
                     total_samples: 100,
                     completed_frames: 1,
@@ -304,7 +332,7 @@ mod tests {
             .unwrap();
         renderer
             .observe_with_elapsed(
-                EncodeProgress {
+                ProgressSnapshot {
                     processed_samples: 100,
                     total_samples: 100,
                     completed_frames: 2,
@@ -327,7 +355,7 @@ mod tests {
     #[test]
     fn progress_renderer_waits_for_two_advancing_updates_and_elapsed_time() {
         let mut state = ProgressState::default();
-        let progress = EncodeProgress {
+        let progress = ProgressSnapshot {
             processed_samples: 50,
             total_samples: 200,
             completed_frames: 1,
@@ -341,7 +369,7 @@ mod tests {
         assert_eq!(no_advance, ProgressEstimate::warming_up());
 
         let second_advance = state.observe(
-            EncodeProgress {
+            ProgressSnapshot {
                 processed_samples: 100,
                 total_samples: 200,
                 completed_frames: 2,
@@ -352,7 +380,7 @@ mod tests {
         assert_eq!(second_advance, ProgressEstimate::warming_up());
 
         let stabilized = state.observe(
-            EncodeProgress {
+            ProgressSnapshot {
                 processed_samples: 150,
                 total_samples: 200,
                 completed_frames: 3,
@@ -369,7 +397,7 @@ mod tests {
         let mut state = ProgressState::default();
 
         let initial = state.observe(
-            EncodeProgress {
+            ProgressSnapshot {
                 processed_samples: 0,
                 total_samples: 200,
                 completed_frames: 0,
@@ -380,7 +408,7 @@ mod tests {
         assert_eq!(initial, ProgressEstimate::warming_up());
 
         let first_advance = state.observe(
-            EncodeProgress {
+            ProgressSnapshot {
                 processed_samples: 50,
                 total_samples: 200,
                 completed_frames: 1,
@@ -391,7 +419,7 @@ mod tests {
         assert_eq!(first_advance, ProgressEstimate::warming_up());
 
         let second_advance = state.observe(
-            EncodeProgress {
+            ProgressSnapshot {
                 processed_samples: 100,
                 total_samples: 200,
                 completed_frames: 2,
@@ -402,7 +430,7 @@ mod tests {
         assert_eq!(second_advance, ProgressEstimate::warming_up());
 
         let stabilized = state.observe(
-            EncodeProgress {
+            ProgressSnapshot {
                 processed_samples: 150,
                 total_samples: 200,
                 completed_frames: 3,
@@ -418,7 +446,7 @@ mod tests {
         let mut renderer = ProgressRenderer::new(Vec::new(), true);
         renderer
             .observe_with_elapsed(
-                EncodeProgress {
+                ProgressSnapshot {
                     processed_samples: 10,
                     total_samples: 100,
                     completed_frames: 1,
@@ -429,7 +457,7 @@ mod tests {
             .unwrap();
         renderer
             .observe_with_elapsed(
-                EncodeProgress {
+                ProgressSnapshot {
                     processed_samples: 100,
                     total_samples: 100,
                     completed_frames: 10,
@@ -458,7 +486,7 @@ mod tests {
     #[test]
     fn progress_line_contains_bar_eta_and_rate() {
         let line = format_progress_line(
-            EncodeProgress {
+            ProgressSnapshot {
                 processed_samples: 50,
                 total_samples: 100,
                 completed_frames: 1,

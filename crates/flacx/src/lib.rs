@@ -24,7 +24,7 @@
 //! ```no_run
 //! use flacx::Decoder;
 //!
-//! Decoder::new()
+//! Decoder::default()
 //!     .decode_file("input.flac", "output.wav")
 //!     .unwrap();
 //! ```
@@ -46,13 +46,13 @@ mod write;
 
 pub mod level;
 
-pub use config::{EncoderBuilder, EncoderConfig};
+pub use config::{DecodeBuilder, DecodeConfig, EncoderBuilder, EncoderConfig};
 pub use decode::{DecodeSummary, Decoder, decode_bytes, decode_file};
 pub use encoder::{EncodeSummary, Encoder, encode_bytes, encode_file};
 pub use error::{Error, Result};
 
 #[cfg(feature = "progress")]
-pub use progress::EncodeProgress;
+pub use progress::{DecodeProgress, EncodeProgress, ProgressSnapshot};
 
 #[cfg(not(feature = "progress"))]
 #[doc = r#"```compile_fail
