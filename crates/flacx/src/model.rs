@@ -112,8 +112,8 @@ fn analyze_frame(
     let mut candidates = Vec::new();
     match channels {
         1 => {
-            let samples = extract_channel(interleaved_samples, channel_count, 0);
-            let subframe = choose_subframe(&samples, bits_per_sample, sample_rate, profile)?;
+            let subframe =
+                choose_subframe(interleaved_samples, bits_per_sample, sample_rate, profile)?;
             candidates.push(Candidate {
                 bits: subframe.bit_len(bits_per_sample),
                 assignment: ChannelAssignment::IndependentMono,
@@ -198,13 +198,6 @@ fn analyze_stereo_candidate(
         assignment,
         subframes,
     })
-}
-
-fn extract_channel(interleaved: &[i32], channels: usize, channel: usize) -> Vec<i32> {
-    interleaved
-        .chunks_exact(channels)
-        .map(|frame| frame[channel])
-        .collect()
 }
 
 fn extract_stereo_channels(interleaved: &[i32]) -> (Vec<i32>, Vec<i32>) {
@@ -409,7 +402,8 @@ fn choose_lpc_subframe(
     let lpc_coefficients = estimate_lpc_coefficients(samples, max_lpc_order)?;
     let mut best = None;
     let mut best_bits = current_best_bits;
-    for order in lpc_order_candidates(max_lpc_order) {
+    let (order_candidates, order_count) = lpc_order_candidates(max_lpc_order);
+    for &order in order_candidates[..order_count].iter() {
         let coefficients = &lpc_coefficients[usize::from(order - 1)];
         if lpc_subframe_lower_bound(order, 7, bits_per_sample, samples.len()) >= best_bits {
             continue;
@@ -441,18 +435,24 @@ fn choose_lpc_subframe(
     best.map(|(_, subframe)| subframe)
 }
 
-fn lpc_order_candidates(max_lpc_order: u8) -> Vec<u8> {
+fn lpc_order_candidates(max_lpc_order: u8) -> ([u8; 4], usize) {
     if max_lpc_order <= 4 {
-        return (1..=max_lpc_order).collect();
+        let mut candidates = [0; 4];
+        for order in 1..=max_lpc_order {
+            candidates[usize::from(order - 1)] = order;
+        }
+        return (candidates, usize::from(max_lpc_order));
     }
 
-    let mut candidates = Vec::with_capacity(6);
+    let mut candidates = [0; 4];
+    let mut count = 0usize;
     for order in [8, 12, max_lpc_order] {
-        if order <= max_lpc_order && !candidates.contains(&order) {
-            candidates.push(order);
+        if order <= max_lpc_order && !candidates[..count].contains(&order) {
+            candidates[count] = order;
+            count += 1;
         }
     }
-    candidates
+    (candidates, count)
 }
 
 fn lpc_precision_candidates() -> &'static [u8] {
@@ -521,14 +521,15 @@ fn choose_residual_encoding(
 ) -> Option<ResidualEncoding> {
     let block_size = residuals.len() + usize::from(predictor_order);
     let mut best: Option<(usize, ResidualEncoding)> = None;
-    for partition_order in
-        partition_order_candidates(block_size, predictor_order, max_partition_order)
-    {
+    let (partition_orders, partition_order_count) =
+        partition_order_candidates(block_size, predictor_order, max_partition_order);
+    for &partition_order in partition_orders[..partition_order_count].iter() {
         let partition_count = 1usize << partition_order;
         let partition_len = block_size >> partition_order;
         let first_partition_len = partition_len - usize::from(predictor_order);
 
-        for method in candidate_rice_methods(residuals) {
+        let (methods, method_count) = candidate_rice_methods(residuals);
+        for &method in methods[..method_count].iter() {
             let mut offset = 0usize;
             let mut partitions = Vec::with_capacity(partition_count);
             let mut valid = true;
@@ -570,7 +571,7 @@ fn partition_order_candidates(
     block_size: usize,
     predictor_order: u8,
     max_partition_order: u8,
-) -> Vec<u8> {
+) -> ([u8; 3], usize) {
     let predictor_order = usize::from(predictor_order);
     let capped_partition_order = max_partition_order.min(MAX_RICE_PARTITION_ORDER);
     let highest_valid = (0..=capped_partition_order).rev().find(|&partition_order| {
@@ -582,23 +583,25 @@ fn partition_order_candidates(
         partition_len > predictor_order
     });
 
-    let mut candidates = Vec::with_capacity(3);
+    let mut candidates = [0; 3];
+    let mut count = 0usize;
     if let Some(highest_valid) = highest_valid {
         for partition_order in [highest_valid, highest_valid.saturating_sub(1), 0] {
-            if !candidates.contains(&partition_order) {
-                candidates.push(partition_order);
+            if !candidates[..count].contains(&partition_order) {
+                candidates[count] = partition_order;
+                count += 1;
             }
         }
     }
-    candidates
+    (candidates, count)
 }
 
-fn candidate_rice_methods(residuals: &[i32]) -> Vec<RiceMethod> {
+fn candidate_rice_methods(residuals: &[i32]) -> ([RiceMethod; 2], usize) {
     let estimated = estimate_rice_parameter_from_residuals(residuals);
     if estimated <= RiceMethod::FourBit.max_parameter() {
-        vec![RiceMethod::FourBit]
+        ([RiceMethod::FourBit, RiceMethod::FourBit], 1)
     } else {
-        vec![RiceMethod::FourBit, RiceMethod::FiveBit]
+        ([RiceMethod::FourBit, RiceMethod::FiveBit], 2)
     }
 }
 
@@ -618,7 +621,8 @@ fn choose_partition_encoding(residuals: &[i32], method: RiceMethod) -> Option<Re
         best = Some((bit_len, BestPartition::Escape(bits)));
     }
 
-    for parameter in candidate_rice_parameters(&folded_residuals, method) {
+    let (parameters, parameter_count) = candidate_rice_parameters(&folded_residuals, method);
+    for &parameter in parameters[..parameter_count].iter() {
         let mut bit_len = method.parameter_bits();
         let parameter_shift = usize::from(parameter);
         let mut valid = true;
@@ -650,26 +654,25 @@ fn choose_partition_encoding(residuals: &[i32], method: RiceMethod) -> Option<Re
     })
 }
 
-fn candidate_rice_parameters(folded_residuals: &[usize], method: RiceMethod) -> Vec<u8> {
+fn candidate_rice_parameters(folded_residuals: &[usize], method: RiceMethod) -> ([u8; 2], usize) {
     let max_parameter = method.max_parameter();
     if folded_residuals.is_empty() {
-        return vec![0];
+        return ([0, 0], 1);
     }
 
     let estimated = estimate_rice_parameter(folded_residuals).min(max_parameter);
 
-    let mut parameters = Vec::with_capacity(2);
-    let mut candidates = Vec::with_capacity(4);
+    let mut parameters = [0; 2];
+    let mut count = 0usize;
     if estimated <= 2 {
-        candidates.push(0);
+        parameters[count] = 0;
+        count += 1;
     }
-    candidates.push(estimated);
-    for candidate in candidates {
-        if !parameters.contains(&candidate) {
-            parameters.push(candidate);
-        }
+    if !parameters[..count].contains(&estimated) {
+        parameters[count] = estimated;
+        count += 1;
     }
-    parameters
+    (parameters, count)
 }
 
 fn estimate_rice_parameter(folded_residuals: &[usize]) -> u8 {
