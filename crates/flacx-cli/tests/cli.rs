@@ -24,6 +24,15 @@ fn help_lists_encode_command() {
 }
 
 #[test]
+fn version_reports_workspace_version() {
+    let output = Command::new(flacx_bin()).arg("--version").output().unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), format!("flacx {}", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn encode_command_matches_library_output() {
     let samples = sample_fixture(1, 2_048);
     let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
