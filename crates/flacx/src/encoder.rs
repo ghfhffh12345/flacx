@@ -21,7 +21,12 @@ use crate::{
     write::{EncodedFrame, FlacWriter},
 };
 
-const FRAME_CHUNK_SIZE: usize = 8;
+const FRAME_CHUNK_SIZE: usize = 32;
+
+struct EncodedChunk {
+    start_frame: usize,
+    frames: Vec<EncodedFrame>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodeSummary {
@@ -198,8 +203,7 @@ impl Encoder {
                             break;
                         }
                         let chunk_end = (chunk_start + FRAME_CHUNK_SIZE).min(plan.total_frames);
-                        let mut encoded_chunk = Vec::with_capacity(chunk_end - chunk_start);
-                        let mut saw_error = false;
+                        let mut encoded_frames = Vec::with_capacity(chunk_end - chunk_start);
 
                         for frame_index in chunk_start..chunk_end {
                             let start_sample = frame_index as u64 * u64::from(plan.block_size);
@@ -217,17 +221,22 @@ impl Encoder {
                                 frame_index as u64,
                                 plan.profile,
                             );
-                            saw_error |= frame.is_err();
-                            encoded_chunk.push((frame_index, frame));
-                            if saw_error {
-                                break;
+                            match frame {
+                                Ok(frame) => encoded_frames.push(frame),
+                                Err(error) => {
+                                    let _ = sender.send(Err(error));
+                                    return;
+                                }
                             }
                         }
 
-                        if sender.send(encoded_chunk).is_err() {
-                            return;
-                        }
-                        if saw_error {
+                        if sender
+                            .send(Ok(EncodedChunk {
+                                start_frame: chunk_start,
+                                frames: encoded_frames,
+                            }))
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -237,41 +246,36 @@ impl Encoder {
             drop(sender);
             let mut next_expected = 0usize;
             let mut processed_samples = 0u64;
-            let mut pending: BTreeMap<usize, EncodedFrame> = BTreeMap::new();
+            let mut pending: BTreeMap<usize, EncodedChunk> = BTreeMap::new();
             while next_expected < plan.total_frames {
                 let encoded_chunk = receiver.recv().map_err(|_| {
                     Error::Thread(
                         "frame worker channel closed before all frames were encoded".into(),
                     )
-                })?;
-                for (frame_index, frame) in encoded_chunk {
-                    let frame = frame?;
-                    if frame_index == next_expected {
-                        processed_samples = write_encoded_frame(
+                })??;
+                if encoded_chunk.start_frame == next_expected {
+                    processed_samples = write_encoded_chunk(
+                        writer,
+                        encoded_chunk,
+                        processed_samples,
+                        plan.spec.total_samples,
+                        &mut next_expected,
+                        plan.total_frames,
+                        progress,
+                    )?;
+                    while let Some(chunk) = pending.remove(&next_expected) {
+                        processed_samples = write_encoded_chunk(
                             writer,
-                            &frame,
+                            chunk,
                             processed_samples,
                             plan.spec.total_samples,
-                            next_expected + 1,
+                            &mut next_expected,
                             plan.total_frames,
                             progress,
                         )?;
-                        next_expected += 1;
-                        while let Some(frame) = pending.remove(&next_expected) {
-                            processed_samples = write_encoded_frame(
-                                writer,
-                                &frame,
-                                processed_samples,
-                                plan.spec.total_samples,
-                                next_expected + 1,
-                                plan.total_frames,
-                                progress,
-                            )?;
-                            next_expected += 1;
-                        }
-                    } else {
-                        pending.insert(frame_index, frame);
                     }
+                } else {
+                    pending.insert(encoded_chunk.start_frame, encoded_chunk);
                 }
             }
 
@@ -313,5 +317,33 @@ where
         completed_frames,
         total_frames,
     )?;
+    Ok(processed_samples)
+}
+
+fn write_encoded_chunk<W, P>(
+    writer: &mut FlacWriter<W>,
+    chunk: EncodedChunk,
+    mut processed_samples: u64,
+    total_samples: u64,
+    next_expected: &mut usize,
+    total_frames: usize,
+    progress: &mut P,
+) -> Result<u64>
+where
+    W: Write + Seek,
+    P: ProgressSink,
+{
+    for frame in chunk.frames {
+        processed_samples = write_encoded_frame(
+            writer,
+            &frame,
+            processed_samples,
+            total_samples,
+            *next_expected + 1,
+            total_frames,
+            progress,
+        )?;
+        *next_expected += 1;
+    }
     Ok(processed_samples)
 }
