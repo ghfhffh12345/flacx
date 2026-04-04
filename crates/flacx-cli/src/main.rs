@@ -9,7 +9,7 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
-use flacx::{EncoderConfig, level::Level};
+use flacx::{DecodeConfig, EncoderConfig, level::Level};
 use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -57,6 +57,9 @@ struct DecodeArgs {
     input: std::path::PathBuf,
     /// Output WAV path.
     output: std::path::PathBuf,
+    /// Number of decoding threads.
+    #[arg(long)]
+    threads: Option<usize>,
 }
 
 fn main() -> ExitCode {
@@ -98,9 +101,45 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
-    decode_command(&DecodeCommand {
+    let mut config = DecodeConfig::default();
+    if let Some(threads) = args.threads {
+        config = config.with_threads(threads);
+    }
+
+    let interactive = io::stderr().is_terminal();
+    let mut stderr = io::stderr().lock();
+    let command = DecodeCommand {
         input: args.input,
         output: args.output,
-    })?;
+        config,
+    };
+    decode_command(&command, interactive, &mut stderr)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn decode_command_parses_threads_flag() {
+        let cli = Cli::parse_from([
+            "flacx",
+            "decode",
+            "input.flac",
+            "output.wav",
+            "--threads",
+            "4",
+        ]);
+
+        match cli.command {
+            Commands::Decode(args) => {
+                assert_eq!(args.threads, Some(4));
+                assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
+                assert_eq!(args.output, std::path::PathBuf::from("output.wav"));
+            }
+            _ => panic!("expected decode command"),
+        }
+    }
 }

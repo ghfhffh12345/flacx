@@ -85,9 +85,62 @@ impl EncoderBuilder {
     }
 }
 
+/// User-facing decode configuration for FLAC-to-WAV conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeConfig {
+    pub threads: usize,
+}
+
+impl Default for DecodeConfig {
+    fn default() -> Self {
+        Self {
+            threads: std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1),
+        }
+    }
+}
+
+impl DecodeConfig {
+    #[must_use]
+    pub fn builder() -> DecodeBuilder {
+        DecodeBuilder::default()
+    }
+
+    #[must_use]
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
+    }
+}
+
+/// Fluent builder for [`DecodeConfig`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DecodeBuilder {
+    config: DecodeConfig,
+}
+
+impl DecodeBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn threads(mut self, threads: usize) -> Self {
+        self.config = self.config.with_threads(threads);
+        self
+    }
+
+    #[must_use]
+    pub fn build(self) -> DecodeConfig {
+        self.config
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::EncoderConfig;
+    use super::{DecodeConfig, EncoderConfig};
     use crate::level::Level;
 
     #[test]
@@ -118,5 +171,17 @@ mod tests {
                 .with_threads(2)
                 .with_block_size(1024)
         );
+    }
+
+    #[test]
+    fn decode_with_threads_clamps_to_one() {
+        assert_eq!(DecodeConfig::default().with_threads(0).threads, 1);
+    }
+
+    #[test]
+    fn decode_builder_matches_fluent_config() {
+        let built = DecodeConfig::builder().threads(4).build();
+
+        assert_eq!(built, DecodeConfig::default().with_threads(4));
     }
 }

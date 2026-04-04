@@ -1,6 +1,6 @@
 use std::{fs, process::Command};
 
-use flacx::{Decoder, Encoder, EncoderConfig, level::Level};
+use flacx::{DecodeConfig, Encoder, EncoderConfig, level::Level};
 use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 
 #[path = "../../flacx/tests/support/mod.rs"]
@@ -138,42 +138,49 @@ fn encode_command_rejects_invalid_wav_input() {
 }
 
 #[test]
-fn decode_command_matches_original_wav_bytes() {
+fn decode_command_accepts_threads_and_round_trips_exact_wav_bytes() {
     let samples = sample_fixture(2, 4_096);
     let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
     let flac = Encoder::new(EncoderConfig::default().with_threads(2))
         .encode_bytes(&wav)
         .unwrap();
-    let input_path = unique_temp_path("flac");
-    let output_path = unique_temp_path("wav");
-    fs::write(&input_path, &flac).unwrap();
+    for threads in [1, 4] {
+        let input_path = unique_temp_path("flac");
+        let output_path = unique_temp_path("wav");
+        fs::write(&input_path, &flac).unwrap();
 
-    let output = Command::new(flacx_bin())
-        .args([
-            "decode",
-            input_path.to_str().unwrap(),
-            output_path.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
+        let threads_arg = threads.to_string();
+        let input_arg = input_path.to_str().unwrap().to_owned();
+        let output_arg = output_path.to_str().unwrap().to_owned();
+        let output = Command::new(flacx_bin())
+            .args([
+                "decode",
+                "--threads",
+                threads_arg.as_str(),
+                input_arg.as_str(),
+                output_arg.as_str(),
+            ])
+            .output()
+            .unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !String::from_utf8_lossy(&output.stderr).contains('\r'),
-        "decode should not emit progress output"
-    );
-    assert_eq!(fs::read(&output_path).unwrap(), wav);
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains('\r'),
+            "decode should not emit progress output"
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), wav);
 
-    let _ = fs::remove_file(input_path);
-    let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+    }
 }
 
 #[test]
-fn decode_command_function_matches_library_output() {
+fn decode_command_function_renders_progress_when_interactive() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let input_path = unique_temp_path("flac");
@@ -183,14 +190,44 @@ fn decode_command_function_matches_library_output() {
     let command = DecodeCommand {
         input: input_path.clone(),
         output: output_path.clone(),
+        config: DecodeConfig::default().with_threads(4),
     };
+    let mut stderr = Vec::new();
 
-    decode_command(&command).unwrap();
+    let summary = decode_command(&command, true, &mut stderr).unwrap();
+    assert_eq!(summary.total_samples, 2_048);
 
-    let cli_bytes = fs::read(&output_path).unwrap();
-    let library_bytes = Decoder::default().decode_bytes(&flac).unwrap();
-    assert_eq!(cli_bytes, library_bytes);
-    assert_eq!(cli_bytes, wav);
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains('\r'));
+    assert!(stderr.contains("100.0%"));
+    assert!(stderr.contains("ETA"));
+    assert!(stderr.contains("Rate"));
+    assert!(stderr.ends_with('\n'));
+    assert_eq!(fs::read(&output_path).unwrap(), wav);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn decode_command_function_is_silent_when_non_interactive() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("wav");
+    fs::write(&input_path, &flac).unwrap();
+
+    let command = DecodeCommand {
+        input: input_path.clone(),
+        output: output_path.clone(),
+        config: DecodeConfig::default().with_threads(2),
+    };
+    let mut stderr = Vec::new();
+
+    let summary = decode_command(&command, false, &mut stderr).unwrap();
+    assert_eq!(summary.total_samples, 2_048);
+    assert!(stderr.is_empty());
+    assert_eq!(fs::read(&output_path).unwrap(), wav);
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
@@ -200,11 +237,15 @@ fn decode_command_function_matches_library_output() {
 fn decode_command_rejects_invalid_flac_input() {
     let input_path = unique_temp_path("flac");
     let output_path = unique_temp_path("wav");
+    let sentinel = b"keep-existing-output";
     fs::write(&input_path, b"not a flac").unwrap();
+    fs::write(&output_path, sentinel).unwrap();
 
     let output = Command::new(flacx_bin())
         .args([
             "decode",
+            "--threads",
+            "4",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
         ])
@@ -214,6 +255,11 @@ fn decode_command_rejects_invalid_flac_input() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid flac") || stderr.contains("unsupported flac"));
+    assert_eq!(
+        fs::read(&output_path).unwrap(),
+        sentinel,
+        "failed decode should not overwrite existing WAV output"
+    );
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);

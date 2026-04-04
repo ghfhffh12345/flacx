@@ -46,22 +46,41 @@ pub(crate) fn write_wav<W: Write>(writer: &mut W, spec: WavSpec, samples: &[i32]
     writer.write_all(&(data_bytes as u32).to_le_bytes())?;
 
     match spec.bits_per_sample {
-        16 => {
-            for &sample in samples {
-                writer.write_all(&(sample as i16).to_le_bytes())?;
-            }
-        }
-        24 => {
-            for &sample in samples {
-                let value = sample as u32;
-                writer.write_all(&[
-                    (value & 0xff) as u8,
-                    ((value >> 8) & 0xff) as u8,
-                    ((value >> 16) & 0xff) as u8,
-                ])?;
-            }
-        }
+        16 => write_sample_bytes(writer, samples, |sample, buffer| {
+            buffer.extend_from_slice(&(sample as i16).to_le_bytes());
+        })?,
+        24 => write_sample_bytes(writer, samples, |sample, buffer| {
+            let value = sample as u32;
+            buffer.extend_from_slice(&[
+                (value & 0xff) as u8,
+                ((value >> 8) & 0xff) as u8,
+                ((value >> 16) & 0xff) as u8,
+            ]);
+        })?,
         _ => unreachable!(),
+    }
+
+    Ok(())
+}
+
+fn write_sample_bytes<W, F>(writer: &mut W, samples: &[i32], mut encode: F) -> Result<()>
+where
+    W: Write,
+    F: FnMut(i32, &mut Vec<u8>),
+{
+    const CHUNK_CAPACITY: usize = 64 * 1024;
+    let mut buffer = Vec::with_capacity(CHUNK_CAPACITY);
+
+    for &sample in samples {
+        encode(sample, &mut buffer);
+        if buffer.len() >= CHUNK_CAPACITY {
+            writer.write_all(&buffer)?;
+            buffer.clear();
+        }
+    }
+
+    if !buffer.is_empty() {
+        writer.write_all(&buffer)?;
     }
 
     Ok(())

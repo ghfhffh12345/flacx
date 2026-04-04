@@ -1,12 +1,23 @@
-use std::io::{Cursor, Read, Seek};
+use std::{
+    collections::BTreeMap,
+    io::{Cursor, Read, Seek},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    thread,
+};
 
 use bitstream_io::{BigEndian, BitRead, BitReader};
 
 use crate::{
+    config::DecodeConfig,
     crc::{crc8, crc16},
     error::{Error, Result},
     input::{WavData, WavSpec},
     model::ChannelAssignment,
+    progress::{NoProgress, ProgressSink, ProgressSnapshot},
     reconstruct::{interleave_channels, restore_fixed, restore_lpc, unfold_residual},
     stream_info::StreamInfo,
 };
@@ -15,8 +26,52 @@ const FLAC_MAGIC: &[u8; 4] = b"fLaC";
 const STREAMINFO_BLOCK_TYPE: u8 = 0;
 const MAX_SUPPORTED_BLOCK_SIZE: u16 = 16_384;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
+const FRAME_CHUNK_SIZE: usize = 32;
 
-pub(crate) fn read_flac<R: Read + Seek>(mut reader: R) -> Result<(WavData, StreamInfo, usize)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameIndex {
+    frame_number: u64,
+    offset: usize,
+    bytes_consumed: usize,
+    block_size: u16,
+}
+
+struct FrameResult {
+    frame_index: usize,
+    result: Result<Vec<i32>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParsedFrame {
+    frame_number: u64,
+    block_size: u16,
+    bits_per_sample: u8,
+    assignment: ChannelAssignment,
+    bytes_consumed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubframeHeader {
+    kind: u8,
+    wasted_bits: usize,
+    effective_bps: u8,
+}
+
+#[allow(dead_code)]
+pub(crate) fn read_flac<R: Read + Seek>(reader: R) -> Result<(WavData, StreamInfo, usize)> {
+    let mut progress = NoProgress;
+    read_flac_with_config(reader, DecodeConfig::default(), &mut progress)
+}
+
+pub(crate) fn read_flac_with_config<R, P>(
+    mut reader: R,
+    config: DecodeConfig,
+    progress: &mut P,
+) -> Result<(WavData, StreamInfo, usize)>
+where
+    R: Read + Seek,
+    P: ProgressSink,
+{
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
     let (stream_info, frame_offset) = parse_metadata(&bytes)?;
@@ -39,38 +94,44 @@ pub(crate) fn read_flac<R: Read + Seek>(mut reader: R) -> Result<(WavData, Strea
         )));
     }
 
-    let mut frame_count = 0usize;
-    let mut expected_frame_number = 0u64;
-    let mut samples = Vec::new();
-    let mut cursor = frame_offset;
+    let expected_frames = stream_info.total_samples as usize;
+    let total_output_samples = expected_frames * usize::from(stream_info.channels);
+    let wav_spec = WavSpec {
+        sample_rate: stream_info.sample_rate,
+        channels: stream_info.channels,
+        bits_per_sample: stream_info.bits_per_sample,
+        total_samples: stream_info.total_samples,
+        bytes_per_sample: u16::from(stream_info.bits_per_sample / 8),
+    };
 
-    while samples.len()
-        < (stream_info.total_samples as usize).saturating_mul(usize::from(stream_info.channels))
-    {
-        let frame = decode_frame(&bytes[cursor..], stream_info, expected_frame_number)?;
-        cursor += frame.bytes_consumed;
-        expected_frame_number += 1;
-        frame_count += 1;
-        samples.extend(frame.samples);
+    if expected_frames == 0 {
+        return Ok((
+            WavData {
+                spec: wav_spec,
+                samples: Vec::new(),
+            },
+            stream_info,
+            0,
+        ));
     }
 
-    let expected_samples = stream_info.total_samples as usize * usize::from(stream_info.channels);
-    if samples.len() != expected_samples {
+    let frames = index_frames(&bytes, frame_offset, stream_info)?;
+    let frame_count = frames.len();
+    let bytes: Arc<[u8]> = Arc::from(bytes);
+    let frames: Arc<[FrameIndex]> = Arc::from(frames);
+    let mut samples = Vec::with_capacity(total_output_samples);
+    decode_frames_parallel(bytes, frames, stream_info, config, progress, &mut samples)?;
+
+    if samples.len() != total_output_samples {
         return Err(Error::Decode(format!(
-            "decoded sample count mismatch: expected {expected_samples}, got {}",
+            "decoded sample count mismatch: expected {total_output_samples}, got {}",
             samples.len()
         )));
     }
 
     Ok((
         WavData {
-            spec: WavSpec {
-                sample_rate: stream_info.sample_rate,
-                channels: stream_info.channels,
-                bits_per_sample: stream_info.bits_per_sample,
-                total_samples: stream_info.total_samples,
-                bytes_per_sample: u16::from(stream_info.bits_per_sample / 8),
-            },
+            spec: wav_spec,
             samples,
         },
         stream_info,
@@ -78,66 +139,202 @@ pub(crate) fn read_flac<R: Read + Seek>(mut reader: R) -> Result<(WavData, Strea
     ))
 }
 
-fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, usize)> {
-    if bytes.len() < 8 {
-        return Err(Error::InvalidFlac("file is too short"));
-    }
-    if &bytes[..4] != FLAC_MAGIC {
-        return Err(Error::InvalidFlac("expected fLaC stream marker"));
+fn index_frames(
+    bytes: &[u8],
+    frame_offset: usize,
+    stream_info: StreamInfo,
+) -> Result<Vec<FrameIndex>> {
+    let mut expected_frame_number = 0u64;
+    let mut processed_samples = 0usize;
+    let mut cursor = frame_offset;
+    let mut frames = Vec::new();
+
+    while processed_samples < stream_info.total_samples as usize {
+        let frame = scan_frame(&bytes[cursor..], stream_info, expected_frame_number)?;
+        frames.push(FrameIndex {
+            frame_number: frame.frame_number,
+            offset: cursor,
+            bytes_consumed: frame.bytes_consumed,
+            block_size: frame.block_size,
+        });
+        cursor += frame.bytes_consumed;
+        processed_samples += usize::from(frame.block_size);
+        expected_frame_number += 1;
     }
 
-    let mut offset = 4usize;
-    let mut saw_streaminfo = false;
-    let mut stream_info = None;
-    loop {
-        if offset + 4 > bytes.len() {
-            return Err(Error::InvalidFlac("metadata block header is truncated"));
-        }
-        let header = bytes[offset];
-        let is_last = header & 0x80 != 0;
-        let block_type = header & 0x7f;
-        let block_len =
-            u32::from_be_bytes([0, bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
-                as usize;
-        offset += 4;
-        if offset + block_len > bytes.len() {
-            return Err(Error::InvalidFlac("metadata block body is truncated"));
+    if processed_samples != stream_info.total_samples as usize {
+        return Err(Error::Decode(format!(
+            "decoded sample count mismatch: expected {}, got {processed_samples}",
+            stream_info.total_samples
+        )));
+    }
+
+    Ok(frames)
+}
+
+fn decode_frames_parallel<P>(
+    bytes: Arc<[u8]>,
+    frames: Arc<[FrameIndex]>,
+    stream_info: StreamInfo,
+    config: DecodeConfig,
+    progress: &mut P,
+    samples: &mut Vec<i32>,
+) -> Result<()>
+where
+    P: ProgressSink,
+{
+    if frames.is_empty() {
+        return Ok(());
+    }
+
+    let worker_count = config.threads.max(1).min(frames.len());
+    let next_chunk = Arc::new(AtomicUsize::new(0));
+
+    thread::scope(|scope| -> Result<()> {
+        let (sender, receiver) = mpsc::channel::<FrameResult>();
+
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next_chunk = Arc::clone(&next_chunk);
+            let bytes = Arc::clone(&bytes);
+            let frames = Arc::clone(&frames);
+
+            scope.spawn(move || {
+                loop {
+                    let chunk_start = next_chunk.fetch_add(FRAME_CHUNK_SIZE, Ordering::Relaxed);
+                    if chunk_start >= frames.len() {
+                        break;
+                    }
+                    let chunk_end = (chunk_start + FRAME_CHUNK_SIZE).min(frames.len());
+
+                    for frame_index in chunk_start..chunk_end {
+                        let frame = &frames[frame_index];
+                        let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
+                        let result = decode_frame(frame_bytes, stream_info, frame.frame_number)
+                            .map(|frame| frame.samples);
+
+                        if sender
+                            .send(FrameResult {
+                                frame_index,
+                                result,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            });
         }
 
-        if !saw_streaminfo {
-            if block_type != STREAMINFO_BLOCK_TYPE || block_len != 34 {
-                return Err(Error::InvalidFlac(
-                    "first metadata block must be a 34-byte STREAMINFO block",
-                ));
+        drop(sender);
+
+        let mut next_expected = 0usize;
+        let mut processed_samples = 0u64;
+        let mut pending: BTreeMap<usize, Result<Vec<i32>>> = BTreeMap::new();
+
+        while next_expected < frames.len() {
+            if let Some(result) = pending.remove(&next_expected) {
+                processed_samples = process_frame_result(
+                    samples,
+                    result,
+                    frames[next_expected].block_size,
+                    processed_samples,
+                    stream_info.total_samples,
+                    next_expected + 1,
+                    frames.len(),
+                    progress,
+                )?;
+                next_expected += 1;
+                continue;
             }
-            let mut raw = [0u8; 34];
-            raw.copy_from_slice(&bytes[offset..offset + 34]);
-            stream_info = Some(StreamInfo::from_bytes(raw));
-            saw_streaminfo = true;
+
+            let frame_result = receiver.recv().map_err(|_| {
+                Error::Thread("frame worker channel closed before all frames were decoded".into())
+            })?;
+            pending.insert(frame_result.frame_index, frame_result.result);
+
+            while let Some(result) = pending.remove(&next_expected) {
+                processed_samples = process_frame_result(
+                    samples,
+                    result,
+                    frames[next_expected].block_size,
+                    processed_samples,
+                    stream_info.total_samples,
+                    next_expected + 1,
+                    frames.len(),
+                    progress,
+                )?;
+                next_expected += 1;
+            }
         }
 
-        offset += block_len;
-        if is_last {
-            break;
-        }
-    }
-
-    Ok((
-        stream_info.ok_or(Error::InvalidFlac("missing STREAMINFO block"))?,
-        offset,
-    ))
+        Ok(())
+    })
 }
 
-struct DecodedFrame {
-    samples: Vec<i32>,
-    bytes_consumed: usize,
+fn process_frame_result<P>(
+    samples: &mut Vec<i32>,
+    result: Result<Vec<i32>>,
+    block_size: u16,
+    processed_samples: u64,
+    total_samples: u64,
+    completed_frames: usize,
+    total_frames: usize,
+    progress: &mut P,
+) -> Result<u64>
+where
+    P: ProgressSink,
+{
+    let frame_samples = result?;
+    samples.extend(frame_samples);
+    let processed_samples = processed_samples + u64::from(block_size);
+    progress.on_frame(ProgressSnapshot {
+        processed_samples,
+        total_samples,
+        completed_frames,
+        total_frames,
+    })?;
+    Ok(processed_samples)
 }
 
-fn decode_frame(
+fn scan_frame(
     bytes: &[u8],
     stream_info: StreamInfo,
     expected_frame_number: u64,
-) -> Result<DecodedFrame> {
+) -> Result<ParsedFrame> {
+    let parsed = parse_frame(bytes, stream_info, expected_frame_number)?;
+    let mut reader = BitReader::endian(Cursor::new(&bytes[parsed.bytes_consumed..]), BigEndian);
+
+    for bits_per_channel in channel_bits_per_sample(parsed.assignment, parsed.bits_per_sample)
+        .into_iter()
+        .take(channel_count(parsed.assignment))
+    {
+        skip_subframe(&mut reader, bits_per_channel, parsed.block_size)?;
+    }
+
+    reader.byte_align();
+    let footer_pos = reader.aligned_reader().position() as usize;
+    let footer_start = parsed.bytes_consumed + footer_pos;
+    let expected_crc = u16::from_be_bytes([
+        read_exact_byte(reader.aligned_reader())?,
+        read_exact_byte(reader.aligned_reader())?,
+    ]);
+    if crc16(&bytes[..footer_start]) != expected_crc {
+        return Err(Error::InvalidFlac("frame footer CRC16 mismatch"));
+    }
+
+    Ok(ParsedFrame {
+        bytes_consumed: footer_start + 2,
+        ..parsed
+    })
+}
+
+fn parse_frame(
+    bytes: &[u8],
+    stream_info: StreamInfo,
+    expected_frame_number: u64,
+) -> Result<ParsedFrame> {
     if bytes.len() < 2 {
         return Err(Error::InvalidFlac("unexpected EOF while reading frames"));
     }
@@ -198,25 +395,53 @@ fn decode_frame(
         )));
     }
 
-    let subframe_bps = channel_bits_per_sample(assignment, bits_per_sample);
-    let mut channels = Vec::with_capacity(channel_count(assignment));
-    for bits_per_channel in subframe_bps.into_iter().take(channel_count(assignment)) {
-        channels.push(decode_subframe(&mut reader, bits_per_channel, block_size)?);
+    Ok(ParsedFrame {
+        frame_number,
+        block_size,
+        bits_per_sample,
+        assignment,
+        bytes_consumed: header_end + 1,
+    })
+}
+
+struct DecodedFrame {
+    samples: Vec<i32>,
+}
+
+fn decode_frame(
+    bytes: &[u8],
+    stream_info: StreamInfo,
+    expected_frame_number: u64,
+) -> Result<DecodedFrame> {
+    let parsed = parse_frame(bytes, stream_info, expected_frame_number)?;
+    let mut reader = BitReader::endian(Cursor::new(&bytes[parsed.bytes_consumed..]), BigEndian);
+
+    let subframe_bps = channel_bits_per_sample(parsed.assignment, parsed.bits_per_sample);
+    let mut channels = Vec::with_capacity(channel_count(parsed.assignment));
+    for bits_per_channel in subframe_bps
+        .into_iter()
+        .take(channel_count(parsed.assignment))
+    {
+        channels.push(decode_subframe(
+            &mut reader,
+            bits_per_channel,
+            parsed.block_size,
+        )?);
     }
 
     reader.byte_align();
     let footer_pos = reader.aligned_reader().position() as usize;
+    let footer_start = parsed.bytes_consumed + footer_pos;
     let expected_crc = u16::from_be_bytes([
         read_exact_byte(reader.aligned_reader())?,
         read_exact_byte(reader.aligned_reader())?,
     ]);
-    if crc16(&bytes[..footer_pos]) != expected_crc {
+    if crc16(&bytes[..footer_start]) != expected_crc {
         return Err(Error::InvalidFlac("frame footer CRC16 mismatch"));
     }
 
     Ok(DecodedFrame {
-        samples: interleave_channels(assignment, &channels)?,
-        bytes_consumed: footer_pos + 2,
+        samples: interleave_channels(parsed.assignment, &channels)?,
     })
 }
 
@@ -225,37 +450,28 @@ fn decode_subframe<R: Read>(
     bits_per_sample: u8,
     block_size: u16,
 ) -> Result<Vec<i32>> {
-    if reader.read_bit()? {
-        return Err(Error::InvalidFlac("subframe padding bit must be zero"));
-    }
-    let kind: u8 = reader.read_unsigned_var(6)?;
-    let wasted_bits = if reader.read_bit()? {
-        reader.read_unary::<1>()? + 1
-    } else {
-        0
-    };
-    let effective_bps = bits_per_sample
-        .checked_sub(wasted_bits as u8)
-        .ok_or_else(|| Error::UnsupportedFlac("subframe wasted bits exceed bit depth".into()))?;
+    let header = parse_subframe_header(reader, bits_per_sample)?;
 
-    let mut samples = match kind {
-        0b000000 => vec![read_signed_sample(reader, effective_bps)?; usize::from(block_size)],
+    let mut samples = match header.kind {
+        0b000000 => {
+            vec![read_signed_sample(reader, header.effective_bps)?; usize::from(block_size)]
+        }
         0b000001 => {
             let mut samples = Vec::with_capacity(usize::from(block_size));
             for _ in 0..block_size {
-                samples.push(read_signed_sample(reader, effective_bps)?);
+                samples.push(read_signed_sample(reader, header.effective_bps)?);
             }
             samples
         }
         0b001000..=0b001100 => {
-            let order = kind - 0b001000;
-            let warmup = read_warmup(reader, effective_bps, order)?;
+            let order = header.kind - 0b001000;
+            let warmup = read_warmup(reader, header.effective_bps, order)?;
             let residuals = read_residual(reader, block_size, order)?;
             restore_fixed(order, warmup, residuals)?
         }
         0b100000..=0b111111 => {
-            let order = kind - 0b100000 + 1;
-            let warmup = read_warmup(reader, effective_bps, order)?;
+            let order = header.kind - 0b100000 + 1;
+            let warmup = read_warmup(reader, header.effective_bps, order)?;
             let precision_minus_one: u8 = reader.read_unsigned_var(4)?;
             if precision_minus_one == 0b1111 {
                 return Err(Error::UnsupportedFlac(
@@ -273,14 +489,15 @@ fn decode_subframe<R: Read>(
         }
         _ => {
             return Err(Error::UnsupportedFlac(format!(
-                "subframe type {kind:#08b} is out of scope"
+                "subframe type {kind:#08b} is out of scope",
+                kind = header.kind
             )));
         }
     };
 
-    if wasted_bits > 0 {
+    if header.wasted_bits > 0 {
         for sample in &mut samples {
-            *sample = i32::try_from(i64::from(*sample) << wasted_bits)
+            *sample = i32::try_from(i64::from(*sample) << header.wasted_bits)
                 .map_err(|_| Error::Decode("wasted-bit restoration overflowed".into()))?;
         }
     }
@@ -288,23 +505,92 @@ fn decode_subframe<R: Read>(
     Ok(samples)
 }
 
-fn read_warmup<R: Read>(
+fn skip_subframe<R: Read>(
     reader: &mut BitReader<R, BigEndian>,
     bits_per_sample: u8,
-    order: u8,
-) -> Result<Vec<i32>> {
-    let mut warmup = Vec::with_capacity(usize::from(order));
-    for _ in 0..order {
-        warmup.push(read_signed_sample(reader, bits_per_sample)?);
+    block_size: u16,
+) -> Result<()> {
+    let header = parse_subframe_header(reader, bits_per_sample)?;
+
+    match header.kind {
+        0b000000 => {
+            let _ = read_signed_sample(reader, header.effective_bps)?;
+        }
+        0b000001 => {
+            for _ in 0..block_size {
+                let _ = read_signed_sample(reader, header.effective_bps)?;
+            }
+        }
+        0b001000..=0b001100 => {
+            let order = header.kind - 0b001000;
+            for _ in 0..order {
+                let _ = read_signed_sample(reader, header.effective_bps)?;
+            }
+            skip_residual(reader, block_size, order)?;
+        }
+        0b100000..=0b111111 => {
+            let order = header.kind - 0b100000 + 1;
+            for _ in 0..order {
+                let _ = read_signed_sample(reader, header.effective_bps)?;
+            }
+            let precision_minus_one: u8 = reader.read_unsigned_var(4)?;
+            if precision_minus_one == 0b1111 {
+                return Err(Error::UnsupportedFlac(
+                    "LPC precision escape code is out of scope".into(),
+                ));
+            }
+            let _shift: i8 = reader.read_signed_var(5)?;
+            let precision = precision_minus_one + 1;
+            for _ in 0..order {
+                let _ = reader.read_signed_var::<i16>(u32::from(precision))?;
+            }
+            skip_residual(reader, block_size, order)?;
+        }
+        _ => {
+            return Err(Error::UnsupportedFlac(format!(
+                "subframe type {kind:#08b} is out of scope",
+                kind = header.kind
+            )));
+        }
     }
-    Ok(warmup)
+
+    Ok(())
 }
 
-fn read_residual<R: Read>(
+fn parse_subframe_header<R: Read>(
+    reader: &mut BitReader<R, BigEndian>,
+    bits_per_sample: u8,
+) -> Result<SubframeHeader> {
+    if reader.read_bit()? {
+        return Err(Error::InvalidFlac("subframe padding bit must be zero"));
+    }
+    let kind: u8 = reader.read_unsigned_var(6)?;
+    let wasted_bits = if reader.read_bit()? {
+        reader.read_unary::<1>()? as usize + 1
+    } else {
+        0
+    };
+    let effective_bps = bits_per_sample
+        .checked_sub(wasted_bits as u8)
+        .ok_or_else(|| Error::UnsupportedFlac("subframe wasted bits exceed bit depth".into()))?;
+
+    Ok(SubframeHeader {
+        kind,
+        wasted_bits,
+        effective_bps,
+    })
+}
+
+fn visit_residuals<R, F>(
     reader: &mut BitReader<R, BigEndian>,
     block_size: u16,
     predictor_order: u8,
-) -> Result<Vec<i32>> {
+    mut visit: F,
+) -> Result<()>
+where
+    R: Read,
+    F: FnMut(i32) -> Result<()>,
+{
     let method: u8 = reader.read_unsigned_var(2)?;
     let parameter_bits = match method {
         0b00 => 4,
@@ -327,7 +613,6 @@ fn read_residual<R: Read>(
         return Err(Error::InvalidFlac("residual partition length is zero"));
     }
 
-    let mut residuals = Vec::with_capacity(usize::from(block_size) - usize::from(predictor_order));
     for partition in 0..partition_count {
         let warmup = if partition == 0 {
             usize::from(predictor_order)
@@ -344,11 +629,12 @@ fn read_residual<R: Read>(
         if parameter == escape_code {
             let bits: u8 = reader.read_unsigned_var(5)?;
             for _ in 0..residual_count {
-                residuals.push(if bits == 0 {
+                let residual = if bits == 0 {
                     0
                 } else {
                     reader.read_signed_var::<i32>(u32::from(bits))?
-                });
+                };
+                visit(residual)?;
             }
         } else {
             for _ in 0..residual_count {
@@ -358,13 +644,47 @@ fn read_residual<R: Read>(
                 } else {
                     reader.read_unsigned_var::<u32>(u32::from(parameter))?
                 };
-                residuals.push(unfold_residual(
+                visit(unfold_residual(
                     (quotient << u32::from(parameter)) | remainder,
-                ));
+                ))?;
             }
         }
     }
+
+    Ok(())
+}
+
+fn read_residual<R: Read>(
+    reader: &mut BitReader<R, BigEndian>,
+    block_size: u16,
+    predictor_order: u8,
+) -> Result<Vec<i32>> {
+    let mut residuals = Vec::with_capacity(usize::from(block_size) - usize::from(predictor_order));
+    visit_residuals(reader, block_size, predictor_order, |residual| {
+        residuals.push(residual);
+        Ok(())
+    })?;
     Ok(residuals)
+}
+
+fn skip_residual<R: Read>(
+    reader: &mut BitReader<R, BigEndian>,
+    block_size: u16,
+    predictor_order: u8,
+) -> Result<()> {
+    visit_residuals(reader, block_size, predictor_order, |_| Ok(()))
+}
+
+fn read_warmup<R: Read>(
+    reader: &mut BitReader<R, BigEndian>,
+    bits_per_sample: u8,
+    order: u8,
+) -> Result<Vec<i32>> {
+    let mut warmup = Vec::with_capacity(usize::from(order));
+    for _ in 0..order {
+        warmup.push(read_signed_sample(reader, bits_per_sample)?);
+    }
+    Ok(warmup)
 }
 
 fn decode_block_size<R: Read>(code: u8, reader: &mut R) -> Result<u16> {
@@ -523,4 +843,54 @@ fn decode_utf8_number<R: Read>(reader: &mut R) -> Result<(u64, usize)> {
     }
 
     Ok((value, additional + 1))
+}
+
+fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, usize)> {
+    if bytes.len() < 8 {
+        return Err(Error::InvalidFlac("file is too short"));
+    }
+    if &bytes[..4] != FLAC_MAGIC {
+        return Err(Error::InvalidFlac("expected fLaC stream marker"));
+    }
+
+    let mut offset = 4usize;
+    let mut saw_streaminfo = false;
+    let mut stream_info = None;
+    loop {
+        if offset + 4 > bytes.len() {
+            return Err(Error::InvalidFlac("metadata block header is truncated"));
+        }
+        let header = bytes[offset];
+        let is_last = header & 0x80 != 0;
+        let block_type = header & 0x7f;
+        let block_len =
+            u32::from_be_bytes([0, bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
+                as usize;
+        offset += 4;
+        if offset + block_len > bytes.len() {
+            return Err(Error::InvalidFlac("metadata block body is truncated"));
+        }
+
+        if !saw_streaminfo {
+            if block_type != STREAMINFO_BLOCK_TYPE || block_len != 34 {
+                return Err(Error::InvalidFlac(
+                    "first metadata block must be a 34-byte STREAMINFO block",
+                ));
+            }
+            let mut raw = [0u8; 34];
+            raw.copy_from_slice(&bytes[offset..offset + 34]);
+            stream_info = Some(StreamInfo::from_bytes(raw));
+            saw_streaminfo = true;
+        }
+
+        offset += block_len;
+        if is_last {
+            break;
+        }
+    }
+
+    Ok((
+        stream_info.ok_or(Error::InvalidFlac("missing STREAMINFO block"))?,
+        offset,
+    ))
 }
