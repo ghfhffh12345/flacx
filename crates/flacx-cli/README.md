@@ -53,7 +53,7 @@ Decode output behavior:
 - redirected or non-interactive runs do not emit progress UI
 - progress comes from the library progress hooks, while the CLI owns rendering
 - single-file runs show filename, percent, elapsed time, ETA, and rate
-- folder runs show overall batch progress plus per-file progress on the same live line
+- folder runs show overall batch progress and per-file progress on separate live lines
 - batch progress totals use exact samples processed across the full planned worklist
 - ETA and Rate stay in a short warm-up state until two advancing updates and at least 250 ms of elapsed progress time have been observed
 
