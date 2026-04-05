@@ -31,8 +31,18 @@ fn write_wav_file(path: &Path, channels: u16, frames: usize) -> Vec<u8> {
     wav
 }
 
+fn write_flac_file(path: &Path, channels: u16, frames: usize) -> (Vec<u8>, Vec<u8>) {
+    let wav = pcm_wav_bytes(16, channels, 44_100, &sample_fixture(channels, frames));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, &flac).unwrap();
+    (wav, flac)
+}
+
 #[test]
-fn help_lists_encode_command() {
+fn help_lists_encode_and_decode_commands() {
     let output = Command::new(flacx_bin()).arg("--help").output().unwrap();
     assert!(output.status.success());
 
@@ -55,6 +65,20 @@ fn encode_help_lists_output_depth_and_default_threads() {
     assert!(stdout.contains("--depth <DEPTH>"));
     assert!(stdout.contains("[default: 8]"));
     assert!(stdout.contains("only applies when the input is a directory"));
+}
+
+#[test]
+fn decode_help_lists_output_depth_and_threads() {
+    let output = Command::new(flacx_bin())
+        .args(["decode", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("-o, --output <OUTPUT>"));
+    assert!(stdout.contains("--depth <DEPTH>"));
+    assert!(stdout.contains("--threads <THREADS>"));
 }
 
 #[test]
@@ -119,7 +143,7 @@ fn encode_command_matches_library_output() {
 }
 
 #[test]
-fn encode_command_renders_progress_bar_when_interactive() {
+fn encode_command_renders_filename_elapsed_and_progress_when_interactive() {
     let samples = sample_fixture(1, 2_048);
     let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
     let input_path = unique_temp_path("wav");
@@ -141,13 +165,93 @@ fn encode_command_renders_progress_bar_when_interactive() {
 
     let stderr = String::from_utf8(stderr).unwrap();
     assert!(stderr.contains('\r'));
+    assert!(
+        stderr.contains("input.wav")
+            || stderr.contains(input_path.file_name().unwrap().to_str().unwrap())
+    );
     assert!(stderr.contains("100.0%"));
+    assert!(stderr.contains("Elapsed"));
     assert!(stderr.contains("ETA"));
     assert!(stderr.contains("Rate"));
     assert!(stderr.ends_with('\n'));
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn encode_directory_progress_shows_overall_and_file_progress() {
+    let input_dir = unique_temp_dir();
+    let first = input_dir.join("disc1").join("first.wav");
+    let second = input_dir.join("disc1").join("second.wav");
+    write_wav_file(&first, 1, 1_024);
+    write_wav_file(&second, 1, 2_048);
+
+    let command = EncodeCommand {
+        input: input_dir.clone(),
+        output: None,
+        depth: 0,
+        config: EncoderConfig::default().with_threads(1),
+    };
+    let mut stderr = Vec::new();
+
+    encode_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("disc1/first.wav") || stderr.contains("disc1/second.wav"));
+    assert!(stderr.contains("Total"));
+    assert!(stderr.contains("File"));
+    assert!(stderr.contains("Elapsed"));
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn encode_single_file_directory_still_uses_batch_progress_layout() {
+    let input_dir = unique_temp_dir();
+    let wav_path = input_dir.join("only.wav");
+    write_wav_file(&wav_path, 1, 2_048);
+
+    let command = EncodeCommand {
+        input: input_dir.clone(),
+        output: None,
+        depth: 0,
+        config: EncoderConfig::default().with_threads(1),
+    };
+    let mut stderr = Vec::new();
+
+    encode_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("Total"));
+    assert!(stderr.contains("File"));
+    assert!(stderr.contains("only.wav"));
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn encode_single_match_folder_still_uses_batch_progress_layout() {
+    let input_dir = unique_temp_dir();
+    let only = input_dir.join("disc1").join("only.wav");
+    write_wav_file(&only, 1, 1_024);
+
+    let command = EncodeCommand {
+        input: input_dir.clone(),
+        output: None,
+        depth: 0,
+        config: EncoderConfig::default().with_threads(1),
+    };
+    let mut stderr = Vec::new();
+
+    encode_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("disc1/only.wav"));
+    assert!(stderr.contains("Total"));
+    assert!(stderr.contains("File"));
+
+    let _ = fs::remove_dir_all(input_dir);
 }
 
 #[test]
@@ -214,11 +318,7 @@ fn encode_directory_without_output_writes_sibling_flacs_at_default_depth() {
         .output()
         .unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert!(input_dir.join("top.flac").exists());
     assert!(!input_dir.join("nested").join("deep.flac").exists());
 
@@ -246,11 +346,7 @@ fn encode_directory_with_output_root_preserves_relative_subpaths_and_creates_par
         .output()
         .unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert!(
         output_dir
             .join("disc1")
@@ -283,11 +379,7 @@ fn encode_directory_depth_zero_includes_nested_descendants() {
         .output()
         .unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert!(input_dir.join("top.flac").exists());
     assert!(input_dir.join("nested").join("deep.flac").exists());
 
@@ -316,11 +408,7 @@ fn encode_directory_depth_two_includes_one_nested_level_only() {
         .output()
         .unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert!(input_dir.join("top.flac").exists());
     assert!(input_dir.join("nested").join("deep.flac").exists());
     assert!(
@@ -347,11 +435,7 @@ fn encode_directory_skips_non_wav_files() {
         .output()
         .unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert!(input_dir.join("keep.flac").exists());
     assert!(!input_dir.join("ignore.flac").exists());
 
@@ -385,12 +469,12 @@ fn encode_directory_rejects_output_file_path() {
 }
 
 #[test]
-fn encode_directory_sorts_inputs_before_fail_fast_dispatch() {
+fn encode_directory_validates_exact_batch_totals_before_dispatch() {
     let input_dir = unique_temp_dir();
     let output_dir = unique_temp_path("outdir");
-    write_wav_file(&input_dir.join("z-good.wav"), 1, 2_048);
-    fs::write(input_dir.join("a-bad.wav"), b"not a wav").unwrap();
-    write_wav_file(&input_dir.join("m-good.wav"), 1, 2_048);
+    write_wav_file(&input_dir.join("a-good.wav"), 1, 2_048);
+    fs::write(input_dir.join("b-bad.wav"), b"not a wav").unwrap();
+    write_wav_file(&input_dir.join("c-good.wav"), 1, 2_048);
 
     let output = Command::new(flacx_bin())
         .args([
@@ -405,30 +489,11 @@ fn encode_directory_sorts_inputs_before_fail_fast_dispatch() {
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(!output_dir.join("z-good.flac").exists());
-    assert!(!output_dir.join("m-good.flac").exists());
+    assert!(!output_dir.join("a-good.flac").exists());
+    assert!(!output_dir.join("c-good.flac").exists());
 
     let _ = fs::remove_dir_all(input_dir);
     let _ = fs::remove_dir_all(output_dir);
-}
-
-#[test]
-fn encode_directory_stops_after_first_sorted_failure() {
-    let input_dir = unique_temp_dir();
-    write_wav_file(&input_dir.join("a-good.wav"), 1, 2_048);
-    fs::write(input_dir.join("b-bad.wav"), b"not a wav").unwrap();
-    write_wav_file(&input_dir.join("c-good.wav"), 1, 2_048);
-
-    let output = Command::new(flacx_bin())
-        .args(["encode", input_dir.to_str().unwrap(), "--threads", "1"])
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success());
-    assert!(input_dir.join("a-good.flac").exists());
-    assert!(!input_dir.join("c-good.flac").exists());
-
-    let _ = fs::remove_dir_all(input_dir);
 }
 
 #[test]
@@ -452,6 +517,7 @@ fn decode_command_accepts_threads_and_round_trips_exact_wav_bytes() {
                 "--threads",
                 threads_arg.as_str(),
                 input_arg.as_str(),
+                "-o",
                 output_arg.as_str(),
             ])
             .output()
@@ -474,7 +540,7 @@ fn decode_command_accepts_threads_and_round_trips_exact_wav_bytes() {
 }
 
 #[test]
-fn decode_command_function_renders_progress_when_interactive() {
+fn decode_command_function_renders_filename_elapsed_and_progress_when_interactive() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let input_path = unique_temp_path("flac");
@@ -483,24 +549,99 @@ fn decode_command_function_renders_progress_when_interactive() {
 
     let command = DecodeCommand {
         input: input_path.clone(),
-        output: output_path.clone(),
+        output: Some(output_path.clone()),
+        depth: 1,
         config: DecodeConfig::default().with_threads(4),
     };
     let mut stderr = Vec::new();
 
-    let summary = decode_command(&command, true, &mut stderr).unwrap();
-    assert_eq!(summary.total_samples, 2_048);
+    decode_command(&command, true, &mut stderr).unwrap();
 
     let stderr = String::from_utf8(stderr).unwrap();
     assert!(stderr.contains('\r'));
-    assert!(stderr.contains("100.0%"));
+    assert!(stderr.contains("Elapsed"));
     assert!(stderr.contains("ETA"));
     assert!(stderr.contains("Rate"));
-    assert!(stderr.ends_with('\n'));
+    assert!(stderr.contains("100.0%"));
     assert_eq!(fs::read(&output_path).unwrap(), wav);
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn decode_directory_progress_shows_overall_and_file_progress() {
+    let input_dir = unique_temp_dir();
+    let first = input_dir.join("disc1").join("first.flac");
+    let second = input_dir.join("disc1").join("second.flac");
+    write_flac_file(&first, 1, 1_024);
+    write_flac_file(&second, 1, 2_048);
+
+    let command = DecodeCommand {
+        input: input_dir.clone(),
+        output: None,
+        depth: 0,
+        config: DecodeConfig::default().with_threads(1),
+    };
+    let mut stderr = Vec::new();
+
+    decode_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("disc1/first.flac") || stderr.contains("disc1/second.flac"));
+    assert!(stderr.contains("Total"));
+    assert!(stderr.contains("File"));
+    assert!(stderr.contains("Elapsed"));
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_single_file_directory_still_uses_batch_progress_layout() {
+    let input_dir = unique_temp_dir();
+    let flac_path = input_dir.join("only.flac");
+    write_flac_file(&flac_path, 1, 2_048);
+
+    let command = DecodeCommand {
+        input: input_dir.clone(),
+        output: None,
+        depth: 0,
+        config: DecodeConfig::default().with_threads(1),
+    };
+    let mut stderr = Vec::new();
+
+    decode_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("Total"));
+    assert!(stderr.contains("File"));
+    assert!(stderr.contains("only.flac"));
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_single_match_folder_still_uses_batch_progress_layout() {
+    let input_dir = unique_temp_dir();
+    let only = input_dir.join("disc1").join("only.flac");
+    write_flac_file(&only, 1, 1_024);
+
+    let command = DecodeCommand {
+        input: input_dir.clone(),
+        output: None,
+        depth: 0,
+        config: DecodeConfig::default().with_threads(1),
+    };
+    let mut stderr = Vec::new();
+
+    decode_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("disc1/only.flac"));
+    assert!(stderr.contains("Total"));
+    assert!(stderr.contains("File"));
+
+    let _ = fs::remove_dir_all(input_dir);
 }
 
 #[test]
@@ -513,13 +654,13 @@ fn decode_command_function_is_silent_when_non_interactive() {
 
     let command = DecodeCommand {
         input: input_path.clone(),
-        output: output_path.clone(),
+        output: Some(output_path.clone()),
+        depth: 1,
         config: DecodeConfig::default().with_threads(2),
     };
     let mut stderr = Vec::new();
 
-    let summary = decode_command(&command, false, &mut stderr).unwrap();
-    assert_eq!(summary.total_samples, 2_048);
+    decode_command(&command, false, &mut stderr).unwrap();
     assert!(stderr.is_empty());
     assert_eq!(fs::read(&output_path).unwrap(), wav);
 
@@ -541,6 +682,7 @@ fn decode_command_rejects_invalid_flac_input() {
             "--threads",
             "4",
             input_path.to_str().unwrap(),
+            "-o",
             output_path.to_str().unwrap(),
         ])
         .output()
@@ -549,12 +691,215 @@ fn decode_command_rejects_invalid_flac_input() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid flac") || stderr.contains("unsupported flac"));
-    assert_eq!(
-        fs::read(&output_path).unwrap(),
-        sentinel,
-        "failed decode should not overwrite existing WAV output"
-    );
+    assert_eq!(fs::read(&output_path).unwrap(), sentinel);
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn decode_command_without_output_writes_sibling_wav() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("input.flac");
+    let (wav, _) = write_flac_file(&input_path, 1, 2_048);
+    let output_path = input_dir.join("input.wav");
+
+    let output = Command::new(flacx_bin())
+        .args(["decode", input_path.to_str().unwrap(), "--threads", "1"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(fs::read(&output_path).unwrap(), wav);
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_directory_without_output_writes_sibling_wavs_at_default_depth() {
+    let input_dir = unique_temp_dir();
+    let top_flac = input_dir.join("top.flac");
+    let nested_flac = input_dir.join("nested").join("deep.flac");
+    let (top_wav, _) = write_flac_file(&top_flac, 1, 2_048);
+    let _ = top_wav;
+    write_flac_file(&nested_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args(["decode", input_dir.to_str().unwrap(), "--threads", "1"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(input_dir.join("top.wav").exists());
+    assert!(!input_dir.join("nested").join("deep.wav").exists());
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_directory_with_output_root_preserves_relative_subpaths_and_creates_parents() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_path("outdir");
+    let nested_flac = input_dir.join("disc1").join("set").join("song.flac");
+    let (wav, _) = write_flac_file(&nested_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+            "--depth",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read(output_dir.join("disc1").join("set").join("song.wav")).unwrap(),
+        wav
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn decode_directory_depth_zero_includes_nested_descendants() {
+    let input_dir = unique_temp_dir();
+    let top_flac = input_dir.join("top.flac");
+    let nested_flac = input_dir.join("nested").join("deep.flac");
+    write_flac_file(&top_flac, 1, 2_048);
+    write_flac_file(&nested_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+            "--depth",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(input_dir.join("top.wav").exists());
+    assert!(input_dir.join("nested").join("deep.wav").exists());
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_directory_depth_two_includes_one_nested_level_only() {
+    let input_dir = unique_temp_dir();
+    let top_flac = input_dir.join("top.flac");
+    let nested_flac = input_dir.join("nested").join("deep.flac");
+    let deeper_flac = input_dir.join("nested").join("deeper").join("skip.flac");
+    write_flac_file(&top_flac, 1, 2_048);
+    write_flac_file(&nested_flac, 1, 2_048);
+    write_flac_file(&deeper_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+            "--depth",
+            "2",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(input_dir.join("top.wav").exists());
+    assert!(input_dir.join("nested").join("deep.wav").exists());
+    assert!(
+        !input_dir
+            .join("nested")
+            .join("deeper")
+            .join("skip.wav")
+            .exists()
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_directory_skips_non_flac_files() {
+    let input_dir = unique_temp_dir();
+    let flac_path = input_dir.join("keep.flac");
+    let txt_path = input_dir.join("ignore.txt");
+    write_flac_file(&flac_path, 1, 2_048);
+    fs::write(&txt_path, b"not audio").unwrap();
+
+    let output = Command::new(flacx_bin())
+        .args(["decode", input_dir.to_str().unwrap(), "--threads", "1"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(input_dir.join("keep.wav").exists());
+    assert!(!input_dir.join("ignore.wav").exists());
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_directory_rejects_output_file_path() {
+    let input_dir = unique_temp_dir();
+    let output_path = unique_temp_path("wav");
+    write_flac_file(&input_dir.join("song.flac"), 1, 2_048);
+    fs::write(&output_path, b"existing file").unwrap();
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not a directory"));
+    assert!(!input_dir.join("song.wav").exists());
+
+    let _ = fs::remove_dir_all(input_dir);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn decode_directory_validates_exact_batch_totals_before_dispatch() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_path("outdir");
+    write_flac_file(&input_dir.join("a-good.flac"), 1, 2_048);
+    fs::write(input_dir.join("b-bad.flac"), b"not a flac").unwrap();
+    write_flac_file(&input_dir.join("c-good.flac"), 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(!output_dir.join("a-good.wav").exists());
+    assert!(!output_dir.join("c-good.wav").exists());
+
+    let _ = fs::remove_dir_all(input_dir);
+    let _ = fs::remove_dir_all(output_dir);
 }

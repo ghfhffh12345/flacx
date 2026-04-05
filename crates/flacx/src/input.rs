@@ -71,14 +71,28 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
     Ok(read_wav_internal(&mut reader, false)?.wav)
 }
 
+pub fn inspect_wav_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64> {
+    Ok(parse_wav_layout(&mut reader, false)?.total_samples)
+}
+
 pub(crate) fn read_wav_for_encode<R: Read + Seek>(mut reader: R) -> Result<EncodeWavData> {
     read_wav_internal(&mut reader, true)
 }
 
-fn read_wav_internal<R: Read + Seek>(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedWavLayout {
+    format: FormatChunk,
+    envelope: PcmEnvelope,
+    data_offset: u64,
+    data_size: u32,
+    total_samples: u64,
+    metadata: EncodeMetadata,
+}
+
+fn parse_wav_layout<R: Read + Seek>(
     reader: &mut R,
     capture_metadata: bool,
-) -> Result<EncodeWavData> {
+) -> Result<ParsedWavLayout> {
     let mut chunk_id = [0u8; 4];
     reader.read_exact(&mut chunk_id)?;
 
@@ -163,32 +177,47 @@ fn read_wav_internal<R: Read + Seek>(
         ));
     }
 
-    reader.seek(SeekFrom::Start(data_offset))?;
-    let mut data = vec![0u8; data_size as usize];
-    reader.read_exact(&mut data)?;
-
     let total_samples = u64::from(data_size / u32::from(format.block_align));
-    let samples = decode_samples(&data, envelope)?;
 
-    let wav = WavData {
-        spec: WavSpec {
-            sample_rate: format.sample_rate,
-            channels: format.channels as u8,
-            bits_per_sample: envelope.valid_bits_per_sample as u8,
-            total_samples,
-            bytes_per_sample: envelope.container_bits_per_sample / 8,
-            channel_mask: envelope.channel_mask,
-        },
-        samples,
-    };
-
-    Ok(EncodeWavData {
+    Ok(ParsedWavLayout {
+        format,
+        envelope,
+        data_offset,
+        data_size,
+        total_samples,
         metadata: if capture_metadata {
             metadata_draft.finish(total_samples)
         } else {
             EncodeMetadata::default()
         },
+    })
+}
+
+fn read_wav_internal<R: Read + Seek>(
+    reader: &mut R,
+    capture_metadata: bool,
+) -> Result<EncodeWavData> {
+    let layout = parse_wav_layout(reader, capture_metadata)?;
+    reader.seek(SeekFrom::Start(layout.data_offset))?;
+    let mut data = vec![0u8; layout.data_size as usize];
+    reader.read_exact(&mut data)?;
+    let samples = decode_samples(&data, layout.envelope)?;
+
+    let wav = WavData {
+        spec: WavSpec {
+            sample_rate: layout.format.sample_rate,
+            channels: layout.format.channels as u8,
+            bits_per_sample: layout.envelope.valid_bits_per_sample as u8,
+            total_samples: layout.total_samples,
+            bytes_per_sample: layout.envelope.container_bits_per_sample / 8,
+            channel_mask: layout.envelope.channel_mask,
+        },
+        samples,
+    };
+
+    Ok(EncodeWavData {
         wav,
+        metadata: layout.metadata,
     })
 }
 

@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    io::{Cursor, Read, Seek},
+    io::{Cursor, ErrorKind, Read, Seek},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -153,6 +153,32 @@ where
         stream_info,
         frame_count,
     })
+}
+
+pub fn inspect_flac_total_samples<R: Read>(mut reader: R) -> Result<u64> {
+    let mut magic = [0u8; 4];
+    read_exact_or_invalid(&mut reader, &mut magic, "file is too short")?;
+    if &magic != FLAC_MAGIC {
+        return Err(Error::InvalidFlac("expected fLaC stream marker"));
+    }
+
+    let mut header = [0u8; 4];
+    read_exact_or_invalid(
+        &mut reader,
+        &mut header,
+        "metadata block header is truncated",
+    )?;
+    let block_type = header[0] & 0x7f;
+    let block_len = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+    if block_type != STREAMINFO_BLOCK_TYPE || block_len != 34 {
+        return Err(Error::InvalidFlac(
+            "first metadata block must be a 34-byte STREAMINFO block",
+        ));
+    }
+
+    let mut raw = [0u8; 34];
+    read_exact_or_invalid(&mut reader, &mut raw, "metadata block body is truncated")?;
+    Ok(StreamInfo::from_bytes(raw).total_samples)
 }
 
 fn index_frames(
@@ -910,6 +936,20 @@ fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, WavMetadata, usize)> {
         metadata,
         offset,
     ))
+}
+
+fn read_exact_or_invalid<R: Read>(
+    reader: &mut R,
+    buffer: &mut [u8],
+    truncated_message: &'static str,
+) -> Result<()> {
+    reader.read_exact(buffer).map_err(|error| {
+        if error.kind() == ErrorKind::UnexpectedEof {
+            Error::InvalidFlac(truncated_message)
+        } else {
+            error.into()
+        }
+    })
 }
 
 #[cfg(test)]

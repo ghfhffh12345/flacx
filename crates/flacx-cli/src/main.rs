@@ -59,11 +59,15 @@ struct EncodeArgs {
 struct DecodeArgs {
     /// Input FLAC path.
     input: std::path::PathBuf,
-    /// Output WAV path.
-    output: std::path::PathBuf,
+    /// Output WAV path for a single file, or destination directory for a folder input.
+    #[arg(short, long)]
+    output: Option<std::path::PathBuf>,
     /// Number of decoding threads.
     #[arg(long)]
     threads: Option<usize>,
+    /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
+    #[arg(long, default_value_t = 1usize)]
+    depth: usize,
 }
 
 fn main() -> ExitCode {
@@ -115,6 +119,7 @@ fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let command = DecodeCommand {
         input: args.input,
         output: args.output,
+        depth: args.depth,
         config,
     };
     decode_command(&command, interactive, &mut stderr)?;
@@ -177,12 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn decode_command_parses_threads_flag() {
+    fn decode_command_parses_output_depth_and_threads_flags() {
         let cli = Cli::parse_from([
             "flacx",
             "decode",
             "input.flac",
-            "output.wav",
+            "-o",
+            "out-dir",
+            "--depth",
+            "0",
             "--threads",
             "4",
         ]);
@@ -191,7 +199,22 @@ mod tests {
             Commands::Decode(args) => {
                 assert_eq!(args.threads, Some(4));
                 assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
-                assert_eq!(args.output, std::path::PathBuf::from("output.wav"));
+                assert_eq!(args.output, Some(std::path::PathBuf::from("out-dir")));
+                assert_eq!(args.depth, 0);
+            }
+            _ => panic!("expected decode command"),
+        }
+    }
+
+    #[test]
+    fn decode_command_defaults_output_and_depth() {
+        let cli = Cli::parse_from(["flacx", "decode", "input.flac"]);
+
+        match cli.command {
+            Commands::Decode(args) => {
+                assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
+                assert_eq!(args.output, None);
+                assert_eq!(args.depth, 1);
             }
             _ => panic!("expected decode command"),
         }

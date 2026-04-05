@@ -51,6 +51,8 @@ pub use config::{DecodeBuilder, DecodeConfig, EncoderBuilder, EncoderConfig};
 pub use decode::{DecodeSummary, Decoder, decode_bytes, decode_file};
 pub use encoder::{EncodeSummary, Encoder, encode_bytes, encode_file};
 pub use error::{Error, Result};
+pub use input::inspect_wav_total_samples;
+pub use read::inspect_flac_total_samples;
 
 #[cfg(feature = "progress")]
 pub use progress::{DecodeProgress, EncodeProgress, ProgressSnapshot};
