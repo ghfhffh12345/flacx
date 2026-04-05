@@ -16,6 +16,7 @@ use crate::{
     crc::{crc8, crc16},
     error::{Error, Result},
     input::{WavData, WavSpec},
+    metadata::WavMetadata,
     model::ChannelAssignment,
     progress::{NoProgress, ProgressSink, ProgressSnapshot},
     reconstruct::{interleave_channels, restore_fixed, restore_lpc, unfold_residual},
@@ -24,6 +25,8 @@ use crate::{
 
 const FLAC_MAGIC: &[u8; 4] = b"fLaC";
 const STREAMINFO_BLOCK_TYPE: u8 = 0;
+const VORBIS_COMMENT_BLOCK_TYPE: u8 = 4;
+const CUESHEET_BLOCK_TYPE: u8 = 5;
 const MAX_SUPPORTED_BLOCK_SIZE: u16 = 16_384;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 const FRAME_CHUNK_SIZE: usize = 32;
@@ -57,24 +60,32 @@ struct SubframeHeader {
     effective_bps: u8,
 }
 
+pub(crate) struct DecodedFlacData {
+    pub(crate) wav: WavData,
+    pub(crate) metadata: WavMetadata,
+    pub(crate) stream_info: StreamInfo,
+    pub(crate) frame_count: usize,
+}
+
 #[allow(dead_code)]
 pub(crate) fn read_flac<R: Read + Seek>(reader: R) -> Result<(WavData, StreamInfo, usize)> {
     let mut progress = NoProgress;
-    read_flac_with_config(reader, DecodeConfig::default(), &mut progress)
+    let decoded = read_flac_for_decode(reader, DecodeConfig::default(), &mut progress)?;
+    Ok((decoded.wav, decoded.stream_info, decoded.frame_count))
 }
 
-pub(crate) fn read_flac_with_config<R, P>(
+pub(crate) fn read_flac_for_decode<R, P>(
     mut reader: R,
     config: DecodeConfig,
     progress: &mut P,
-) -> Result<(WavData, StreamInfo, usize)>
+) -> Result<DecodedFlacData>
 where
     R: Read + Seek,
     P: ProgressSink,
 {
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
-    let (stream_info, frame_offset) = parse_metadata(&bytes)?;
+    let (stream_info, metadata, frame_offset) = parse_metadata(&bytes)?;
 
     if !(1..=2).contains(&stream_info.channels) {
         return Err(Error::UnsupportedFlac(format!(
@@ -105,14 +116,15 @@ where
     };
 
     if expected_frames == 0 {
-        return Ok((
-            WavData {
+        return Ok(DecodedFlacData {
+            wav: WavData {
                 spec: wav_spec,
                 samples: Vec::new(),
             },
+            metadata,
             stream_info,
-            0,
-        ));
+            frame_count: 0,
+        });
     }
 
     let frames = index_frames(&bytes, frame_offset, stream_info)?;
@@ -129,14 +141,15 @@ where
         )));
     }
 
-    Ok((
-        WavData {
+    Ok(DecodedFlacData {
+        wav: WavData {
             spec: wav_spec,
             samples,
         },
+        metadata,
         stream_info,
         frame_count,
-    ))
+    })
 }
 
 fn index_frames(
@@ -845,7 +858,7 @@ fn decode_utf8_number<R: Read>(reader: &mut R) -> Result<(u64, usize)> {
     Ok((value, additional + 1))
 }
 
-fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, usize)> {
+fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, WavMetadata, usize)> {
     if bytes.len() < 8 {
         return Err(Error::InvalidFlac("file is too short"));
     }
@@ -856,6 +869,7 @@ fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, usize)> {
     let mut offset = 4usize;
     let mut saw_streaminfo = false;
     let mut stream_info = None;
+    let mut metadata = WavMetadata::default();
     loop {
         if offset + 4 > bytes.len() {
             return Err(Error::InvalidFlac("metadata block header is truncated"));
@@ -881,6 +895,14 @@ fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, usize)> {
             raw.copy_from_slice(&bytes[offset..offset + 34]);
             stream_info = Some(StreamInfo::from_bytes(raw));
             saw_streaminfo = true;
+        } else if matches!(block_type, VORBIS_COMMENT_BLOCK_TYPE | CUESHEET_BLOCK_TYPE) {
+            metadata.ingest_flac_metadata_block(
+                block_type,
+                &bytes[offset..offset + block_len],
+                stream_info
+                    .expect("streaminfo parsed before optional metadata")
+                    .total_samples,
+            );
         }
 
         offset += block_len;
@@ -891,6 +913,7 @@ fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, usize)> {
 
     Ok((
         stream_info.ok_or(Error::InvalidFlac("missing STREAMINFO block"))?,
+        metadata,
         offset,
     ))
 }

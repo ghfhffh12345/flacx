@@ -4,7 +4,10 @@ use flacx::{Encoder, EncoderConfig};
 
 mod support;
 
-use support::{decode_with_ffmpeg, pcm_wav_bytes, sample_fixture};
+use support::{
+    cue_chunk, decode_with_ffmpeg, flac_metadata_blocks, info_list_chunk, pcm_wav_bytes,
+    sample_fixture, vorbis_comments, wav_with_chunks,
+};
 
 #[test]
 fn patches_streaminfo_after_encoding() {
@@ -31,6 +34,121 @@ fn patches_streaminfo_after_encoding() {
 fn produces_identical_output_across_thread_counts() {
     let samples = sample_fixture(2, 8_192);
     let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
+
+    let single_threaded = Encoder::new(EncoderConfig::default().with_threads(1))
+        .encode_bytes(&wav)
+        .unwrap();
+    let multi_threaded = Encoder::new(EncoderConfig::default().with_threads(4))
+        .encode_bytes(&wav)
+        .unwrap();
+
+    assert_eq!(single_threaded, multi_threaded);
+}
+
+#[test]
+fn preserves_list_info_text_metadata_as_vorbis_comments() {
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
+        &[(
+            *b"LIST",
+            info_list_chunk(&[
+                (*b"IART", b"Example Artist"),
+                (*b"INAM", b"Metadata Song"),
+                (*b"IZZZ", b"ignored"),
+            ]),
+        )],
+    );
+
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav)
+        .unwrap();
+    let blocks = flac_metadata_blocks(&flac);
+
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.block_type)
+            .collect::<Vec<_>>(),
+        vec![0, 4]
+    );
+    assert_eq!(
+        vorbis_comments(&blocks[1].payload),
+        vec![
+            "ARTIST=Example Artist".to_string(),
+            "TITLE=Metadata Song".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn preserves_representable_cue_points_as_cuesheet_tracks() {
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
+        &[(*b"cue ", cue_chunk(&[0, 2_048]))],
+    );
+
+    let flac = Encoder::new(EncoderConfig::default().with_threads(3))
+        .encode_bytes(&wav)
+        .unwrap();
+    let blocks = flac_metadata_blocks(&flac);
+
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.block_type)
+            .collect::<Vec<_>>(),
+        vec![0, 5]
+    );
+    assert_eq!(
+        blocks[1].payload[395], 3,
+        "two cue-derived tracks plus lead-out"
+    );
+}
+
+#[test]
+fn drops_unmappable_metadata_chunks_in_output() {
+    let bext_payload = vec![0x42; 602];
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
+        &[
+            (*b"bext", bext_payload),
+            (*b"LIST", info_list_chunk(&[(*b"INAM", b"Kept Title")])),
+        ],
+    );
+
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav)
+        .unwrap();
+    let blocks = flac_metadata_blocks(&flac);
+
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.block_type)
+            .collect::<Vec<_>>(),
+        vec![0, 4]
+    );
+    assert_eq!(
+        vorbis_comments(&blocks[1].payload),
+        vec!["TITLE=Kept Title".to_string()]
+    );
+}
+
+#[test]
+fn preserves_metadata_deterministically_across_thread_counts() {
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192)),
+        &[
+            (
+                *b"LIST",
+                info_list_chunk(&[
+                    (*b"IART", b"Example Artist"),
+                    (*b"INAM", b"Thread-Stable Title"),
+                ]),
+            ),
+            (*b"cue ", cue_chunk(&[0, 4_096])),
+        ],
+    );
 
     let single_threaded = Encoder::new(EncoderConfig::default().with_threads(1))
         .encode_bytes(&wav)

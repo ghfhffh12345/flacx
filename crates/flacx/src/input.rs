@@ -1,6 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{Error, Result};
+use crate::metadata::{EncodeMetadata, MetadataDraft};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WavSpec {
@@ -17,6 +18,12 @@ pub struct WavData {
     pub samples: Vec<i32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EncodeWavData {
+    pub(crate) wav: WavData,
+    pub(crate) metadata: EncodeMetadata,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FormatChunk {
     format_tag: u16,
@@ -27,7 +34,19 @@ struct FormatChunk {
     bits_per_sample: u16,
 }
 
+#[allow(dead_code)]
 pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
+    Ok(read_wav_internal(&mut reader, false)?.wav)
+}
+
+pub(crate) fn read_wav_for_encode<R: Read + Seek>(mut reader: R) -> Result<EncodeWavData> {
+    read_wav_internal(&mut reader, true)
+}
+
+fn read_wav_internal<R: Read + Seek>(
+    reader: &mut R,
+    capture_metadata: bool,
+) -> Result<EncodeWavData> {
     let mut chunk_id = [0u8; 4];
     reader.read_exact(&mut chunk_id)?;
 
@@ -39,7 +58,7 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
         return Err(Error::InvalidWav("expected RIFF header"));
     }
 
-    let _riff_size = read_u32_le(&mut reader)?;
+    let _riff_size = read_u32_le(reader)?;
     reader.read_exact(&mut chunk_id)?;
     if &chunk_id != b"WAVE" {
         return Err(Error::InvalidWav("expected WAVE signature"));
@@ -48,6 +67,7 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
     let mut format = None;
     let mut data_offset = None;
     let mut data_size = None;
+    let mut metadata_draft = MetadataDraft::default();
 
     loop {
         let mut chunk_header = [0u8; 8];
@@ -63,12 +83,19 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
 
         match &chunk_header[..4] {
             b"fmt " => {
-                format = Some(read_format_chunk(&mut reader, chunk_size)?);
+                format = Some(read_format_chunk(reader, chunk_size)?);
             }
             b"data" => {
                 data_offset = Some(chunk_start);
                 data_size = Some(chunk_size);
                 reader.seek(SeekFrom::Current(chunk_size as i64))?;
+            }
+            b"LIST" | b"cue " if capture_metadata => {
+                let payload = read_chunk_payload(reader, chunk_size)?;
+                metadata_draft.ingest_chunk(
+                    chunk_header[..4].try_into().expect("fixed chunk id"),
+                    &payload,
+                );
             }
             _ => {
                 reader.seek(SeekFrom::Current(chunk_size as i64))?;
@@ -111,7 +138,7 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
     let total_samples = u64::from(data_size / u32::from(format.block_align));
     let samples = decode_samples(&data, format.bits_per_sample)?;
 
-    Ok(WavData {
+    let wav = WavData {
         spec: WavSpec {
             sample_rate: format.sample_rate,
             channels: format.channels as u8,
@@ -120,6 +147,15 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
             bytes_per_sample: format.bits_per_sample / 8,
         },
         samples,
+    };
+
+    Ok(EncodeWavData {
+        metadata: if capture_metadata {
+            metadata_draft.finish(total_samples)
+        } else {
+            EncodeMetadata::default()
+        },
+        wav,
     })
 }
 
@@ -210,6 +246,12 @@ fn decode_samples(data: &[u8], bits_per_sample: u16) -> Result<Vec<i32>> {
     }
 }
 
+fn read_chunk_payload<R: Read>(reader: &mut R, chunk_size: u32) -> Result<Vec<u8>> {
+    let mut payload = vec![0u8; chunk_size as usize];
+    reader.read_exact(&mut payload)?;
+    Ok(payload)
+}
+
 fn read_u16_le<R: Read>(reader: &mut R) -> Result<u16> {
     let mut bytes = [0u8; 2];
     reader.read_exact(&mut bytes)?;
@@ -226,7 +268,9 @@ fn read_u32_le<R: Read>(reader: &mut R) -> Result<u32> {
 mod tests {
     use std::io::Cursor;
 
-    use super::{WavData, WavSpec, read_wav};
+    use crate::metadata::FlacMetadataBlock;
+
+    use super::{WavData, WavSpec, read_wav, read_wav_for_encode};
 
     fn pcm_wav_bytes(
         bits_per_sample: u16,
@@ -275,6 +319,56 @@ mod tests {
         }
 
         bytes
+    }
+
+    fn append_chunk(bytes: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
+        bytes.extend_from_slice(id);
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(payload);
+        if payload.len() % 2 != 0 {
+            bytes.push(0);
+        }
+    }
+
+    fn update_riff_size(bytes: &mut [u8]) {
+        let riff_size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    }
+
+    fn with_chunks(mut wav: Vec<u8>, chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let data_chunk_offset = wav
+            .windows(4)
+            .position(|window| window == b"data")
+            .expect("data chunk present");
+        let mut suffix = wav.split_off(data_chunk_offset);
+        for (id, payload) in chunks {
+            append_chunk(&mut wav, id, payload);
+        }
+        wav.append(&mut suffix);
+        update_riff_size(&mut wav);
+        wav
+    }
+
+    fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
+        let mut payload = b"INFO".to_vec();
+        for (id, value) in entries {
+            append_chunk(&mut payload, id, value);
+        }
+        payload
+    }
+
+    fn cue_chunk(offsets: &[u32]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(offsets.len() as u32).to_le_bytes());
+        for (index, offset) in offsets.iter().enumerate() {
+            payload.extend_from_slice(&(index as u32).to_le_bytes());
+            payload.extend_from_slice(&0u32.to_le_bytes());
+            payload.extend_from_slice(b"data");
+            payload.extend_from_slice(&0u32.to_le_bytes());
+            payload.extend_from_slice(&0u32.to_le_bytes());
+            payload.extend_from_slice(&offset.to_le_bytes());
+        }
+        payload
     }
 
     #[test]
@@ -334,5 +428,50 @@ mod tests {
         bytes[32..34].copy_from_slice(&0u16.to_le_bytes());
         let error = read_wav(Cursor::new(bytes)).unwrap_err();
         assert!(error.to_string().contains("block alignment"));
+    }
+
+    #[test]
+    fn read_wav_remains_audio_only_when_metadata_chunks_exist() {
+        let wav = with_chunks(
+            pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
+            &[(*b"LIST", info_list_chunk(&[(*b"IART", b"Example Artist")]))],
+        );
+
+        let parsed = read_wav(Cursor::new(wav)).unwrap();
+        assert_eq!(parsed.spec.total_samples, 4);
+        assert_eq!(parsed.samples, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn read_wav_for_encode_captures_info_and_cue_metadata() {
+        let wav = with_chunks(
+            pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
+            &[
+                (*b"LIST", info_list_chunk(&[(*b"IART", b"Example Artist")])),
+                (*b"cue ", cue_chunk(&[0, 2])),
+            ],
+        );
+
+        let parsed = read_wav_for_encode(Cursor::new(wav)).unwrap();
+        let blocks = parsed.metadata.flac_blocks();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
+        assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
+    }
+
+    #[test]
+    fn ignores_malformed_metadata_chunks_without_rejecting_audio() {
+        let mut malformed_list = b"INFO".to_vec();
+        malformed_list.extend_from_slice(b"IART");
+        malformed_list.extend_from_slice(&99u32.to_le_bytes());
+        malformed_list.extend_from_slice(b"too-short");
+        let wav = with_chunks(
+            pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
+            &[(*b"LIST", malformed_list)],
+        );
+
+        let parsed = read_wav_for_encode(Cursor::new(wav)).unwrap();
+        assert!(parsed.metadata.flac_blocks().is_empty());
+        assert_eq!(parsed.wav.samples, vec![0, 1, 2, 3]);
     }
 }

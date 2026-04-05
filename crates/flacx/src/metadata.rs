@@ -1,0 +1,643 @@
+use std::collections::BTreeMap;
+
+const VORBIS_COMMENT_BLOCK_TYPE: u8 = 4;
+const CUESHEET_BLOCK_TYPE: u8 = 5;
+const CUESHEET_LEADOUT_TRACK_NUMBER: u8 = 170;
+const CUESHEET_HEADER_LEN: usize = 396;
+const CUESHEET_TRACK_HEADER_LEN: usize = 36;
+const CUESHEET_INDEX_LEN: usize = 12;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct EncodeMetadata {
+    comments: Vec<VorbisComment>,
+    cuesheet: Option<CueSheet>,
+}
+
+impl EncodeMetadata {
+    pub(crate) fn flac_blocks(&self) -> Vec<FlacMetadataBlock> {
+        let mut blocks = Vec::new();
+        if !self.comments.is_empty() {
+            blocks.push(FlacMetadataBlock::VorbisComment(VorbisCommentBlock {
+                vendor: format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                comments: self.comments.clone(),
+            }));
+        }
+        if let Some(cuesheet) = &self.cuesheet {
+            blocks.push(FlacMetadataBlock::CueSheet(cuesheet.clone()));
+        }
+        blocks
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct WavMetadata {
+    info_entries: Vec<WavInfoEntry>,
+    cue_points: Vec<u32>,
+}
+
+impl WavMetadata {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.info_entries.is_empty() && self.cue_points.is_empty()
+    }
+
+    pub(crate) fn ingest_flac_metadata_block(
+        &mut self,
+        block_type: u8,
+        payload: &[u8],
+        total_samples: u64,
+    ) {
+        match block_type {
+            VORBIS_COMMENT_BLOCK_TYPE => self.ingest_vorbis_comment_payload(payload),
+            CUESHEET_BLOCK_TYPE => self.ingest_cuesheet_payload(payload, total_samples),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn list_info_chunk_payload(&self) -> Option<Vec<u8>> {
+        if self.info_entries.is_empty() {
+            return None;
+        }
+
+        let mut payload = b"INFO".to_vec();
+        for entry in &self.info_entries {
+            append_chunk_payload(&mut payload, &entry.chunk_id, entry.value.as_bytes());
+        }
+        Some(payload)
+    }
+
+    pub(crate) fn cue_chunk_payload(&self) -> Option<Vec<u8>> {
+        if self.cue_points.is_empty() {
+            return None;
+        }
+
+        let mut payload = Vec::new();
+        append_u32_le(&mut payload, self.cue_points.len() as u32);
+        for (index, &sample_offset) in self.cue_points.iter().enumerate() {
+            append_u32_le(&mut payload, index as u32);
+            append_u32_le(&mut payload, 0);
+            payload.extend_from_slice(b"data");
+            append_u32_le(&mut payload, 0);
+            append_u32_le(&mut payload, 0);
+            append_u32_le(&mut payload, sample_offset);
+        }
+        Some(payload)
+    }
+
+    fn ingest_vorbis_comment_payload(&mut self, payload: &[u8]) {
+        let mut cursor = 0usize;
+        let Some(vendor_len) = read_u32_le(payload, &mut cursor) else {
+            return;
+        };
+        let vendor_len = vendor_len as usize;
+        if cursor + vendor_len > payload.len() {
+            return;
+        }
+        cursor += vendor_len;
+
+        let Some(comment_count) = read_u32_le(payload, &mut cursor) else {
+            return;
+        };
+        for _ in 0..comment_count {
+            let Some(comment_len) = read_u32_le(payload, &mut cursor) else {
+                return;
+            };
+            let comment_len = comment_len as usize;
+            if cursor + comment_len > payload.len() {
+                return;
+            }
+            let entry = &payload[cursor..cursor + comment_len];
+            cursor += comment_len;
+
+            let Some(comment) = String::from_utf8(entry.to_vec()).ok() else {
+                continue;
+            };
+            let Some((key, value)) = comment.split_once('=') else {
+                continue;
+            };
+            let Some(chunk_id) = wav_info_chunk_id_for_vorbis_key(key) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            self.info_entries.push(WavInfoEntry {
+                chunk_id,
+                value: value.to_owned(),
+            });
+        }
+    }
+
+    fn ingest_cuesheet_payload(&mut self, payload: &[u8], total_samples: u64) {
+        if payload.len() < CUESHEET_HEADER_LEN {
+            return;
+        }
+
+        let track_count = payload[CUESHEET_HEADER_LEN - 1] as usize;
+        let mut cursor = CUESHEET_HEADER_LEN;
+        for _ in 0..track_count {
+            if cursor + CUESHEET_TRACK_HEADER_LEN > payload.len() {
+                return;
+            }
+
+            let track_offset = u64::from_be_bytes(
+                payload[cursor..cursor + 8]
+                    .try_into()
+                    .expect("fixed cuesheet track offset slice"),
+            );
+            let track_number = payload[cursor + 8];
+            let index_count = payload[cursor + 35] as usize;
+            cursor += CUESHEET_TRACK_HEADER_LEN;
+
+            let mut index01_offset = None;
+            for _ in 0..index_count {
+                if cursor + CUESHEET_INDEX_LEN > payload.len() {
+                    return;
+                }
+                let index_offset = u64::from_be_bytes(
+                    payload[cursor..cursor + 8]
+                        .try_into()
+                        .expect("fixed cuesheet index offset slice"),
+                );
+                let index_number = payload[cursor + 8];
+                if index_number == 1 && index01_offset.is_none() {
+                    index01_offset = Some(index_offset);
+                }
+                cursor += CUESHEET_INDEX_LEN;
+            }
+
+            if track_number == CUESHEET_LEADOUT_TRACK_NUMBER {
+                continue;
+            }
+
+            let cue_offset = track_offset + index01_offset.unwrap_or(0);
+            let Some(cue_offset) = normalize_cue_offset(cue_offset, total_samples) else {
+                continue;
+            };
+            if !self.cue_points.contains(&cue_offset) {
+                self.cue_points.push(cue_offset);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FlacMetadataBlock {
+    VorbisComment(VorbisCommentBlock),
+    CueSheet(CueSheet),
+}
+
+impl FlacMetadataBlock {
+    pub(crate) fn block_type(&self) -> u8 {
+        match self {
+            Self::VorbisComment(_) => VORBIS_COMMENT_BLOCK_TYPE,
+            Self::CueSheet(_) => CUESHEET_BLOCK_TYPE,
+        }
+    }
+
+    pub(crate) fn payload(&self) -> Vec<u8> {
+        match self {
+            Self::VorbisComment(block) => block.payload(),
+            Self::CueSheet(cuesheet) => cuesheet.payload(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VorbisCommentBlock {
+    vendor: String,
+    comments: Vec<VorbisComment>,
+}
+
+impl VorbisCommentBlock {
+    fn payload(&self) -> Vec<u8> {
+        let mut payload = Vec::new();
+        append_u32_le(&mut payload, self.vendor.len() as u32);
+        payload.extend_from_slice(self.vendor.as_bytes());
+        append_u32_le(&mut payload, self.comments.len() as u32);
+        for comment in &self.comments {
+            let entry = format!("{}={}", comment.key, comment.value);
+            append_u32_le(&mut payload, entry.len() as u32);
+            payload.extend_from_slice(entry.as_bytes());
+        }
+        payload
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VorbisComment {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CueSheet {
+    track_offsets: Vec<u64>,
+    lead_out_offset: u64,
+}
+
+impl CueSheet {
+    fn payload(&self) -> Vec<u8> {
+        let mut payload = vec![0u8; 128];
+        payload.extend_from_slice(&0u64.to_be_bytes());
+        payload.push(0);
+        payload.extend_from_slice(&[0u8; 258]);
+        payload.push((self.track_offsets.len() + 1) as u8);
+        for (index, &offset) in self.track_offsets.iter().enumerate() {
+            write_cuesheet_track(&mut payload, offset, (index + 1) as u8);
+        }
+        write_leadout_track(&mut payload, self.lead_out_offset);
+        payload
+    }
+}
+
+fn write_cuesheet_track(payload: &mut Vec<u8>, offset: u64, track_number: u8) {
+    payload.extend_from_slice(&offset.to_be_bytes());
+    payload.push(track_number);
+    payload.extend_from_slice(&[0u8; 12]);
+    payload.push(0);
+    payload.extend_from_slice(&[0u8; 13]);
+    payload.push(1);
+    payload.extend_from_slice(&0u64.to_be_bytes());
+    payload.push(1);
+    payload.extend_from_slice(&[0u8; 3]);
+}
+
+fn write_leadout_track(payload: &mut Vec<u8>, offset: u64) {
+    payload.extend_from_slice(&offset.to_be_bytes());
+    payload.push(CUESHEET_LEADOUT_TRACK_NUMBER);
+    payload.extend_from_slice(&[0u8; 12]);
+    payload.push(0);
+    payload.extend_from_slice(&[0u8; 13]);
+    payload.push(0);
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MetadataDraft {
+    comments_by_key: BTreeMap<String, Vec<String>>,
+    cue_points: Vec<u64>,
+}
+
+impl MetadataDraft {
+    pub(crate) fn ingest_chunk(&mut self, chunk_id: [u8; 4], payload: &[u8]) {
+        match &chunk_id {
+            b"LIST" => self.ingest_list_chunk(payload),
+            b"cue " => self.ingest_cue_chunk(payload),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn finish(self, total_samples: u64) -> EncodeMetadata {
+        let mut comments = Vec::new();
+        for (key, values) in self.comments_by_key {
+            for value in values {
+                comments.push(VorbisComment {
+                    key: key.clone(),
+                    value,
+                });
+            }
+        }
+
+        EncodeMetadata {
+            comments,
+            cuesheet: normalize_cuesheet(self.cue_points, total_samples),
+        }
+    }
+
+    fn ingest_list_chunk(&mut self, payload: &[u8]) {
+        if payload.len() < 4 || &payload[..4] != b"INFO" {
+            return;
+        }
+
+        let mut offset = 4usize;
+        while offset + 8 <= payload.len() {
+            let chunk_id: [u8; 4] = payload[offset..offset + 4]
+                .try_into()
+                .expect("fixed chunk identifier slice");
+            let chunk_size = u32::from_le_bytes(
+                payload[offset + 4..offset + 8]
+                    .try_into()
+                    .expect("fixed chunk size slice"),
+            ) as usize;
+            offset += 8;
+
+            if offset + chunk_size > payload.len() {
+                return;
+            }
+
+            if let Some((key, value)) =
+                normalize_info_entry(chunk_id, &payload[offset..offset + chunk_size])
+            {
+                self.comments_by_key.entry(key).or_default().push(value);
+            }
+
+            offset += chunk_size;
+            if chunk_size % 2 != 0 {
+                if offset == payload.len() {
+                    return;
+                }
+                offset += 1;
+            }
+        }
+    }
+
+    fn ingest_cue_chunk(&mut self, payload: &[u8]) {
+        if payload.len() < 4 {
+            return;
+        }
+
+        let cue_count = u32::from_le_bytes(payload[..4].try_into().expect("fixed cue count slice"));
+        let required_len = 4usize.saturating_add(cue_count as usize * 24);
+        if payload.len() < required_len {
+            return;
+        }
+
+        let mut offset = 4usize;
+        for _ in 0..cue_count {
+            if &payload[offset + 8..offset + 12] == b"data" {
+                let sample_offset = u32::from_le_bytes(
+                    payload[offset + 20..offset + 24]
+                        .try_into()
+                        .expect("fixed cue sample offset slice"),
+                );
+                self.cue_points.push(u64::from(sample_offset));
+            }
+            offset += 24;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WavInfoEntry {
+    chunk_id: [u8; 4],
+    value: String,
+}
+
+fn normalize_info_entry(chunk_id: [u8; 4], payload: &[u8]) -> Option<(String, String)> {
+    let key = match &chunk_id {
+        b"IART" => "ARTIST",
+        b"ICMT" => "COMMENT",
+        b"ICOP" => "COPYRIGHT",
+        b"ICRD" => "DATE",
+        b"IGNR" => "GENRE",
+        b"INAM" => "TITLE",
+        b"IPRD" => "ALBUM",
+        b"ISFT" => "ENCODER",
+        b"ITRK" => "TRACKNUMBER",
+        _ => return None,
+    };
+
+    let value = decode_text_payload(payload)?;
+    Some((key.to_owned(), value))
+}
+
+fn decode_text_payload(payload: &[u8]) -> Option<String> {
+    let end = payload
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(payload.len());
+    let value = String::from_utf8(payload[..end].to_vec()).ok()?;
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn normalize_cuesheet(mut cue_points: Vec<u64>, total_samples: u64) -> Option<CueSheet> {
+    cue_points.retain(|offset| *offset < total_samples);
+    cue_points.sort_unstable();
+    cue_points.dedup();
+    if cue_points.is_empty() || cue_points.len() > 99 {
+        return None;
+    }
+
+    Some(CueSheet {
+        track_offsets: cue_points,
+        lead_out_offset: total_samples,
+    })
+}
+
+fn wav_info_chunk_id_for_vorbis_key(key: &str) -> Option<[u8; 4]> {
+    match key.to_ascii_uppercase().as_str() {
+        "ARTIST" => Some(*b"IART"),
+        "COMMENT" => Some(*b"ICMT"),
+        "COPYRIGHT" => Some(*b"ICOP"),
+        "DATE" => Some(*b"ICRD"),
+        "GENRE" => Some(*b"IGNR"),
+        "TITLE" => Some(*b"INAM"),
+        "ALBUM" => Some(*b"IPRD"),
+        "ENCODER" => Some(*b"ISFT"),
+        "TRACKNUMBER" => Some(*b"ITRK"),
+        _ => None,
+    }
+}
+
+fn normalize_cue_offset(offset: u64, total_samples: u64) -> Option<u32> {
+    if offset >= total_samples || offset > u64::from(u32::MAX) {
+        return None;
+    }
+    Some(offset as u32)
+}
+
+fn read_u32_le(bytes: &[u8], cursor: &mut usize) -> Option<u32> {
+    if *cursor + 4 > bytes.len() {
+        return None;
+    }
+    let value = u32::from_le_bytes(bytes[*cursor..*cursor + 4].try_into().ok()?);
+    *cursor += 4;
+    Some(value)
+}
+
+fn append_u32_le(buffer: &mut Vec<u8>, value: u32) {
+    buffer.extend_from_slice(&value.to_le_bytes());
+}
+
+fn append_chunk_payload(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
+    buffer.extend_from_slice(id);
+    append_u32_le(buffer, payload.len() as u32);
+    buffer.extend_from_slice(payload);
+    if payload.len() % 2 != 0 {
+        buffer.push(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlacMetadataBlock, MetadataDraft, WavMetadata};
+
+    fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
+        let mut payload = b"INFO".to_vec();
+        for (id, value) in entries {
+            payload.extend_from_slice(id);
+            payload.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            payload.extend_from_slice(value);
+            if value.len() % 2 != 0 {
+                payload.push(0);
+            }
+        }
+        payload
+    }
+
+    fn cue_chunk(offsets: &[u32]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(offsets.len() as u32).to_le_bytes());
+        for (index, offset) in offsets.iter().enumerate() {
+            payload.extend_from_slice(&(index as u32).to_le_bytes());
+            payload.extend_from_slice(&0u32.to_le_bytes());
+            payload.extend_from_slice(b"data");
+            payload.extend_from_slice(&0u32.to_le_bytes());
+            payload.extend_from_slice(&0u32.to_le_bytes());
+            payload.extend_from_slice(&offset.to_le_bytes());
+        }
+        payload
+    }
+
+    fn vorbis_comment_payload(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for (key, value) in entries {
+            let entry = format!("{key}={value}");
+            payload.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+            payload.extend_from_slice(entry.as_bytes());
+        }
+        payload
+    }
+
+    fn cuesheet_payload(track_specs: &[(&[(u64, u8)], u64)], lead_out_offset: u64) -> Vec<u8> {
+        let mut payload = vec![0u8; 128];
+        payload.extend_from_slice(&0u64.to_be_bytes());
+        payload.push(0);
+        payload.extend_from_slice(&[0u8; 258]);
+        payload.push((track_specs.len() + 1) as u8);
+        for (index, (indices, offset)) in track_specs.iter().enumerate() {
+            payload.extend_from_slice(&offset.to_be_bytes());
+            payload.push((index + 1) as u8);
+            payload.extend_from_slice(&[0u8; 12]);
+            payload.push(0);
+            payload.extend_from_slice(&[0u8; 13]);
+            payload.push(indices.len() as u8);
+            for &(index_offset, index_number) in *indices {
+                payload.extend_from_slice(&index_offset.to_be_bytes());
+                payload.push(index_number);
+                payload.extend_from_slice(&[0u8; 3]);
+            }
+        }
+        payload.extend_from_slice(&lead_out_offset.to_be_bytes());
+        payload.push(170);
+        payload.extend_from_slice(&[0u8; 12]);
+        payload.push(0);
+        payload.extend_from_slice(&[0u8; 13]);
+        payload.push(0);
+        payload
+    }
+
+    #[test]
+    fn normalizes_info_chunks_into_stable_vorbis_comments() {
+        let mut draft = MetadataDraft::default();
+        draft.ingest_chunk(
+            *b"LIST",
+            &info_list_chunk(&[
+                (*b"IART", b"Example Artist"),
+                (*b"INAM", b"Song Title"),
+                (*b"IZZZ", b"ignored"),
+                (*b"IART", b"Guest Artist"),
+            ]),
+        );
+
+        let blocks = draft.finish(8_000).flac_blocks();
+        let FlacMetadataBlock::VorbisComment(block) = &blocks[0] else {
+            panic!("expected vorbis comments");
+        };
+
+        let rendered: Vec<String> = block
+            .comments
+            .iter()
+            .map(|comment| format!("{}={}", comment.key, comment.value))
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "ARTIST=Example Artist",
+                "ARTIST=Guest Artist",
+                "TITLE=Song Title",
+            ]
+        );
+    }
+
+    #[test]
+    fn drops_invalid_utf8_text_metadata() {
+        let mut draft = MetadataDraft::default();
+        draft.ingest_chunk(
+            *b"LIST",
+            &info_list_chunk(&[(*b"IART", &[0xff, 0xfe, 0xfd])]),
+        );
+
+        assert!(draft.finish(8_000).flac_blocks().is_empty());
+    }
+
+    #[test]
+    fn normalizes_representable_cue_points_into_cuesheet_tracks() {
+        let mut draft = MetadataDraft::default();
+        draft.ingest_chunk(*b"cue ", &cue_chunk(&[4_000, 1_000, 4_000]));
+
+        let blocks = draft.finish(6_000).flac_blocks();
+        let FlacMetadataBlock::CueSheet(cuesheet) = &blocks[0] else {
+            panic!("expected cuesheet block");
+        };
+        assert_eq!(cuesheet.track_offsets, vec![1_000, 4_000]);
+        assert_eq!(cuesheet.lead_out_offset, 6_000);
+    }
+
+    #[test]
+    fn drops_cue_points_that_cannot_be_represented() {
+        let mut draft = MetadataDraft::default();
+        draft.ingest_chunk(*b"cue ", &cue_chunk(&[4_000]));
+
+        assert!(draft.finish(4_000).flac_blocks().is_empty());
+    }
+
+    #[test]
+    fn restores_vorbis_comments_into_supported_wav_info_entries() {
+        let mut metadata = WavMetadata::default();
+        metadata.ingest_flac_metadata_block(
+            4,
+            &vorbis_comment_payload(&[
+                ("artist", "Example Artist"),
+                ("TITLE", "Example Title"),
+                ("UNKNOWN", "ignored"),
+                ("COMMENT", ""),
+            ]),
+            8_000,
+        );
+
+        let payload = metadata.list_info_chunk_payload().unwrap();
+        assert!(payload.starts_with(b"INFO"));
+        assert!(payload.windows(4).any(|window| window == b"IART"));
+        assert!(payload.windows(4).any(|window| window == b"INAM"));
+        assert!(!payload.windows(4).any(|window| window == b"ICMT"));
+    }
+
+    #[test]
+    fn restores_cuesheet_tracks_preferring_index_01_offsets() {
+        let mut metadata = WavMetadata::default();
+        metadata.ingest_flac_metadata_block(
+            5,
+            &cuesheet_payload(&[(&[(10, 0), (20, 1)], 1_000), (&[], 4_000)], 8_000),
+            8_000,
+        );
+
+        assert_eq!(metadata.cue_points, vec![1_020, 4_000]);
+    }
+
+    #[test]
+    fn drops_out_of_range_or_duplicate_cuesheet_points() {
+        let mut metadata = WavMetadata::default();
+        metadata.ingest_flac_metadata_block(
+            5,
+            &cuesheet_payload(
+                &[(&[(0, 1)], 7_999), (&[(0, 1)], 7_999), (&[(0, 1)], 8_000)],
+                8_100,
+            ),
+            8_000,
+        );
+
+        assert_eq!(metadata.cue_points, vec![7_999]);
+    }
+}
