@@ -35,6 +35,7 @@ mod decode;
 mod encoder;
 mod error;
 mod input;
+mod metadata;
 mod model;
 mod plan;
 mod progress;

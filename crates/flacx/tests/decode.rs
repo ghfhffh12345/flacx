@@ -7,8 +7,9 @@ use flacx::{
 mod support;
 
 use support::{
-    corrupt_last_frame_crc, corrupt_magic, pcm_wav_bytes, sample_fixture, truncate_bytes,
-    unique_temp_path,
+    application_block, corrupt_last_frame_crc, corrupt_magic, cue_chunk, cuesheet_block,
+    info_list_chunk, pcm_wav_bytes, replace_flac_optional_metadata, sample_fixture, truncate_bytes,
+    unique_temp_path, vorbis_comment_block, wav_cue_points, wav_info_entries, wav_with_chunks,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -226,4 +227,109 @@ fn decode_uses_seekable_io() {
 
     assert_eq!(summary.total_samples, 512);
     assert_eq!(output.into_inner(), wav);
+}
+
+#[test]
+fn restores_vorbis_comments_from_arbitrary_flac_metadata() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[vorbis_comment_block(&[
+            ("ARTIST", "Example Artist"),
+            ("TITLE", "Recovered Title"),
+            ("UNKNOWN", "ignored"),
+        ])],
+    );
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+
+    assert_eq!(
+        wav_info_entries(&decoded),
+        vec![
+            (*b"IART", "Example Artist".to_string()),
+            (*b"INAM", "Recovered Title".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn restores_cuesheet_metadata_from_arbitrary_flac_input() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(&flac, &[cuesheet_block(&[0, 2_048], 4_096)]);
+
+    let decoded = decode_bytes_with_threads(&flac, 4);
+
+    assert_eq!(wav_cue_points(&decoded), vec![0, 2_048]);
+}
+
+#[test]
+fn drops_unsupported_flac_metadata_blocks_during_decode() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[
+            application_block(b"opaque-metadata"),
+            vorbis_comment_block(&[("TITLE", "Kept")]),
+        ],
+    );
+
+    let decoded = decode_bytes_with_threads(&flac, 1);
+
+    assert_eq!(
+        wav_info_entries(&decoded),
+        vec![(*b"INAM", "Kept".to_string())]
+    );
+    assert!(wav_cue_points(&decoded).is_empty());
+}
+
+#[test]
+fn metadata_restoration_round_trips_flacx_supported_subset() {
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
+        &[
+            (
+                *b"LIST",
+                info_list_chunk(&[
+                    (*b"IART", b"Example Artist"),
+                    (*b"INAM", b"Round Trip Title"),
+                ]),
+            ),
+            (*b"cue ", cue_chunk(&[0, 2_048])),
+        ],
+    );
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav)
+        .unwrap();
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+
+    assert_eq!(
+        wav_info_entries(&decoded),
+        vec![
+            (*b"IART", "Example Artist".to_string()),
+            (*b"INAM", "Round Trip Title".to_string()),
+        ]
+    );
+    assert_eq!(wav_cue_points(&decoded), vec![0, 2_048]);
+}
+
+#[test]
+fn restored_metadata_output_is_stable_across_thread_counts() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[
+            vorbis_comment_block(&[("ARTIST", "Example Artist"), ("TITLE", "Stable Title")]),
+            cuesheet_block(&[0, 2_048], 4_096),
+        ],
+    );
+
+    let single_threaded = decode_bytes_with_threads(&flac, 1);
+    let multi_threaded = decode_bytes_with_threads(&flac, 4);
+
+    assert_eq!(single_threaded, multi_threaded);
 }

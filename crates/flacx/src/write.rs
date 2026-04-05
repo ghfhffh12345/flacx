@@ -5,13 +5,14 @@ use bitstream_io::{BigEndian, BitWrite, BitWriter};
 use crate::{
     crc::{crc8, crc16},
     error::{Error, Result},
+    metadata::FlacMetadataBlock,
     model::{
         AnalyzedSubframe, ChannelAssignment, FrameAnalysis, ResidualEncoding, ResidualPartition,
     },
     stream_info::StreamInfo,
 };
 
-const STREAMINFO_LENGTH: [u8; 3] = [0x00, 0x00, 34];
+const STREAMINFO_LENGTH: u32 = 34;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 
 pub(crate) struct EncodedFrame {
@@ -26,16 +27,28 @@ pub(crate) struct FlacWriter<W: Seek + Write> {
 }
 
 impl<W: Seek + Write> FlacWriter<W> {
-    pub(crate) fn new(mut writer: W, stream_info: StreamInfo) -> io::Result<Self> {
+    pub(crate) fn new(
+        mut writer: W,
+        stream_info: StreamInfo,
+        metadata_blocks: &[FlacMetadataBlock],
+    ) -> io::Result<Self> {
         writer.write_all(b"fLaC")?;
-        writer.write_all(&[
-            0x80,
-            STREAMINFO_LENGTH[0],
-            STREAMINFO_LENGTH[1],
-            STREAMINFO_LENGTH[2],
-        ])?;
+        writer.write_all(&metadata_block_header(
+            0,
+            metadata_blocks.is_empty(),
+            STREAMINFO_LENGTH,
+        )?)?;
         let streaminfo_offset = writer.stream_position()?;
         writer.write_all(&stream_info.to_bytes())?;
+        for (index, block) in metadata_blocks.iter().enumerate() {
+            let payload = block.payload();
+            writer.write_all(&metadata_block_header(
+                block.block_type(),
+                index + 1 == metadata_blocks.len(),
+                payload.len() as u32,
+            )?)?;
+            writer.write_all(&payload)?;
+        }
 
         Ok(Self {
             writer,
@@ -57,6 +70,27 @@ impl<W: Seek + Write> FlacWriter<W> {
         self.writer.flush()?;
         Ok((self.writer, self.stream_info))
     }
+}
+
+fn metadata_block_header(block_type: u8, is_last: bool, payload_len: u32) -> io::Result<[u8; 4]> {
+    if payload_len > 0x00ff_ffff {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "metadata block payload exceeds FLAC u24 length limit",
+        ));
+    }
+
+    let [_, b1, b2, b3] = payload_len.to_be_bytes();
+    Ok([
+        if is_last {
+            0x80 | (block_type & 0x7f)
+        } else {
+            block_type & 0x7f
+        },
+        b1,
+        b2,
+        b3,
+    ])
 }
 
 pub(crate) fn sample_rate_is_representable(sample_rate: u32) -> bool {
@@ -369,10 +403,17 @@ fn fold_residual(residual: i32) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{channel_assignment_bits, encode_utf8_number, sample_rate_is_representable};
+    use std::io::Cursor;
+
+    use super::{
+        FlacWriter, channel_assignment_bits, encode_utf8_number, metadata_block_header,
+        sample_rate_is_representable,
+    };
     use crate::{
         level::LevelProfile,
+        metadata::{FlacMetadataBlock, MetadataDraft},
         model::{ChannelAssignment, encode_frame},
+        stream_info::StreamInfo,
     };
 
     #[test]
@@ -422,5 +463,112 @@ mod tests {
         let encoded = encode_frame(&interleaved, 2, 16, 44_100, 0, profile).unwrap();
         let assignment = (encoded.bytes[3] >> 4) & 0x0f;
         assert!(matches!(assignment, 0b0001 | 0b1000 | 0b1001 | 0b1010));
+    }
+
+    fn parse_metadata_blocks(flac: &[u8]) -> Vec<(bool, u8, Vec<u8>)> {
+        assert_eq!(&flac[..4], b"fLaC");
+        let mut offset = 4usize;
+        let mut blocks = Vec::new();
+        loop {
+            let header = flac[offset];
+            let is_last = header & 0x80 != 0;
+            let block_type = header & 0x7f;
+            let payload_len =
+                u32::from_be_bytes([0, flac[offset + 1], flac[offset + 2], flac[offset + 3]])
+                    as usize;
+            offset += 4;
+            blocks.push((
+                is_last,
+                block_type,
+                flac[offset..offset + payload_len].to_vec(),
+            ));
+            offset += payload_len;
+            if is_last {
+                return blocks;
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_header_uses_flac_u24_layout() {
+        assert_eq!(
+            metadata_block_header(4, false, 34).unwrap(),
+            [0x04, 0, 0, 34]
+        );
+        assert_eq!(
+            metadata_block_header(5, true, 513).unwrap(),
+            [0x85, 0, 2, 1]
+        );
+    }
+
+    #[test]
+    fn writer_marks_streaminfo_as_last_when_no_optional_metadata_exists() {
+        let stream_info = StreamInfo::new(44_100, 2, 16, 128, [0u8; 16]);
+        let writer = Cursor::new(Vec::new());
+        let (writer, _) = FlacWriter::new(writer, stream_info, &[])
+            .unwrap()
+            .finalize()
+            .unwrap();
+        let blocks = parse_metadata_blocks(&writer.into_inner());
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, true);
+        assert_eq!(blocks[0].1, 0);
+    }
+
+    #[test]
+    fn writer_emits_optional_metadata_before_frames_with_correct_last_flag() {
+        let mut draft = MetadataDraft::default();
+        let info_chunk = {
+            let mut chunk = b"INFO".to_vec();
+            chunk.extend_from_slice(b"IART");
+            chunk.extend_from_slice(&6u32.to_le_bytes());
+            chunk.extend_from_slice(b"Artist");
+            chunk
+        };
+        draft.ingest_chunk(*b"LIST", &info_chunk);
+        draft.ingest_chunk(
+            *b"cue ",
+            &[
+                1, 0, 0, 0, // cue count
+                0, 0, 0, 0, // cue id
+                0, 0, 0, 0, // position
+                b'd', b'a', b't', b'a', 0, 0, 0, 0, // chunk start
+                0, 0, 0, 0, // block start
+                16, 0, 0, 0, // sample offset
+            ],
+        );
+        let metadata_blocks = draft.finish(64).flac_blocks();
+        let stream_info = StreamInfo::new(44_100, 2, 16, 64, [0u8; 16]);
+        let writer = Cursor::new(Vec::new());
+        let (writer, _) = FlacWriter::new(writer, stream_info, &metadata_blocks)
+            .unwrap()
+            .finalize()
+            .unwrap();
+        let blocks = parse_metadata_blocks(&writer.into_inner());
+
+        assert_eq!(
+            blocks.iter().map(|block| block.1).collect::<Vec<_>>(),
+            vec![0, 4, 5]
+        );
+        assert_eq!(
+            blocks.iter().map(|block| block.0).collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+    }
+
+    #[test]
+    fn writer_uses_only_native_metadata_block_types_for_preserved_wav_metadata() {
+        let mut draft = MetadataDraft::default();
+        draft.ingest_chunk(
+            *b"LIST",
+            &[
+                b'I', b'N', b'F', b'O', b'I', b'N', b'A', b'M', 5, 0, 0, 0, b'T', b'i', b't', b'l',
+                b'e', 0,
+            ],
+        );
+        let blocks = draft.finish(32).flac_blocks();
+
+        assert!(matches!(&blocks[..], [FlacMetadataBlock::VorbisComment(_)]));
     }
 }

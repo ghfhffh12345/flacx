@@ -14,7 +14,7 @@ use std::{
 use crate::{
     config::{EncoderBuilder, EncoderConfig},
     error::{Error, Result},
-    input::{WavData, read_wav},
+    input::read_wav_for_encode,
     model::encode_frame,
     plan::{EncodePlan, summary_from_stream_info},
     progress::{NoProgress, ProgressSink, ProgressSnapshot},
@@ -92,9 +92,9 @@ impl Encoder {
         R: Read + Seek,
         W: Write + Seek,
     {
-        let wav = read_wav(input)?;
+        let input = read_wav_for_encode(input)?;
         let mut progress = NoProgress;
-        self.encode_wav_data(wav, output, &mut progress)
+        self.encode_wav_data(input, output, &mut progress)
     }
 
     #[cfg(feature = "progress")]
@@ -109,9 +109,9 @@ impl Encoder {
         W: Write + Seek,
         F: FnMut(ProgressSnapshot) -> Result<()>,
     {
-        let wav = read_wav(input)?;
+        let input = read_wav_for_encode(input)?;
         let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
-        self.encode_wav_data(wav, output, &mut progress)
+        self.encode_wav_data(input, output, &mut progress)
     }
 
     pub fn encode_file<P, Q>(&self, input_path: P, output_path: Q) -> Result<EncodeSummary>
@@ -149,7 +149,7 @@ impl Encoder {
 
     fn encode_wav_data<W, P>(
         &self,
-        wav: WavData,
+        input: crate::input::EncodeWavData,
         output: W,
         progress: &mut P,
     ) -> Result<EncodeSummary>
@@ -157,8 +157,10 @@ impl Encoder {
         W: Write + Seek,
         P: ProgressSink,
     {
+        let crate::input::EncodeWavData { wav, metadata } = input;
         let plan = EncodePlan::new(wav.spec, self.config)?;
-        let mut writer = FlacWriter::new(output, plan.stream_info())?;
+        let metadata_blocks = metadata.flac_blocks();
+        let mut writer = FlacWriter::new(output, plan.stream_info(), &metadata_blocks)?;
 
         if plan.total_frames == 0 {
             let (_, stream_info) = writer.finalize()?;

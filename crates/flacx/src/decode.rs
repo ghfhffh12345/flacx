@@ -9,9 +9,9 @@ use crate::{
     config::{DecodeBuilder, DecodeConfig},
     error::{Error, Result},
     progress::{NoProgress, ProgressSink},
-    read::read_flac_with_config,
+    read::read_flac_for_decode,
     stream_info::StreamInfo,
-    wav_output::write_wav,
+    wav_output::write_wav_with_metadata,
 };
 
 #[cfg(feature = "progress")]
@@ -133,10 +133,18 @@ impl Decoder {
         W: Write + Seek,
         P: ProgressSink,
     {
-        let (wav, stream_info, frame_count) = read_flac_with_config(input, self.config, progress)?;
-        write_wav(&mut output, wav.spec, &wav.samples)?;
+        let decoded = read_flac_for_decode(input, self.config, progress)?;
+        write_wav_with_metadata(
+            &mut output,
+            decoded.wav.spec,
+            &decoded.wav.samples,
+            &decoded.metadata,
+        )?;
         output.flush()?;
-        Ok(summary_from_stream_info(stream_info, frame_count))
+        Ok(summary_from_stream_info(
+            decoded.stream_info,
+            decoded.frame_count,
+        ))
     }
 
     fn decode_file_with_sink<P, Q, R>(
