@@ -10,7 +10,7 @@ publishable library package.
 
 ```bash
 cargo run -p flacx-cli -- encode input.wav output.flac --level 8 --threads 4
-cargo run -p flacx-cli -- decode input.flac output.wav
+cargo run -p flacx-cli -- decode input.flac output.wav --threads 4
 ```
 
 ## Command shape
@@ -21,19 +21,16 @@ cargo run -p flacx-cli -- decode input.flac output.wav
   - `--level`
   - `--threads`
   - `--block-size`
+- decode-only flags:
+  - `--threads`
 
 ## Progress display
 
-- interactive terminals show a live progress bar during encode
+- interactive terminals show a live progress line during encode and decode
 - redirected or non-interactive runs do not emit progress UI
-- decode runs stay quiet unless they fail
-- progress comes from the library's encoder-backed progress reporting on the
-  existing fast encode path
-- this crate explicitly enables the `flacx` `progress` feature
-- the progress line stays single-line and ASCII-compatible, with percent plus
-  `ETA` and `Rate`
-- `ETA` and `Rate` stay in a short warm-up state until the renderer has seen
-  two advancing updates and at least 250 ms of elapsed encode time
+- progress comes from the library progress hooks, while the CLI owns rendering
+- encode and decode use the same single-line, ASCII-compatible percent / ETA / Rate format
+- ETA and Rate stay in a short warm-up state until two advancing updates and at least 250 ms of elapsed progress time have been observed
 
 ## Workspace relationship
 
