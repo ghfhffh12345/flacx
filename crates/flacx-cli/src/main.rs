@@ -4,6 +4,7 @@
 //! reusing the same encode pipeline and workspace version.
 //!
 use std::{
+    env,
     io::{self, IsTerminal, Write},
     process::ExitCode,
 };
@@ -97,6 +98,7 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let interactive = io::stderr().is_terminal();
+    enforce_interactive_mode(interactive, interactive_required())?;
     let mut stderr = io::stderr().lock();
     let command = EncodeCommand {
         input: args.input,
@@ -115,6 +117,7 @@ fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let interactive = io::stderr().is_terminal();
+    enforce_interactive_mode(interactive, interactive_required())?;
     let mut stderr = io::stderr().lock();
     let command = DecodeCommand {
         input: args.input,
@@ -126,9 +129,23 @@ fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn interactive_required() -> bool {
+    env::var_os("FLACX_REQUIRE_INTERACTIVE").is_some()
+}
+
+fn enforce_interactive_mode(
+    interactive: bool,
+    require_interactive: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if require_interactive && !interactive {
+        return Err("interactive terminal required for this proof run".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands};
+    use super::{Cli, Commands, enforce_interactive_mode};
     use clap::Parser;
 
     #[test]
@@ -218,5 +235,13 @@ mod tests {
             }
             _ => panic!("expected decode command"),
         }
+    }
+
+    #[test]
+    fn require_interactive_helper_only_rejects_non_interactive_runs_when_required() {
+        assert!(enforce_interactive_mode(true, true).is_ok());
+        assert!(enforce_interactive_mode(true, false).is_ok());
+        assert!(enforce_interactive_mode(false, false).is_ok());
+        assert!(enforce_interactive_mode(false, true).is_err());
     }
 }

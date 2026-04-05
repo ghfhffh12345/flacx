@@ -24,6 +24,7 @@
 //!   - `--depth` (directory input only)
 
 use std::{
+    env,
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -39,6 +40,8 @@ use walkdir::WalkDir;
 const SINGLE_PROGRESS_BAR_WIDTH: usize = 24;
 const BATCH_PROGRESS_BAR_WIDTH: usize = 10;
 const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
+const SINGLE_RENDER_INTERVAL: Duration = Duration::from_millis(125);
+const BATCH_RENDER_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeCommand {
@@ -63,6 +66,13 @@ enum CommandKind {
 }
 
 impl CommandKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Encode => "encode",
+            Self::Decode => "decode",
+        }
+    }
+
     fn source_extension(self) -> &'static str {
         match self {
             Self::Encode => "wav",
@@ -137,6 +147,7 @@ struct ConversionWorkItem {
     output: PathBuf,
     display_name: String,
     ensure_parent_dirs: bool,
+    input_bytes: u64,
     total_samples: u64,
 }
 
@@ -145,6 +156,11 @@ struct ProgressDisplay {
     filename: String,
     overall: SampleProgress,
     file: Option<SampleProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProgressFrame {
+    lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,8 +172,17 @@ struct SampleProgress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CurrentFileProgress {
     filename: String,
+    input_bytes: u64,
     total_samples: u64,
     saw_update: bool,
+    started_at: Option<Instant>,
+}
+
+struct ProgressTrace {
+    file: File,
+    kind: CommandKind,
+    interactive: bool,
+    batch_mode: bool,
 }
 
 pub fn encode_command(
@@ -166,9 +191,11 @@ pub fn encode_command(
     stderr: &mut impl Write,
 ) -> Result<()> {
     let planned = plan_encode_worklist(command)?;
+    let trace = ProgressTrace::from_env(CommandKind::Encode, interactive, planned.is_directory)?;
     let mut progress = BatchProgressCoordinator::new(
         stderr,
         interactive,
+        trace,
         planned.total_samples,
         planned.is_directory,
     );
@@ -177,7 +204,7 @@ pub fn encode_command(
         if item.ensure_parent_dirs {
             ensure_output_parent_dirs(&item.output)?;
         }
-        progress.begin_file(&item.display_name, item.total_samples);
+        progress.begin_file(&item.display_name, item.input_bytes, item.total_samples);
         let result = Encoder::new(command.config).encode_file_with_progress(
             &item.input,
             &item.output,
@@ -206,9 +233,11 @@ pub fn decode_command(
     stderr: &mut impl Write,
 ) -> Result<()> {
     let planned = plan_decode_worklist(command)?;
+    let trace = ProgressTrace::from_env(CommandKind::Decode, interactive, planned.is_directory)?;
     let mut progress = BatchProgressCoordinator::new(
         stderr,
         interactive,
+        trace,
         planned.total_samples,
         planned.is_directory,
     );
@@ -217,7 +246,7 @@ pub fn decode_command(
         if item.ensure_parent_dirs {
             ensure_output_parent_dirs(&item.output)?;
         }
-        progress.begin_file(&item.display_name, item.total_samples);
+        progress.begin_file(&item.display_name, item.input_bytes, item.total_samples);
         let result = Decoder::new(command.config).decode_file_with_progress(
             &item.input,
             &item.output,
@@ -300,6 +329,7 @@ fn plan_single_file_work_item(
         output,
         display_name: file_display_name(input),
         ensure_parent_dirs: false,
+        input_bytes: input_file_size(input)?,
         total_samples: inspect_total_samples(input)?,
     })
 }
@@ -316,19 +346,14 @@ fn plan_directory_worklist(
         None => None,
     };
 
-    let mut worklist = collect_directory_work_items(
+    let (mut worklist, total_samples) = collect_directory_work_items(
         kind,
         input_root,
         output_root.as_deref(),
         depth,
         inspect_total_samples,
     )?;
-    worklist.sort_by(|left, right| path_sort_key(&left.input).cmp(&path_sort_key(&right.input)));
-    let total_samples = worklist.iter().try_fold(0u64, |sum, item| {
-        sum.checked_add(item.total_samples).ok_or_else(|| {
-            kind.planning_error("total sample count overflowed batch progress accounting")
-        })
-    })?;
+    worklist.sort_by(|left, right| left.display_name.cmp(&right.display_name));
 
     Ok(PlannedWorklist {
         items: worklist,
@@ -355,13 +380,14 @@ fn collect_directory_work_items(
     output_root: Option<&Path>,
     depth: usize,
     inspect_total_samples: fn(&Path) -> Result<u64>,
-) -> Result<Vec<ConversionWorkItem>> {
+) -> Result<(Vec<ConversionWorkItem>, u64)> {
     let mut walker = WalkDir::new(input_root).follow_links(false).min_depth(1);
     if depth != 0 {
         walker = walker.max_depth(depth);
     }
 
     let mut worklist = Vec::new();
+    let mut total_samples = 0u64;
     for entry in walker {
         let entry =
             entry.map_err(|error| kind.planning_error(kind.traversal_error(input_root, &error)))?;
@@ -372,12 +398,16 @@ fn collect_directory_work_items(
         let input = entry.path().to_path_buf();
         let relative = input
             .strip_prefix(input_root)
-            .map_err(|_| kind.planning_error("failed to derive relative input path"))?
-            .to_path_buf();
+            .map_err(|_| kind.planning_error("failed to derive relative input path"))?;
+        let total_for_file = inspect_total_samples(&input)?;
+        total_samples = total_samples.checked_add(total_for_file).ok_or_else(|| {
+            kind.planning_error("total sample count overflowed batch progress accounting")
+        })?;
+        let display_name = relative_display_name(relative);
         let (output, ensure_parent_dirs) = match output_root {
             Some(output_root) => (
                 output_root
-                    .join(&relative)
+                    .join(relative)
                     .with_extension(kind.target_extension()),
                 true,
             ),
@@ -385,15 +415,16 @@ fn collect_directory_work_items(
         };
 
         worklist.push(ConversionWorkItem {
-            total_samples: inspect_total_samples(&input)?,
             input,
             output,
-            display_name: relative_display_name(&relative),
+            display_name,
             ensure_parent_dirs,
+            input_bytes: input_file_size(entry.path())?,
+            total_samples: total_for_file,
         });
     }
 
-    Ok(worklist)
+    Ok((worklist, total_samples))
 }
 
 fn inspect_wav_file_total_samples(path: &Path) -> Result<u64> {
@@ -402,6 +433,10 @@ fn inspect_wav_file_total_samples(path: &Path) -> Result<u64> {
 
 fn inspect_flac_file_total_samples(path: &Path) -> Result<u64> {
     inspect_flac_total_samples(File::open(path)?)
+}
+
+fn input_file_size(path: &Path) -> Result<u64> {
+    Ok(fs::metadata(path)?.len())
 }
 
 fn derive_output_path(input: &Path, extension: &str) -> PathBuf {
@@ -434,49 +469,117 @@ fn relative_display_name(path: &Path) -> String {
         .join("/")
 }
 
-fn path_sort_key(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+impl ProgressTrace {
+    fn from_env(kind: CommandKind, interactive: bool, batch_mode: bool) -> Result<Option<Self>> {
+        let Some(path) = env::var_os("FLACX_PROGRESS_TRACE").map(PathBuf::from) else {
+            return Ok(None);
+        };
+        let mut trace = Self {
+            file: File::create(path)?,
+            kind,
+            interactive,
+            batch_mode,
+        };
+        trace.write_command_header()?;
+        Ok(Some(trace))
+    }
+
+    fn write_command_header(&mut self) -> std::io::Result<()> {
+        writeln!(
+            self.file,
+            "event=command\tkind={}\tinteractive={}\tbatch_mode={}",
+            self.kind.as_str(),
+            u8::from(self.interactive),
+            u8::from(self.batch_mode)
+        )?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn on_file_finish(
+        &mut self,
+        filename: &str,
+        input_bytes: u64,
+        elapsed: Duration,
+    ) -> std::io::Result<()> {
+        writeln!(
+            self.file,
+            "event=file_finish\tkind={}\tinteractive={}\tbatch_mode={}\tfilename={}\tinput_bytes={}\telapsed_seconds={:.9}",
+            self.kind.as_str(),
+            u8::from(self.interactive),
+            u8::from(self.batch_mode),
+            sanitize_trace_field(filename),
+            input_bytes,
+            elapsed.as_secs_f64()
+        )?;
+        self.file.flush()?;
+        Ok(())
+    }
+}
+
+fn sanitize_trace_field(field: &str) -> String {
+    field
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
 }
 
 struct BatchProgressCoordinator<W: Write> {
     renderer: ProgressRenderer<W>,
+    trace: Option<ProgressTrace>,
     total_samples: u64,
     batch_mode: bool,
     completed_samples: u64,
     current_file: Option<CurrentFileProgress>,
+    batch_started_at: Option<Instant>,
+    overall_state: ProgressState,
+    file_state: ProgressState,
 }
 
 impl<W: Write> BatchProgressCoordinator<W> {
-    fn new(writer: W, interactive: bool, total_samples: u64, batch_mode: bool) -> Self {
+    fn new(
+        writer: W,
+        interactive: bool,
+        trace: Option<ProgressTrace>,
+        total_samples: u64,
+        batch_mode: bool,
+    ) -> Self {
         Self {
             renderer: ProgressRenderer::new(writer, interactive),
+            trace,
             total_samples,
             batch_mode,
             completed_samples: 0,
             current_file: None,
+            batch_started_at: None,
+            overall_state: ProgressState::default(),
+            file_state: ProgressState::default(),
         }
     }
 
-    fn begin_file(&mut self, filename: &str, total_samples: u64) {
+    fn begin_file(&mut self, filename: &str, input_bytes: u64, total_samples: u64) {
         self.current_file = Some(CurrentFileProgress {
             filename: filename.to_string(),
+            input_bytes,
             total_samples,
             saw_update: false,
+            started_at: Some(Instant::now()),
         });
+        self.file_state = ProgressState::default();
     }
 
     fn observe(&mut self, progress: ProgressSnapshot) -> std::io::Result<()> {
-        let elapsed = self.renderer.elapsed();
-        self.observe_with_elapsed(progress, elapsed)
+        let batch_elapsed = self.batch_elapsed();
+        let file_elapsed = self.current_file_elapsed();
+        self.observe_with_elapsed(progress, batch_elapsed, file_elapsed)
     }
 
     fn observe_with_elapsed(
         &mut self,
         progress: ProgressSnapshot,
-        elapsed: Duration,
+        batch_elapsed: Duration,
+        file_elapsed: Duration,
     ) -> std::io::Result<()> {
         let (filename, total_samples) = {
             let current = self
@@ -486,25 +589,75 @@ impl<W: Write> BatchProgressCoordinator<W> {
             current.saw_update = true;
             (current.filename.clone(), current.total_samples)
         };
+        let force_render = progress.processed_samples >= total_samples
+            || self
+                .completed_samples
+                .saturating_add(progress.processed_samples)
+                >= self.total_samples;
+        let identities = progress_frame_identities(&filename, self.batch_mode);
+        if !self
+            .renderer
+            .should_render(force_render, &identities, self.batch_mode)
+        {
+            return Ok(());
+        }
+
         let display = self.display_for_snapshot(&filename, total_samples, progress);
-        self.renderer.observe_with_elapsed(display, elapsed)
+        let overall_estimate = self.overall_state.observe(
+            display
+                .overall
+                .processed_samples
+                .min(display.overall.total_samples),
+            display.overall.total_samples,
+            batch_elapsed,
+        );
+        let file_estimate = display.file.map(|file| {
+            self.file_state.observe(
+                file.processed_samples.min(file.total_samples),
+                file.total_samples,
+                file_elapsed,
+            )
+        });
+        let frame = format_progress_frame(
+            &display,
+            &overall_estimate,
+            file_estimate.as_ref(),
+            batch_elapsed,
+            file_elapsed,
+        );
+        self.renderer.render(frame)
     }
 
     fn finish_current_file(&mut self) -> std::io::Result<()> {
-        let Some(current) = self.current_file.take() else {
+        let Some((needs_final_update, total_samples)) = self
+            .current_file
+            .as_ref()
+            .map(|current| (!current.saw_update, current.total_samples))
+        else {
             return Ok(());
         };
-        if !current.saw_update {
-            let elapsed = self.renderer.elapsed();
+        if needs_final_update {
+            let batch_elapsed = self.batch_elapsed();
+            let file_elapsed = self.current_file_elapsed();
             let completed = ProgressSnapshot {
-                processed_samples: current.total_samples,
-                total_samples: current.total_samples,
+                processed_samples: total_samples,
+                total_samples,
                 completed_frames: 0,
                 total_frames: 0,
             };
-            self.renderer.observe_with_elapsed(
-                self.display_for_snapshot(&current.filename, current.total_samples, completed),
-                elapsed,
+            self.observe_with_elapsed(completed, batch_elapsed, file_elapsed)?;
+        }
+        let current = self
+            .current_file
+            .take()
+            .expect("current file must still exist after final progress update");
+        if let Some(trace) = self.trace.as_mut() {
+            trace.on_file_finish(
+                &current.filename,
+                current.input_bytes,
+                current
+                    .started_at
+                    .map_or(Duration::ZERO, |started_at| started_at.elapsed()),
             )?;
         }
         self.completed_samples = self.completed_samples.saturating_add(current.total_samples);
@@ -517,6 +670,20 @@ impl<W: Write> BatchProgressCoordinator<W> {
 
     fn end(&mut self) -> std::io::Result<()> {
         self.renderer.end()
+    }
+
+    fn batch_elapsed(&mut self) -> Duration {
+        let started_at = self.batch_started_at.get_or_insert_with(Instant::now);
+        started_at.elapsed()
+    }
+
+    fn current_file_elapsed(&mut self) -> Duration {
+        let current = self
+            .current_file
+            .as_mut()
+            .expect("current file must be set before observing progress");
+        let started_at = current.started_at.get_or_insert_with(Instant::now);
+        started_at.elapsed()
     }
 
     fn display_for_snapshot(
@@ -554,9 +721,9 @@ struct ProgressRenderer<W: Write> {
     writer: W,
     interactive: bool,
     has_drawn: bool,
-    started_at: Option<Instant>,
-    last_line_width: usize,
-    state: ProgressState,
+    last_line_widths: Vec<usize>,
+    last_line_identities: Vec<String>,
+    last_render_at: Option<Instant>,
 }
 
 impl<W: Write> ProgressRenderer<W> {
@@ -565,43 +732,67 @@ impl<W: Write> ProgressRenderer<W> {
             writer,
             interactive,
             has_drawn: false,
-            started_at: None,
-            last_line_width: 0,
-            state: ProgressState::default(),
+            last_line_widths: Vec::new(),
+            last_line_identities: Vec::new(),
+            last_render_at: None,
         }
     }
 
-    fn elapsed(&mut self) -> Duration {
-        let started_at = self.started_at.get_or_insert_with(Instant::now);
-        started_at.elapsed()
+    #[cfg(test)]
+    fn observe_frame(&mut self, frame: ProgressFrame) -> std::io::Result<()> {
+        self.render(frame)
     }
 
-    fn observe_with_elapsed(
-        &mut self,
-        display: ProgressDisplay,
-        elapsed: Duration,
-    ) -> std::io::Result<()> {
+    fn should_render(&self, force: bool, identities: &[String], batch_mode: bool) -> bool {
+        if !self.interactive {
+            return false;
+        }
+        if force || !self.has_drawn || self.last_line_identities != identities {
+            return true;
+        }
+
+        self.last_render_at
+            .is_none_or(|last_rendered| last_rendered.elapsed() >= render_interval(batch_mode))
+    }
+
+    fn render(&mut self, frame: ProgressFrame) -> std::io::Result<()> {
         if !self.interactive {
             return Ok(());
         }
+        self.draw_frame(&frame)?;
+        self.last_render_at = Some(Instant::now());
+        Ok(())
+    }
 
-        let estimate = self.state.observe(
-            display
-                .overall
-                .processed_samples
-                .min(display.overall.total_samples),
-            display.overall.total_samples,
-            elapsed,
-        );
-        let line = format_progress_line(&display, &estimate, elapsed);
-        let line_width = line.len();
-        let padded_width = line_width.max(self.last_line_width);
+    fn draw_frame(&mut self, frame: &ProgressFrame) -> std::io::Result<()> {
+        let previous_height = self.last_line_widths.len();
+        if self.has_drawn && previous_height > 1 {
+            write!(self.writer, "\x1b[{}A", previous_height - 1)?;
+        }
+
+        let total_lines = frame.lines.len().max(previous_height);
+        for line_index in 0..total_lines {
+            if line_index > 0 {
+                self.writer.write_all(b"\n")?;
+            }
+            self.writer.write_all(b"\r")?;
+            let previous_width = self.last_line_widths.get(line_index).copied().unwrap_or(0);
+            let line = frame
+                .lines
+                .get(line_index)
+                .map(String::as_str)
+                .unwrap_or("");
+            let padded_width = line.len().max(previous_width);
+            write!(self.writer, "{line:<padded_width$}")?;
+        }
 
         self.has_drawn = true;
-        self.writer.write_all(b"\r")?;
-        self.writer
-            .write_all(format!("{line:<padded_width$}").as_bytes())?;
-        self.last_line_width = line_width;
+        self.last_line_widths = frame.lines.iter().map(String::len).collect();
+        self.last_line_identities = frame
+            .lines
+            .iter()
+            .map(|line| frame_line_identity(line))
+            .collect();
         self.writer.flush()
     }
 
@@ -686,10 +877,40 @@ impl ProgressState {
     }
 }
 
-fn format_progress_line(
+fn format_progress_frame(
     display: &ProgressDisplay,
+    overall_estimate: &ProgressEstimate,
+    file_estimate: Option<&ProgressEstimate>,
+    batch_elapsed: Duration,
+    file_elapsed: Duration,
+) -> ProgressFrame {
+    if let Some(file) = display.file {
+        let warming_up = ProgressEstimate::warming_up();
+        let file_estimate = file_estimate.unwrap_or(&warming_up);
+        return ProgressFrame {
+            lines: vec![
+                format_batch_overall_line(display.overall, overall_estimate, batch_elapsed),
+                format_batch_file_line(&display.filename, file, file_estimate, file_elapsed),
+            ],
+        };
+    }
+
+    ProgressFrame {
+        lines: vec![format_single_file_line(
+            &display.filename,
+            display.overall,
+            overall_estimate,
+            batch_elapsed,
+        )],
+    }
+}
+
+fn format_progress_line(
+    label: &str,
+    progress: SampleProgress,
     estimate: &ProgressEstimate,
     elapsed: Duration,
+    bar_width: usize,
 ) -> String {
     let elapsed = format_clock(elapsed);
     let eta = estimate
@@ -701,29 +922,84 @@ fn format_progress_line(
         .map(format_speed)
         .unwrap_or_else(|| "warmup".to_string());
 
-    if let Some(file) = display.file {
-        format!(
-            "{} | Total {} {:>5.1}% | File {} {:>5.1}% | Elapsed {} | ETA {} | Rate {}",
-            display.filename,
-            format_progress_bar(progress_ratio(display.overall), BATCH_PROGRESS_BAR_WIDTH),
-            progress_ratio(display.overall) * 100.0,
-            format_progress_bar(progress_ratio(file), BATCH_PROGRESS_BAR_WIDTH),
-            progress_ratio(file) * 100.0,
+    format!(
+        "{label} | {} {:>5.1}% | Elapsed {} | ETA {} | Rate {}",
+        format_progress_bar(progress_ratio(progress), bar_width),
+        progress_ratio(progress) * 100.0,
+        elapsed,
+        eta,
+        rate
+    )
+}
+
+fn format_single_file_line(
+    filename: &str,
+    progress: SampleProgress,
+    estimate: &ProgressEstimate,
+    elapsed: Duration,
+) -> String {
+    format_progress_line(
+        filename,
+        progress,
+        estimate,
+        elapsed,
+        SINGLE_PROGRESS_BAR_WIDTH,
+    )
+}
+
+fn format_batch_overall_line(
+    progress: SampleProgress,
+    estimate: &ProgressEstimate,
+    elapsed: Duration,
+) -> String {
+    format_progress_line(
+        "Batch",
+        progress,
+        estimate,
+        elapsed,
+        BATCH_PROGRESS_BAR_WIDTH,
+    )
+}
+
+fn format_batch_file_line(
+    filename: &str,
+    progress: SampleProgress,
+    estimate: &ProgressEstimate,
+    elapsed: Duration,
+) -> String {
+    format!(
+        "{filename} | {}",
+        format_progress_line(
+            "File",
+            progress,
+            estimate,
             elapsed,
-            eta,
-            rate
+            BATCH_PROGRESS_BAR_WIDTH,
         )
+    )
+}
+
+fn progress_frame_identities(filename: &str, batch_mode: bool) -> Vec<String> {
+    if batch_mode {
+        vec!["Batch".to_string(), format!("{filename} | File")]
     } else {
-        format!(
-            "{} | {} {:>5.1}% | Elapsed {} | ETA {} | Rate {}",
-            display.filename,
-            format_progress_bar(progress_ratio(display.overall), SINGLE_PROGRESS_BAR_WIDTH),
-            progress_ratio(display.overall) * 100.0,
-            elapsed,
-            eta,
-            rate
-        )
+        vec![filename.to_string()]
     }
+}
+
+fn render_interval(batch_mode: bool) -> Duration {
+    if batch_mode {
+        BATCH_RENDER_INTERVAL
+    } else {
+        SINGLE_RENDER_INTERVAL
+    }
+}
+
+fn frame_line_identity(line: &str) -> String {
+    if let Some((filename, _)) = line.split_once(" | File | ") {
+        return format!("{filename} | File");
+    }
+    line.split(" | ").next().unwrap_or_default().to_string()
 }
 
 fn progress_ratio(progress: SampleProgress) -> f64 {
@@ -773,29 +1049,40 @@ fn format_speed(samples_per_second: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        path::{Path, PathBuf},
+        time::{Duration, Instant},
+    };
 
     use super::{
-        BatchProgressCoordinator, ProgressDisplay, ProgressEstimate, ProgressRenderer,
-        ProgressState, SampleProgress, format_progress_line,
+        BatchProgressCoordinator, ProgressDisplay, ProgressEstimate, ProgressFrame,
+        ProgressRenderer, ProgressState, SampleProgress, format_progress_frame,
+        progress_frame_identities, relative_display_name,
     };
     use flacx::ProgressSnapshot;
+
+    fn final_frame_lines(output: &str) -> Vec<&str> {
+        output
+            .trim_end_matches('\n')
+            .rsplit("\x1b[1A")
+            .next()
+            .unwrap_or(output)
+            .split('\n')
+            .map(|line| line.trim_start_matches('\r'))
+            .collect()
+    }
+
+    fn legacy_input_path_sort_key(path: &Path) -> String {
+        relative_display_name(path)
+    }
 
     #[test]
     fn progress_renderer_is_silent_when_not_interactive() {
         let mut renderer = ProgressRenderer::new(Vec::new(), false);
         renderer
-            .observe_with_elapsed(
-                ProgressDisplay {
-                    filename: "input.wav".into(),
-                    overall: SampleProgress {
-                        processed_samples: 50,
-                        total_samples: 100,
-                    },
-                    file: None,
-                },
-                Duration::from_millis(0),
-            )
+            .observe_frame(ProgressFrame {
+                lines: vec!["input.wav | [============] 100.0%".into()],
+            })
             .unwrap();
         renderer.end().unwrap();
 
@@ -806,21 +1093,8 @@ mod tests {
     fn progress_renderer_writes_elapsed_filename_eta_and_rate() {
         let mut renderer = ProgressRenderer::new(Vec::new(), true);
         renderer
-            .observe_with_elapsed(
-                ProgressDisplay {
-                    filename: "mixdown.wav".into(),
-                    overall: SampleProgress {
-                        processed_samples: 50,
-                        total_samples: 100,
-                    },
-                    file: None,
-                },
-                Duration::from_millis(0),
-            )
-            .unwrap();
-        renderer
-            .observe_with_elapsed(
-                ProgressDisplay {
+            .observe_frame(format_progress_frame(
+                &ProgressDisplay {
                     filename: "mixdown.wav".into(),
                     overall: SampleProgress {
                         processed_samples: 100,
@@ -828,8 +1102,14 @@ mod tests {
                     },
                     file: None,
                 },
+                &ProgressEstimate {
+                    eta: Some(Duration::from_secs(0)),
+                    samples_per_second: Some(333.0),
+                },
+                None,
                 Duration::from_millis(300),
-            )
+                Duration::from_millis(300),
+            ))
             .unwrap();
         renderer.end().unwrap();
 
@@ -883,30 +1163,14 @@ mod tests {
     fn progress_renderer_overwrites_stale_characters_when_line_shrinks() {
         let mut renderer = ProgressRenderer::new(Vec::new(), true);
         renderer
-            .observe_with_elapsed(
-                ProgressDisplay {
-                    filename: "wide-name.wav".into(),
-                    overall: SampleProgress {
-                        processed_samples: 10,
-                        total_samples: 100,
-                    },
-                    file: None,
-                },
-                Duration::from_millis(0),
-            )
+            .observe_frame(ProgressFrame {
+                lines: vec!["wide-name.wav | [==>---------------------]  10.0% | Elapsed 00:00 | ETA --:-- | Rate warmup".into()],
+            })
             .unwrap();
         renderer
-            .observe_with_elapsed(
-                ProgressDisplay {
-                    filename: "x.wav".into(),
-                    overall: SampleProgress {
-                        processed_samples: 100,
-                        total_samples: 100,
-                    },
-                    file: None,
-                },
-                Duration::from_millis(300),
-            )
+            .observe_frame(ProgressFrame {
+                lines: vec!["x.wav | [========================] 100.0% | Elapsed 00:00 | ETA 00:00 | Rate 333/s".into()],
+            })
             .unwrap();
         renderer.end().unwrap();
 
@@ -926,8 +1190,8 @@ mod tests {
     }
 
     #[test]
-    fn progress_line_contains_batch_bars_elapsed_eta_and_rate() {
-        let line = format_progress_line(
+    fn progress_frame_contains_two_batch_lines_with_independent_progress_bundles() {
+        let frame = format_progress_frame(
             &ProgressDisplay {
                 filename: "album/disc1/song.wav".into(),
                 overall: SampleProgress {
@@ -943,20 +1207,89 @@ mod tests {
                 eta: Some(Duration::from_secs(3)),
                 samples_per_second: Some(12_345.0),
             },
-            Duration::from_secs(1),
+            Some(&ProgressEstimate {
+                eta: Some(Duration::from_secs(1)),
+                samples_per_second: Some(4_096.0),
+            }),
+            Duration::from_secs(4),
+            Duration::from_secs(2),
         );
-        assert!(line.contains("album/disc1/song.wav"));
-        assert!(line.contains("Total"));
-        assert!(line.contains("File"));
-        assert!(line.contains("Elapsed 00:01"));
-        assert!(line.contains("ETA 00:03"));
-        assert!(line.contains("Rate 12.3k/s"));
+        assert_eq!(frame.lines.len(), 2);
+        assert!(frame.lines[0].starts_with("Batch | "));
+        assert!(frame.lines[0].contains("50.0%"));
+        assert!(frame.lines[0].contains("Elapsed 00:04"));
+        assert!(frame.lines[0].contains("ETA 00:03"));
+        assert!(frame.lines[0].contains("Rate 12.3k/s"));
+        assert!(frame.lines[1].starts_with("album/disc1/song.wav | File | "));
+        assert!(frame.lines[1].contains("50.0%"));
+        assert!(frame.lines[1].contains("Elapsed 00:02"));
+        assert!(frame.lines[1].contains("ETA 00:01"));
+        assert!(frame.lines[1].contains("Rate 4.1k/s"));
+    }
+
+    #[test]
+    fn batch_progress_frame_stays_two_lines_while_file_estimate_is_warming_up() {
+        let frame = format_progress_frame(
+            &ProgressDisplay {
+                filename: "album/disc1/song.wav".into(),
+                overall: SampleProgress {
+                    processed_samples: 10,
+                    total_samples: 100,
+                },
+                file: Some(SampleProgress {
+                    processed_samples: 5,
+                    total_samples: 50,
+                }),
+            },
+            &ProgressEstimate::warming_up(),
+            None,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        );
+        assert_eq!(frame.lines.len(), 2);
+        assert!(frame.lines[0].starts_with("Batch | "));
+        assert!(frame.lines[1].starts_with("album/disc1/song.wav | File | "));
+        assert!(frame.lines[1].contains("Rate warmup"));
+    }
+
+    #[test]
+    fn batch_renderer_clears_stale_characters_on_both_lines_when_frame_shrinks() {
+        let mut renderer = ProgressRenderer::new(Vec::new(), true);
+        renderer
+            .observe_frame(ProgressFrame {
+                lines: vec![
+                    "Batch overall progress | [=====>----]  55.0% | Elapsed 00:15 | ETA 00:12 | Rate 12.3k/s"
+                        .into(),
+                    "disc-one-with-a-very-long-name.wav | File | [=====>----]  55.0% | Elapsed 00:09 | ETA 00:07 | Rate 6.1k/s"
+                        .into(),
+                ],
+            })
+            .unwrap();
+        renderer
+            .observe_frame(ProgressFrame {
+                lines: vec![
+                    "Batch | [==========] 100.0% | Elapsed 00:16 | ETA 00:00 | Rate 12.3k/s".into(),
+                    "x.wav | File | [==========] 100.0% | Elapsed 00:01 | ETA 00:00 | Rate 333/s"
+                        .into(),
+                ],
+            })
+            .unwrap();
+        renderer.end().unwrap();
+
+        let output = String::from_utf8(renderer.writer).unwrap();
+        assert!(output.contains("\x1b[1A"));
+        let final_lines = final_frame_lines(&output);
+        assert_eq!(final_lines.len(), 2);
+        assert!(final_lines[0].contains("Batch | "));
+        assert!(final_lines[1].contains("x.wav | File | "));
+        assert!(final_lines[0].ends_with(' '));
+        assert!(final_lines[1].ends_with(' '));
     }
 
     #[test]
     fn batch_progress_uses_exact_total_samples_before_completion() {
-        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, 300, true);
-        progress.begin_file("disc1/first.wav", 100);
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 300, true);
+        progress.begin_file("disc1/first.wav", 1_024, 100);
         progress
             .observe_with_elapsed(
                 ProgressSnapshot {
@@ -966,15 +1299,51 @@ mod tests {
                     total_frames: 2,
                 },
                 Duration::from_millis(300),
+                Duration::from_millis(300),
             )
             .unwrap();
         progress.end().unwrap();
 
         let output = String::from_utf8(progress.renderer.writer).unwrap();
-        assert!(output.contains("disc1/first.wav"));
-        assert!(output.contains("Total"));
-        assert!(output.contains("16.7%"));
-        assert!(output.contains("File"));
-        assert!(output.contains("50.0%"));
+        let final_lines = final_frame_lines(&output);
+        assert_eq!(final_lines.len(), 2);
+        assert!(final_lines[0].contains("Batch | "));
+        assert!(final_lines[0].contains("16.7%"));
+        assert!(final_lines[1].contains("disc1/first.wav | File | "));
+        assert!(final_lines[1].contains("50.0%"));
+    }
+
+    #[test]
+    fn batch_renderer_uses_a_longer_refresh_interval_than_single_file_mode() {
+        let identities = progress_frame_identities("disc1/first.wav", true);
+        let mut renderer = ProgressRenderer::new(Vec::new(), true);
+        renderer.has_drawn = true;
+        renderer.last_line_identities = identities.clone();
+        renderer.last_render_at = Some(Instant::now() - Duration::from_millis(150));
+
+        assert!(!renderer.should_render(false, &identities, true));
+        assert!(renderer.should_render(false, &identities, false));
+    }
+
+    #[test]
+    fn cached_relative_display_names_sort_like_the_previous_input_path_order() {
+        let input_root = PathBuf::from("fixtures");
+        let mut relative_sort = vec![
+            input_root.join("disc10").join("track02.wav"),
+            input_root.join("disc2").join("track01.wav"),
+            input_root.join("disc2").join("track10.wav"),
+            input_root.join("disc1").join("bonus").join("track01.wav"),
+            input_root.join("disc1").join("track02.wav"),
+        ];
+        let mut legacy_sort = relative_sort.clone();
+
+        relative_sort.sort_by(|left, right| {
+            relative_display_name(left.strip_prefix(&input_root).unwrap()).cmp(
+                &relative_display_name(right.strip_prefix(&input_root).unwrap()),
+            )
+        });
+        legacy_sort.sort_by_key(|path| legacy_input_path_sort_key(path));
+
+        assert_eq!(relative_sort, legacy_sort);
     }
 }

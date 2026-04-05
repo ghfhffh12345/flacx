@@ -41,6 +41,17 @@ fn write_flac_file(path: &Path, channels: u16, frames: usize) -> (Vec<u8>, Vec<u
     (wav, flac)
 }
 
+fn final_progress_frame_lines(stderr: &str) -> Vec<&str> {
+    stderr
+        .trim_end_matches('\n')
+        .rsplit("\x1b[1A")
+        .next()
+        .unwrap_or(stderr)
+        .split('\n')
+        .map(|line| line.trim_start_matches('\r'))
+        .collect()
+}
+
 #[test]
 fn help_lists_encode_and_decode_commands() {
     let output = Command::new(flacx_bin()).arg("--help").output().unwrap();
@@ -143,6 +154,43 @@ fn encode_command_matches_library_output() {
 }
 
 #[test]
+fn encode_command_emits_progress_trace_when_requested() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("input.wav");
+    write_wav_file(&input_path, 1, 2_048);
+    let output_path = input_dir.join("input.flac");
+    let trace_path = input_dir.join("progress.trace");
+
+    let output = Command::new(flacx_bin())
+        .env("FLACX_PROGRESS_TRACE", &trace_path)
+        .args([
+            "encode",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "--threads",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let trace = fs::read_to_string(&trace_path).unwrap();
+    assert!(trace.contains("event=command"));
+    assert!(trace.contains("kind=encode"));
+    assert!(trace.contains("interactive=0"));
+    assert!(trace.contains("batch_mode=0"));
+    assert!(trace.contains("event=file_finish"));
+    assert!(trace.contains("filename=input.wav"));
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
 fn encode_command_renders_filename_elapsed_and_progress_when_interactive() {
     let samples = sample_fixture(1, 2_048);
     let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
@@ -198,10 +246,19 @@ fn encode_directory_progress_shows_overall_and_file_progress() {
     encode_command(&command, true, &mut stderr).unwrap();
 
     let stderr = String::from_utf8(stderr).unwrap();
-    assert!(stderr.contains("disc1/first.wav") || stderr.contains("disc1/second.wav"));
-    assert!(stderr.contains("Total"));
-    assert!(stderr.contains("File"));
-    assert!(stderr.contains("Elapsed"));
+    let final_lines = final_progress_frame_lines(&stderr);
+    assert_eq!(final_lines.len(), 2);
+    assert!(final_lines[0].starts_with("Batch | "));
+    assert!(final_lines[0].contains("Elapsed"));
+    assert!(final_lines[0].contains("ETA"));
+    assert!(final_lines[0].contains("Rate"));
+    assert!(
+        final_lines[1].contains("disc1/first.wav | File | ")
+            || final_lines[1].contains("disc1/second.wav | File | ")
+    );
+    assert!(final_lines[1].contains("Elapsed"));
+    assert!(final_lines[1].contains("ETA"));
+    assert!(final_lines[1].contains("Rate"));
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -223,9 +280,10 @@ fn encode_single_file_directory_still_uses_batch_progress_layout() {
     encode_command(&command, true, &mut stderr).unwrap();
 
     let stderr = String::from_utf8(stderr).unwrap();
-    assert!(stderr.contains("Total"));
-    assert!(stderr.contains("File"));
-    assert!(stderr.contains("only.wav"));
+    let final_lines = final_progress_frame_lines(&stderr);
+    assert_eq!(final_lines.len(), 2);
+    assert!(final_lines[0].starts_with("Batch | "));
+    assert!(final_lines[1].contains("only.wav | File | "));
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -247,9 +305,10 @@ fn encode_single_match_folder_still_uses_batch_progress_layout() {
     encode_command(&command, true, &mut stderr).unwrap();
 
     let stderr = String::from_utf8(stderr).unwrap();
-    assert!(stderr.contains("disc1/only.wav"));
-    assert!(stderr.contains("Total"));
-    assert!(stderr.contains("File"));
+    let final_lines = final_progress_frame_lines(&stderr);
+    assert_eq!(final_lines.len(), 2);
+    assert!(final_lines[0].starts_with("Batch | "));
+    assert!(final_lines[1].contains("disc1/only.wav | File | "));
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -588,10 +647,19 @@ fn decode_directory_progress_shows_overall_and_file_progress() {
     decode_command(&command, true, &mut stderr).unwrap();
 
     let stderr = String::from_utf8(stderr).unwrap();
-    assert!(stderr.contains("disc1/first.flac") || stderr.contains("disc1/second.flac"));
-    assert!(stderr.contains("Total"));
-    assert!(stderr.contains("File"));
-    assert!(stderr.contains("Elapsed"));
+    let final_lines = final_progress_frame_lines(&stderr);
+    assert_eq!(final_lines.len(), 2);
+    assert!(final_lines[0].starts_with("Batch | "));
+    assert!(final_lines[0].contains("Elapsed"));
+    assert!(final_lines[0].contains("ETA"));
+    assert!(final_lines[0].contains("Rate"));
+    assert!(
+        final_lines[1].contains("disc1/first.flac | File | ")
+            || final_lines[1].contains("disc1/second.flac | File | ")
+    );
+    assert!(final_lines[1].contains("Elapsed"));
+    assert!(final_lines[1].contains("ETA"));
+    assert!(final_lines[1].contains("Rate"));
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -613,9 +681,10 @@ fn decode_single_file_directory_still_uses_batch_progress_layout() {
     decode_command(&command, true, &mut stderr).unwrap();
 
     let stderr = String::from_utf8(stderr).unwrap();
-    assert!(stderr.contains("Total"));
-    assert!(stderr.contains("File"));
-    assert!(stderr.contains("only.flac"));
+    let final_lines = final_progress_frame_lines(&stderr);
+    assert_eq!(final_lines.len(), 2);
+    assert!(final_lines[0].starts_with("Batch | "));
+    assert!(final_lines[1].contains("only.flac | File | "));
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -637,9 +706,10 @@ fn decode_single_match_folder_still_uses_batch_progress_layout() {
     decode_command(&command, true, &mut stderr).unwrap();
 
     let stderr = String::from_utf8(stderr).unwrap();
-    assert!(stderr.contains("disc1/only.flac"));
-    assert!(stderr.contains("Total"));
-    assert!(stderr.contains("File"));
+    let final_lines = final_progress_frame_lines(&stderr);
+    assert_eq!(final_lines.len(), 2);
+    assert!(final_lines[0].starts_with("Batch | "));
+    assert!(final_lines[1].contains("disc1/only.flac | File | "));
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -720,8 +790,7 @@ fn decode_directory_without_output_writes_sibling_wavs_at_default_depth() {
     let input_dir = unique_temp_dir();
     let top_flac = input_dir.join("top.flac");
     let nested_flac = input_dir.join("nested").join("deep.flac");
-    let (top_wav, _) = write_flac_file(&top_flac, 1, 2_048);
-    let _ = top_wav;
+    write_flac_file(&top_flac, 1, 2_048);
     write_flac_file(&nested_flac, 1, 2_048);
 
     let output = Command::new(flacx_bin())

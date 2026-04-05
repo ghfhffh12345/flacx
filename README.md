@@ -97,7 +97,7 @@ Progress display:
 - interactive terminals show a live progress line during encode and decode
 - redirected or non-interactive runs do not emit progress UI
 - single-file runs show the current filename, elapsed time, ETA, and rate
-- folder runs show both overall batch progress and per-file progress on the same live line
+- folder runs show overall batch progress and per-file progress on separate live lines
 - batch progress uses exact samples processed across the full planned worklist
 
 See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for CLI usage
