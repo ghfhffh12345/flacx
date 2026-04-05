@@ -62,13 +62,14 @@ Run the workspace CLI crate:
 ```bash
 cargo run -p flacx-cli -- encode input.wav -o output.flac --level 8 --threads 4
 cargo run -p flacx-cli -- encode album-dir -o encoded-album --depth 0
-cargo run -p flacx-cli -- decode input.flac output.wav --threads 4
+cargo run -p flacx-cli -- decode input.flac -o output.wav --threads 4
+cargo run -p flacx-cli -- decode encoded-album -o decoded-album --depth 0
 ```
 
 Supported CLI shape:
 
 - `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
-- `flacx decode <input> <output>`
+- `flacx decode <input> [-o <output-or-dir>] [--depth <depth>]`
 - encode-only flags:
   - `--output`
   - `--level`
@@ -76,13 +77,18 @@ Supported CLI shape:
   - `--block-size`
   - `--depth`
 - decode-only flags:
+  - `--output`
   - `--threads`
+  - `--depth`
 
-Encode defaults and folder behavior:
+Encode/decode defaults and folder behavior:
 
 - single-file input with no `-o` writes a sibling `.flac` next to the source WAV
 - folder input with no `-o` writes `.flac` siblings next to each discovered WAV
 - folder input with `-o <dir>` preserves relative subpaths under the destination root
+- decode single-file input with no `-o` writes a sibling `.wav` next to the source FLAC
+- decode folder input with no `-o` writes `.wav` siblings next to each discovered FLAC
+- decode folder input with `-o <dir>` preserves relative subpaths under the destination root
 - `--depth` defaults to `1`, affects directory input only, and uses `0` for unlimited traversal
 - encode `--threads` defaults to `8`
 
@@ -90,7 +96,9 @@ Progress display:
 
 - interactive terminals show a live progress line during encode and decode
 - redirected or non-interactive runs do not emit progress UI
-- encode and decode share the same single-line progress format
+- single-file runs show the current filename, elapsed time, ETA, and rate
+- folder runs show both overall batch progress and per-file progress on the same live line
+- batch progress uses exact samples processed across the full planned worklist
 
 See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for CLI usage
 details.
