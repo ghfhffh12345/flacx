@@ -10,24 +10,28 @@
 //!
 //! # Command shape
 //!
-//! - `flacx encode <input> <output>`
+//! - `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
 //! - `flacx decode <input> <output>`
 //! - encode-only flags:
+//!   - `--output`
 //!   - `--level`
 //!   - `--threads`
 //!   - `--block-size`
+//!   - `--depth` (directory input only)
 //! - decode-only flags:
 //!   - `--threads`
 
 use std::{
+    fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use flacx::{
-    DecodeConfig, DecodeSummary, Decoder, Encoder, EncoderConfig, ProgressSnapshot, Result,
+    DecodeConfig, DecodeSummary, Decoder, Encoder, EncoderConfig, Error, ProgressSnapshot, Result,
 };
+use walkdir::WalkDir;
 
 const PROGRESS_BAR_WIDTH: usize = 24;
 const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
@@ -35,7 +39,8 @@ const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeCommand {
     pub input: PathBuf,
-    pub output: PathBuf,
+    pub output: Option<PathBuf>,
+    pub depth: usize,
     pub config: EncoderConfig,
 }
 
@@ -51,26 +56,20 @@ pub fn encode_command(
     interactive: bool,
     stderr: &mut impl Write,
 ) -> Result<()> {
-    let mut progress = ProgressRenderer::new(stderr, interactive);
-    let result = Encoder::new(command.config).encode_file_with_progress(
-        &command.input,
-        &command.output,
-        |update| {
-            progress.observe(update)?;
-            Ok(())
-        },
-    );
-
-    match result {
-        Ok(_) => {
-            progress.finish()?;
-            Ok(())
+    let worklist = plan_encode_worklist(command)?;
+    for item in worklist {
+        if item.ensure_parent_dirs {
+            ensure_output_parent_dirs(&item.output)?;
         }
-        Err(error) => {
-            let _ = progress.end();
-            Err(error)
-        }
+        encode_one_file(
+            command.config,
+            &item.input,
+            &item.output,
+            interactive,
+            stderr,
+        )?;
     }
+    Ok(())
 }
 
 pub fn decode_command(
@@ -98,6 +97,160 @@ pub fn decode_command(
             Err(error)
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EncodeWorkItem {
+    input: PathBuf,
+    output: PathBuf,
+    ensure_parent_dirs: bool,
+}
+
+fn plan_encode_worklist(command: &EncodeCommand) -> Result<Vec<EncodeWorkItem>> {
+    if command.input.is_dir() {
+        plan_directory_encode_worklist(command)
+    } else {
+        Ok(vec![plan_single_file_encode(command)?])
+    }
+}
+
+fn plan_single_file_encode(command: &EncodeCommand) -> Result<EncodeWorkItem> {
+    let output = match &command.output {
+        Some(output) => {
+            if output.is_dir() {
+                return Err(Error::Encode(format!(
+                    "output path '{}' is a directory; use a file path for single-file encode",
+                    output.display()
+                )));
+            }
+            output.clone()
+        }
+        None => derive_flac_output_path(&command.input),
+    };
+
+    Ok(EncodeWorkItem {
+        input: command.input.clone(),
+        output,
+        ensure_parent_dirs: false,
+    })
+}
+
+fn plan_directory_encode_worklist(command: &EncodeCommand) -> Result<Vec<EncodeWorkItem>> {
+    let output_root = match &command.output {
+        Some(output) => Some(validate_or_create_output_root(output)?),
+        None => None,
+    };
+
+    let mut worklist =
+        collect_directory_work_items(&command.input, output_root.as_deref(), command.depth)?;
+    worklist.sort_by(|left, right| path_sort_key(&left.input).cmp(&path_sort_key(&right.input)));
+    Ok(worklist)
+}
+
+fn validate_or_create_output_root(output_root: &Path) -> Result<PathBuf> {
+    if output_root.exists() {
+        if !output_root.is_dir() {
+            return Err(Error::Encode(format!(
+                "output path '{}' is not a directory for folder encode",
+                output_root.display()
+            )));
+        }
+    } else {
+        fs::create_dir_all(output_root)?;
+    }
+
+    Ok(output_root.to_path_buf())
+}
+
+fn collect_directory_work_items(
+    input_root: &Path,
+    output_root: Option<&Path>,
+    depth: usize,
+) -> Result<Vec<EncodeWorkItem>> {
+    let mut walker = WalkDir::new(input_root).follow_links(false).min_depth(1);
+    if depth != 0 {
+        walker = walker.max_depth(depth);
+    }
+
+    let mut worklist = Vec::new();
+    for entry in walker {
+        let entry = entry.map_err(|error| {
+            Error::Encode(format!(
+                "failed to traverse input directory '{}': {error}",
+                input_root.display()
+            ))
+        })?;
+        if !entry.file_type().is_file() || !is_wav_path(entry.path()) {
+            continue;
+        }
+
+        let input = entry.path().to_path_buf();
+        let (output, ensure_parent_dirs) = match output_root {
+            Some(output_root) => {
+                let relative = input
+                    .strip_prefix(input_root)
+                    .map_err(|_| Error::Encode("failed to derive relative input path".into()))?;
+                (output_root.join(relative).with_extension("flac"), true)
+            }
+            None => (derive_flac_output_path(&input), false),
+        };
+
+        worklist.push(EncodeWorkItem {
+            input,
+            output,
+            ensure_parent_dirs,
+        });
+    }
+    Ok(worklist)
+}
+
+fn encode_one_file(
+    config: EncoderConfig,
+    input: &Path,
+    output: &Path,
+    interactive: bool,
+    stderr: &mut impl Write,
+) -> Result<()> {
+    let mut progress = ProgressRenderer::new(stderr, interactive);
+    let result = Encoder::new(config).encode_file_with_progress(input, output, |update| {
+        progress.observe(update)?;
+        Ok(())
+    });
+
+    match result {
+        Ok(_) => {
+            progress.finish()?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = progress.end();
+            Err(error)
+        }
+    }
+}
+
+fn derive_flac_output_path(input: &Path) -> PathBuf {
+    input.with_extension("flac")
+}
+
+fn ensure_output_parent_dirs(output: &Path) -> Result<()> {
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn is_wav_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+}
+
+fn path_sort_key(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 struct ProgressRenderer<W: Write> {

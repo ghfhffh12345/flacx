@@ -9,20 +9,32 @@ publishable library package.
 ## Run locally
 
 ```bash
-cargo run -p flacx-cli -- encode input.wav output.flac --level 8 --threads 4
+cargo run -p flacx-cli -- encode input.wav -o output.flac --level 8 --threads 4
+cargo run -p flacx-cli -- encode album-dir -o encoded-album --depth 0
 cargo run -p flacx-cli -- decode input.flac output.wav --threads 4
 ```
 
 ## Command shape
 
-- `flacx encode <input> <output>`
+- `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
 - `flacx decode <input> <output>`
 - encode-only flags:
+  - `--output` / `-o`
   - `--level`
   - `--threads`
   - `--block-size`
+  - `--depth`
 - decode-only flags:
   - `--threads`
+
+Encode output behavior:
+
+- single-file input with no `-o` writes a sibling `.flac` next to the source WAV
+- single-file input with `-o <path>` writes exactly to that file path
+- folder input with no `-o` writes `.flac` siblings next to each discovered WAV
+- folder input with `-o <dir>` writes under the destination root while preserving relative subpaths
+- `--depth` defaults to `1`, affects only folder input, and uses `0` for unlimited traversal
+- encode `--threads` defaults to `8`
 
 ## Progress display
 

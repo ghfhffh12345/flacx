@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 clap.workspace = true
 flacx = { path = "../flacx", features = ["progress"] }
+walkdir.workspace = true
 
 [[bin]]
 name = "flacx"
