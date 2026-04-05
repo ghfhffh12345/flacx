@@ -10,7 +10,7 @@ crate.
 
 ```toml
 [dependencies]
-flacx = "0.3.0"
+flacx = "0.4.0"
 ```
 
 ## Quick start
@@ -18,9 +18,10 @@ flacx = "0.3.0"
 ```rust
 use flacx::{Encoder, EncoderConfig, level::Level};
 
-let config = EncoderConfig::default()
-    .with_level(Level::Level8)
-    .with_threads(4);
+let config = EncoderConfig::builder()
+    .level(Level::Level8)
+    .threads(4)
+    .build();
 
 Encoder::new(config)
     .encode_file("input.wav", "output.flac")
@@ -30,18 +31,23 @@ Encoder::new(config)
 ```rust
 use flacx::Decoder;
 
-Decoder::new()
+Decoder::default()
     .decode_file("input.flac", "output.wav")
     .unwrap();
 ```
 
 ## Primary API surface
 
+- `EncoderBuilder`
 - `EncoderConfig`
 - `Encoder`
-- `Decoder`
+- `EncodeSummary`
 - `encode_file`
 - `encode_bytes`
+- `DecodeBuilder`
+- `DecodeConfig`
+- `Decoder`
+- `DecodeSummary`
 - `decode_file`
 - `decode_bytes`
 
@@ -52,14 +58,18 @@ disabled by default.
 
 ```toml
 [dependencies]
-flacx = { version = "0.3.0", features = ["progress"] }
+flacx = { version = "0.4.0", features = ["progress"] }
 ```
 
 When enabled, the additional progress-specific API surface includes:
 
 - `EncodeProgress`
+- `DecodeProgress`
+- `ProgressSnapshot`
 - `Encoder::encode_with_progress`
 - `Encoder::encode_file_with_progress`
+- `Decoder::decode_with_progress`
+- `Decoder::decode_file_with_progress`
 
 ## Current scope
 

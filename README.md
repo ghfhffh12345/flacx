@@ -24,7 +24,7 @@ Add the library crate to your project:
 
 ```toml
 [dependencies]
-flacx = "0.3.0"
+flacx = "0.4.0"
 ```
 
 Then encode WAV to FLAC from Rust:
@@ -32,9 +32,10 @@ Then encode WAV to FLAC from Rust:
 ```rust
 use flacx::{Encoder, EncoderConfig, level::Level};
 
-let config = EncoderConfig::default()
-    .with_level(Level::Level8)
-    .with_threads(4);
+let config = EncoderConfig::builder()
+    .level(Level::Level8)
+    .threads(4)
+    .build();
 
 Encoder::new(config)
     .encode_file("input.wav", "output.flac")
@@ -46,7 +47,7 @@ And decode FLAC back to WAV:
 ```rust
 use flacx::Decoder;
 
-Decoder::new()
+Decoder::default()
     .decode_file("input.flac", "output.wav")
     .unwrap();
 ```
@@ -60,7 +61,7 @@ Run the workspace CLI crate:
 
 ```bash
 cargo run -p flacx-cli -- encode input.wav output.flac --level 8 --threads 4
-cargo run -p flacx-cli -- decode input.flac output.wav
+cargo run -p flacx-cli -- decode input.flac output.wav --threads 4
 ```
 
 Supported CLI shape:
@@ -71,6 +72,14 @@ Supported CLI shape:
   - `--level`
   - `--threads`
   - `--block-size`
+- decode-only flags:
+  - `--threads`
+
+Progress display:
+
+- interactive terminals show a live progress line during encode and decode
+- redirected or non-interactive runs do not emit progress UI
+- encode and decode share the same single-line progress format
 
 See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for CLI usage
 details.
