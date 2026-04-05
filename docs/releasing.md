@@ -9,6 +9,21 @@ and then branches into one of two paths:
 - **Pre-release tag**: create a GitHub prerelease only and skip crates.io
   publishing.
 
+## Local release-prep order
+
+Before any tag is pushed, prepare the release in this order:
+
+1. Update the release-prep files from repo evidence.
+2. Refresh `Cargo.lock` automatically through cargo commands when the planned release-prep changes require it.
+3. Validate, build, and test locally.
+4. Stage the tracked release-prep files, including `Cargo.lock` when the planned refresh changed it.
+5. Run the release-prep gate.
+6. Commit the release-prep changes, including any planned `Cargo.lock` delta.
+7. Push the branch, create the tag, and hand off to the release workflow.
+
+Do not edit `Cargo.lock` manually.
+Generated `.omx/logs/release-notes-v<version>.md` files stay local-only and are never staged or committed.
+
 ## Tag contract
 
 - Only tags that match `v*` trigger the release flow.
@@ -42,7 +57,9 @@ Examples:
 
 ## Manual recovery
 
-If the crates.io publish succeeds but GitHub release creation fails:
+The release workflow is expected to complete GitHub release creation automatically after the approved fix. Manual recovery is no longer part of the normal path.
+
+If the crates.io publish succeeds but GitHub release creation still fails because of an external workflow issue:
 
 1. Do **not** republish the crate.
 2. Re-run or manually complete only the GitHub release creation step for the
