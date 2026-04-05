@@ -9,6 +9,7 @@ use flacx::{DecodeConfig, Decoder, Encoder, EncoderConfig, level::Level};
 const DEFAULT_REPEATS: usize = 3;
 const PINNED_CORES: usize = 8;
 const MIB: f64 = 1024.0 * 1024.0;
+const SYNTHETIC_MULTICHANNEL_FRAMES: usize = 48_000 * 5;
 const DEFAULT_CORPUS: [&str; 3] = [
     "test-wavs/test1.wav",
     "test-wavs/test2.wav",
@@ -19,10 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pin_current_process_to_first_n_cores(PINNED_CORES)?;
     let threads = shared_thread_count();
 
-    if let Some(path) = env::args().nth(1).map(PathBuf::from) {
-        run_single_input(&path, threads)?;
-    } else {
-        run_test_wavs_corpus(threads)?;
+    match env::args().nth(1).as_deref() {
+        Some("--multichannel") => run_synthetic_multichannel_benchmark(threads)?,
+        Some(path) => run_single_input(&PathBuf::from(path), threads)?,
+        None => run_test_wavs_corpus(threads)?,
     }
 
     Ok(())
@@ -84,6 +85,47 @@ fn run_test_wavs_corpus(threads: usize) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+fn run_synthetic_multichannel_benchmark(threads: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let fixtures = synthetic_multichannel_fixtures();
+    println!(
+        "synthetic multichannel corpus: {} layouts, {} repeats, pinned cores={} (best effort), threads={} shared across encode+decode",
+        fixtures.len(),
+        DEFAULT_REPEATS,
+        PINNED_CORES,
+        threads
+    );
+
+    let mut encode_throughputs = Vec::with_capacity(fixtures.len());
+    let mut decode_throughputs = Vec::with_capacity(fixtures.len());
+    let mut flac_bytes = Vec::with_capacity(fixtures.len());
+    let mut flac_ratios = Vec::with_capacity(fixtures.len());
+
+    for fixture in fixtures {
+        let measurement = benchmark_synthetic_fixture(&fixture, threads)?;
+        print_fixture_result("layout", Path::new(&fixture.label), &measurement, threads);
+        encode_throughputs.push(measurement.encode_throughput_mib_s());
+        decode_throughputs.push(measurement.decode_throughput_mib_s());
+        flac_bytes.push(measurement.flac_bytes as f64);
+        flac_ratios.push(measurement.flac_ratio());
+    }
+
+    let encode_median = median(&mut encode_throughputs);
+    let decode_median = median(&mut decode_throughputs);
+    let flac_bytes_median = median(&mut flac_bytes);
+    let flac_ratio_median = median(&mut flac_ratios);
+
+    println!(
+        "multichannel-median: encode={:.3} MiB/s decode={:.3} MiB/s delta={:+.3} MiB/s | flac={:.1} B ratio={:.6}",
+        encode_median,
+        decode_median,
+        decode_median - encode_median,
+        flac_bytes_median,
+        flac_ratio_median
+    );
+
+    Ok(())
+}
+
 fn benchmark_fixture(
     wav_path: &Path,
     threads: usize,
@@ -131,6 +173,24 @@ fn benchmark_fixture(
     })
 }
 
+fn benchmark_synthetic_fixture(
+    fixture: &SyntheticFixture,
+    threads: usize,
+) -> Result<FixtureMeasurement, Box<dyn std::error::Error>> {
+    let wav_bytes = synthetic_multichannel_wav_bytes(
+        fixture.channels,
+        fixture.valid_bits_per_sample,
+        fixture.container_bits_per_sample,
+        fixture.sample_rate,
+        SYNTHETIC_MULTICHANNEL_FRAMES,
+    );
+    let source_path = temp_path(&fixture.label, "wav");
+    fs::write(&source_path, &wav_bytes)?;
+    let measurement = benchmark_fixture(&source_path, threads);
+    let _ = fs::remove_file(source_path);
+    measurement
+}
+
 fn default_corpus() -> Vec<PathBuf> {
     DEFAULT_CORPUS
         .iter()
@@ -148,6 +208,15 @@ struct FixtureMeasurement {
     flac_bytes: u64,
     encode_seconds: f64,
     decode_seconds: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SyntheticFixture {
+    label: &'static str,
+    channels: u16,
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    sample_rate: u32,
 }
 
 impl FixtureMeasurement {
@@ -305,6 +374,237 @@ fn shared_thread_count() -> usize {
         "default encode/decode thread counts diverged"
     );
     encode_threads.max(1)
+}
+
+fn synthetic_multichannel_fixtures() -> [SyntheticFixture; 6] {
+    [
+        SyntheticFixture {
+            label: "ch3-16bit",
+            channels: 3,
+            valid_bits_per_sample: 16,
+            container_bits_per_sample: 16,
+            sample_rate: 48_000,
+        },
+        SyntheticFixture {
+            label: "ch4-24bit",
+            channels: 4,
+            valid_bits_per_sample: 24,
+            container_bits_per_sample: 24,
+            sample_rate: 48_000,
+        },
+        SyntheticFixture {
+            label: "ch5-20in24",
+            channels: 5,
+            valid_bits_per_sample: 20,
+            container_bits_per_sample: 24,
+            sample_rate: 44_100,
+        },
+        SyntheticFixture {
+            label: "ch6-16bit",
+            channels: 6,
+            valid_bits_per_sample: 16,
+            container_bits_per_sample: 16,
+            sample_rate: 48_000,
+        },
+        SyntheticFixture {
+            label: "ch7-24bit",
+            channels: 7,
+            valid_bits_per_sample: 24,
+            container_bits_per_sample: 24,
+            sample_rate: 48_000,
+        },
+        SyntheticFixture {
+            label: "ch8-24bit",
+            channels: 8,
+            valid_bits_per_sample: 24,
+            container_bits_per_sample: 24,
+            sample_rate: 96_000,
+        },
+    ]
+}
+
+fn synthetic_multichannel_wav_bytes(
+    channels: u16,
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    sample_rate: u32,
+    frames: usize,
+) -> Vec<u8> {
+    let samples = synthetic_samples(channels, frames, valid_bits_per_sample);
+    if channels <= 2 && valid_bits_per_sample == container_bits_per_sample {
+        pcm_wav_bytes(container_bits_per_sample, channels, sample_rate, &samples)
+    } else {
+        extensible_pcm_wav_bytes(
+            valid_bits_per_sample,
+            container_bits_per_sample,
+            channels,
+            sample_rate,
+            ordinary_channel_mask(channels).expect("ordinary mask"),
+            &samples,
+        )
+    }
+}
+
+fn synthetic_samples(channels: u16, frames: usize, valid_bits_per_sample: u16) -> Vec<i32> {
+    let amplitude = ((1i64 << valid_bits_per_sample.saturating_sub(1)) - 1).min(0x7fff_ffff) as i32;
+    let cycle = (usize::from(channels) * 97).max(257);
+    let mut samples = Vec::with_capacity(frames * usize::from(channels));
+    for frame in 0..frames {
+        let base = (((frame % cycle) as i32 * 65_521) % amplitude.max(1)) - (amplitude / 2);
+        for channel in 0..channels {
+            let channel_bias = (i32::from(channel) * 1_013) & (amplitude >> 3);
+            let sample = (base + channel_bias).clamp(-(amplitude / 2), amplitude / 2);
+            samples.push(sample);
+        }
+    }
+    samples
+}
+
+fn ordinary_channel_mask(channels: u16) -> Option<u32> {
+    match channels {
+        1 => Some(0x0004),
+        2 => Some(0x0003),
+        3 => Some(0x0007),
+        4 => Some(0x0033),
+        5 => Some(0x0037),
+        6 => Some(0x003F),
+        7 => Some(0x070F),
+        8 => Some(0x063F),
+        _ => None,
+    }
+}
+
+fn pcm_wav_bytes(
+    bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    let bytes_per_sample = bytes_per_sample(bits_per_sample);
+    let block_align = usize::from(channels) * bytes_per_sample;
+    let data_bytes = samples.len() * bytes_per_sample;
+    let riff_size = 4 + (8 + 16usize) + (8 + data_bytes);
+
+    let mut bytes = Vec::with_capacity(12 + 8 + 16 + 8 + data_bytes);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(riff_size as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * block_align as u32).to_le_bytes());
+    bytes.extend_from_slice(&(block_align as u16).to_le_bytes());
+    bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+    write_pcm_samples(&mut bytes, bits_per_sample, samples);
+    bytes
+}
+
+fn extensible_pcm_wav_bytes(
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    channel_mask: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    const PCM_GUID: [u8; 16] = [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ];
+
+    let bytes_per_sample = bytes_per_sample(container_bits_per_sample);
+    let block_align = usize::from(channels) * bytes_per_sample;
+    let data_bytes = samples.len() * bytes_per_sample;
+    let riff_size = 4 + (8 + 40usize) + (8 + data_bytes);
+
+    let mut bytes = Vec::with_capacity(12 + 8 + 40 + 8 + data_bytes);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(riff_size as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * block_align as u32).to_le_bytes());
+    bytes.extend_from_slice(&(block_align as u16).to_le_bytes());
+    bytes.extend_from_slice(&container_bits_per_sample.to_le_bytes());
+    bytes.extend_from_slice(&22u16.to_le_bytes());
+    bytes.extend_from_slice(&valid_bits_per_sample.to_le_bytes());
+    bytes.extend_from_slice(&channel_mask.to_le_bytes());
+    bytes.extend_from_slice(&PCM_GUID);
+
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+    write_left_aligned_samples(
+        &mut bytes,
+        container_bits_per_sample,
+        valid_bits_per_sample,
+        samples,
+    );
+    bytes
+}
+
+fn write_pcm_samples(bytes: &mut Vec<u8>, bits_per_sample: u16, samples: &[i32]) {
+    for &sample in samples {
+        match bits_per_sample {
+            8 => bytes.push(sample as u8),
+            16 => bytes.extend_from_slice(&(sample as i16).to_le_bytes()),
+            24 => {
+                let value = sample as u32;
+                bytes.extend_from_slice(&[
+                    (value & 0xff) as u8,
+                    ((value >> 8) & 0xff) as u8,
+                    ((value >> 16) & 0xff) as u8,
+                ]);
+            }
+            32 => bytes.extend_from_slice(&sample.to_le_bytes()),
+            _ => unreachable!("unsupported PCM container width"),
+        }
+    }
+}
+
+fn write_left_aligned_samples(
+    bytes: &mut Vec<u8>,
+    container_bits_per_sample: u16,
+    valid_bits_per_sample: u16,
+    samples: &[i32],
+) {
+    let shift = container_bits_per_sample - valid_bits_per_sample;
+    for &sample in samples {
+        let shifted = if shift == 0 { sample } else { sample << shift };
+        match container_bits_per_sample {
+            8 => bytes.push(shifted as u8),
+            16 => bytes.extend_from_slice(&(shifted as i16).to_le_bytes()),
+            24 => {
+                let value = shifted as u32;
+                bytes.extend_from_slice(&[
+                    (value & 0xff) as u8,
+                    ((value >> 8) & 0xff) as u8,
+                    ((value >> 16) & 0xff) as u8,
+                ]);
+            }
+            32 => bytes.extend_from_slice(&shifted.to_le_bytes()),
+            _ => unreachable!("unsupported extensible PCM container width"),
+        }
+    }
+}
+
+fn bytes_per_sample(bits_per_sample: u16) -> usize {
+    match bits_per_sample {
+        8 => 1,
+        16 => 2,
+        24 => 3,
+        32 => 4,
+        _ => unreachable!("unsupported bits per sample"),
+    }
 }
 
 #[cfg(windows)]

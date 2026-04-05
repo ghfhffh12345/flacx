@@ -15,7 +15,7 @@ use crate::{
     config::DecodeConfig,
     crc::{crc8, crc16},
     error::{Error, Result},
-    input::{WavData, WavSpec},
+    input::{WavData, WavSpec, ordinary_channel_mask},
     metadata::WavMetadata,
     model::ChannelAssignment,
     progress::{NoProgress, ProgressSink, ProgressSnapshot},
@@ -87,15 +87,15 @@ where
     reader.read_to_end(&mut bytes)?;
     let (stream_info, metadata, frame_offset) = parse_metadata(&bytes)?;
 
-    if !(1..=2).contains(&stream_info.channels) {
+    if !(1..=8).contains(&stream_info.channels) {
         return Err(Error::UnsupportedFlac(format!(
-            "only mono/stereo decode is supported, found {} channels",
+            "only independent 1..8 channel decode is supported, found {} channels",
             stream_info.channels
         )));
     }
-    if !matches!(stream_info.bits_per_sample, 16 | 24) {
+    if !(4..=32).contains(&stream_info.bits_per_sample) {
         return Err(Error::UnsupportedFlac(format!(
-            "only 16-bit and 24-bit decode is supported, found {} bits/sample",
+            "only FLAC-native 4..32-bit decode is supported, found {} bits/sample",
             stream_info.bits_per_sample
         )));
     }
@@ -107,12 +107,15 @@ where
 
     let expected_frames = stream_info.total_samples as usize;
     let total_output_samples = expected_frames * usize::from(stream_info.channels);
+    let channel_mask = ordinary_channel_mask(u16::from(stream_info.channels))
+        .expect("ordinary channel mask must exist after validating 1..8 channels in STREAMINFO");
     let wav_spec = WavSpec {
         sample_rate: stream_info.sample_rate,
         channels: stream_info.channels,
         bits_per_sample: stream_info.bits_per_sample,
         total_samples: stream_info.total_samples,
-        bytes_per_sample: u16::from(stream_info.bits_per_sample / 8),
+        bytes_per_sample: u16::from(stream_info.bits_per_sample.div_ceil(8)),
+        channel_mask,
     };
 
     if expected_frames == 0 {
@@ -321,7 +324,7 @@ fn scan_frame(
 
     for bits_per_channel in channel_bits_per_sample(parsed.assignment, parsed.bits_per_sample)
         .into_iter()
-        .take(channel_count(parsed.assignment))
+        .take(parsed.assignment.channel_count())
     {
         skip_subframe(&mut reader, bits_per_channel, parsed.block_size)?;
     }
@@ -430,10 +433,10 @@ fn decode_frame(
     let mut reader = BitReader::endian(Cursor::new(&bytes[parsed.bytes_consumed..]), BigEndian);
 
     let subframe_bps = channel_bits_per_sample(parsed.assignment, parsed.bits_per_sample);
-    let mut channels = Vec::with_capacity(channel_count(parsed.assignment));
+    let mut channels = Vec::with_capacity(parsed.assignment.channel_count());
     for bits_per_channel in subframe_bps
         .into_iter()
-        .take(channel_count(parsed.assignment))
+        .take(parsed.assignment.channel_count())
     {
         channels.push(decode_subframe(
             &mut reader,
@@ -790,32 +793,23 @@ fn decode_bits_per_sample(code: u8, stream_bps: u8) -> Result<u8> {
 
 fn decode_channel_assignment(code: u8) -> Result<ChannelAssignment> {
     match code {
-        0b0000 => Ok(ChannelAssignment::IndependentMono),
-        0b0001 => Ok(ChannelAssignment::IndependentStereo),
+        0b0000..=0b0111 => Ok(ChannelAssignment::Independent(code + 1)),
         0b1000 => Ok(ChannelAssignment::LeftSide),
         0b1001 => Ok(ChannelAssignment::SideRight),
         0b1010 => Ok(ChannelAssignment::MidSide),
-        0b0010..=0b0111 | 0b1011..=0b1111 => Err(Error::UnsupportedFlac(format!(
+        0b1011..=0b1111 => Err(Error::UnsupportedFlac(format!(
             "channel assignment {code:#06b} is out of scope"
         ))),
         _ => unreachable!(),
     }
 }
 
-fn channel_bits_per_sample(assignment: ChannelAssignment, bits_per_sample: u8) -> [u8; 2] {
+fn channel_bits_per_sample(assignment: ChannelAssignment, bits_per_sample: u8) -> Vec<u8> {
     match assignment {
-        ChannelAssignment::IndependentMono => [bits_per_sample, bits_per_sample],
-        ChannelAssignment::IndependentStereo => [bits_per_sample, bits_per_sample],
-        ChannelAssignment::LeftSide => [bits_per_sample, bits_per_sample + 1],
-        ChannelAssignment::SideRight => [bits_per_sample + 1, bits_per_sample],
-        ChannelAssignment::MidSide => [bits_per_sample, bits_per_sample + 1],
-    }
-}
-
-fn channel_count(assignment: ChannelAssignment) -> usize {
-    match assignment {
-        ChannelAssignment::IndependentMono => 1,
-        _ => 2,
+        ChannelAssignment::Independent(channels) => vec![bits_per_sample; usize::from(channels)],
+        ChannelAssignment::LeftSide => vec![bits_per_sample, bits_per_sample + 1],
+        ChannelAssignment::SideRight => vec![bits_per_sample + 1, bits_per_sample],
+        ChannelAssignment::MidSide => vec![bits_per_sample, bits_per_sample + 1],
     }
 }
 
@@ -916,4 +910,61 @@ fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, WavMetadata, usize)> {
         metadata,
         offset,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment};
+    use crate::model::ChannelAssignment;
+
+    #[test]
+    fn decodes_independent_channel_assignments_for_one_to_eight_channels() {
+        for (code, channels) in (0u8..=7).zip(1u8..=8) {
+            assert_eq!(
+                decode_channel_assignment(code).unwrap(),
+                ChannelAssignment::Independent(channels)
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_stereo_only_decorrelation_modes() {
+        assert_eq!(
+            decode_channel_assignment(0b1000).unwrap(),
+            ChannelAssignment::LeftSide
+        );
+        assert_eq!(
+            decode_channel_assignment(0b1001).unwrap(),
+            ChannelAssignment::SideRight
+        );
+        assert_eq!(
+            decode_channel_assignment(0b1010).unwrap(),
+            ChannelAssignment::MidSide
+        );
+    }
+
+    #[test]
+    fn bit_depth_code_zero_uses_streaminfo_depth_for_broader_flac_native_range() {
+        for depth in [4u8, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 31] {
+            assert_eq!(decode_bits_per_sample(0b000, depth).unwrap(), depth);
+        }
+        assert_eq!(decode_bits_per_sample(0b001, 4).unwrap(), 8);
+        assert_eq!(decode_bits_per_sample(0b010, 4).unwrap(), 12);
+        assert_eq!(decode_bits_per_sample(0b100, 4).unwrap(), 16);
+        assert_eq!(decode_bits_per_sample(0b101, 4).unwrap(), 20);
+        assert_eq!(decode_bits_per_sample(0b110, 4).unwrap(), 24);
+        assert_eq!(decode_bits_per_sample(0b111, 4).unwrap(), 32);
+    }
+
+    #[test]
+    fn channel_bits_expand_for_independent_multichannel_assignments() {
+        assert_eq!(
+            channel_bits_per_sample(ChannelAssignment::Independent(3), 16),
+            vec![16, 16, 16]
+        );
+        assert_eq!(
+            channel_bits_per_sample(ChannelAssignment::MidSide, 16),
+            vec![16, 17]
+        );
+    }
 }

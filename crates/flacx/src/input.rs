@@ -3,6 +3,13 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::error::{Error, Result};
 use crate::metadata::{EncodeMetadata, MetadataDraft};
 
+const PCM_SUBFORMAT_GUID: [u8; 16] = [
+    0x01, 0x00, 0x00, 0x00, // PCM subformat
+    0x00, 0x00, 0x10, 0x00, // GUID data2/data3
+    0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, // GUID data4
+];
+const EXTENSIBLE_FMT_CHUNK_SIZE: u32 = 40;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WavSpec {
     pub sample_rate: u32,
@@ -10,6 +17,7 @@ pub struct WavSpec {
     pub bits_per_sample: u8,
     pub total_samples: u64,
     pub bytes_per_sample: u16,
+    pub channel_mask: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +39,31 @@ struct FormatChunk {
     sample_rate: u32,
     byte_rate: u32,
     block_align: u16,
-    bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    valid_bits_per_sample: u16,
+    channel_mask: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PcmEnvelope {
+    pub(crate) channels: u16,
+    pub(crate) valid_bits_per_sample: u16,
+    pub(crate) container_bits_per_sample: u16,
+    pub(crate) channel_mask: u32,
+}
+
+pub(crate) fn ordinary_channel_mask(channels: u16) -> Option<u32> {
+    match channels {
+        1 => Some(0x0004),
+        2 => Some(0x0003),
+        3 => Some(0x0007),
+        4 => Some(0x0033),
+        5 => Some(0x0037),
+        6 => Some(0x003F),
+        7 => Some(0x070F),
+        8 => Some(0x063F),
+        _ => None,
+    }
 }
 
 #[allow(dead_code)]
@@ -111,9 +143,9 @@ fn read_wav_internal<R: Read + Seek>(
     let data_offset = data_offset.ok_or(Error::InvalidWav("missing data chunk"))?;
     let data_size = data_size.ok_or(Error::InvalidWav("missing data size"))?;
 
-    validate_format(format)?;
+    let envelope = validate_format(format)?;
 
-    let expected_block_align = format.channels * (format.bits_per_sample / 8);
+    let expected_block_align = envelope.channels * (envelope.container_bits_per_sample / 8);
     if format.block_align != expected_block_align {
         return Err(Error::InvalidWav(
             "fmt block alignment does not match channels * bytes/sample",
@@ -136,15 +168,16 @@ fn read_wav_internal<R: Read + Seek>(
     reader.read_exact(&mut data)?;
 
     let total_samples = u64::from(data_size / u32::from(format.block_align));
-    let samples = decode_samples(&data, format.bits_per_sample)?;
+    let samples = decode_samples(&data, envelope)?;
 
     let wav = WavData {
         spec: WavSpec {
             sample_rate: format.sample_rate,
             channels: format.channels as u8,
-            bits_per_sample: format.bits_per_sample as u8,
+            bits_per_sample: envelope.valid_bits_per_sample as u8,
             total_samples,
-            bytes_per_sample: format.bits_per_sample / 8,
+            bytes_per_sample: envelope.container_bits_per_sample / 8,
+            channel_mask: envelope.channel_mask,
         },
         samples,
     };
@@ -169,65 +202,182 @@ fn read_format_chunk<R: Read>(reader: &mut R, chunk_size: u32) -> Result<FormatC
     let sample_rate = read_u32_le(reader)?;
     let byte_rate = read_u32_le(reader)?;
     let block_align = read_u16_le(reader)?;
-    let bits_per_sample = read_u16_le(reader)?;
+    let container_bits_per_sample = read_u16_le(reader)?;
 
-    if chunk_size > 16 {
+    if format_tag == 0xFFFE {
+        if chunk_size < EXTENSIBLE_FMT_CHUNK_SIZE {
+            return Err(Error::InvalidWav(
+                "WAVEFORMATEXTENSIBLE fmt chunk is too short",
+            ));
+        }
+
+        let cb_size = read_u16_le(reader)?;
+        if cb_size < 22 {
+            return Err(Error::InvalidWav(
+                "WAVEFORMATEXTENSIBLE extension is too short",
+            ));
+        }
+        let valid_bits_per_sample = read_u16_le(reader)?;
+        let channel_mask = read_u32_le(reader)?;
+        let mut subformat = [0u8; 16];
+        reader.read_exact(&mut subformat)?;
+        if subformat != PCM_SUBFORMAT_GUID {
+            return Err(Error::UnsupportedWav(
+                "only WAVEFORMATEXTENSIBLE PCM subformat is supported".into(),
+            ));
+        }
+
+        let extra_bytes = usize::from(cb_size.saturating_sub(22))
+            + (chunk_size as usize).saturating_sub(EXTENSIBLE_FMT_CHUNK_SIZE as usize);
+        if extra_bytes > 0 {
+            let mut discard = vec![0u8; extra_bytes];
+            reader.read_exact(&mut discard)?;
+        }
+
+        Ok(FormatChunk {
+            format_tag,
+            channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            container_bits_per_sample,
+            valid_bits_per_sample,
+            channel_mask,
+        })
+    } else {
         let mut discard = vec![0u8; (chunk_size - 16) as usize];
         reader.read_exact(&mut discard)?;
+        Ok(FormatChunk {
+            format_tag,
+            channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            container_bits_per_sample,
+            valid_bits_per_sample: container_bits_per_sample,
+            channel_mask: ordinary_channel_mask(channels).unwrap_or(0),
+        })
     }
-
-    Ok(FormatChunk {
-        format_tag,
-        channels,
-        sample_rate,
-        byte_rate,
-        block_align,
-        bits_per_sample,
-    })
 }
 
-fn validate_format(format: FormatChunk) -> Result<()> {
-    if format.format_tag != 1 {
-        return Err(Error::UnsupportedWav(format!(
-            "only PCM format tag 1 is supported, found {}",
-            format.format_tag
-        )));
-    }
-
-    if !(1..=2).contains(&format.channels) {
-        return Err(Error::UnsupportedWav(format!(
-            "only mono/stereo input is supported, found {} channels",
-            format.channels
-        )));
-    }
-
-    if !matches!(format.bits_per_sample, 16 | 24) {
-        return Err(Error::UnsupportedWav(format!(
-            "only 16-bit and 24-bit PCM are supported, found {} bits/sample",
-            format.bits_per_sample
-        )));
-    }
-
+fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
     if format.sample_rate == 0 {
         return Err(Error::UnsupportedWav("sample rate 0 is not allowed".into()));
     }
 
+    let container_bits_per_sample = format.container_bits_per_sample;
+    if !matches!(container_bits_per_sample, 8 | 16 | 24 | 32) {
+        return Err(Error::UnsupportedWav(format!(
+            "only byte-aligned PCM containers are supported, found {container_bits_per_sample} bits/sample"
+        )));
+    }
+
+    let envelope = if format.format_tag == 1 {
+        if !(1..=2).contains(&format.channels) {
+            return Err(Error::UnsupportedWav(format!(
+                "canonical PCM tag 1 only supports exact mono/stereo (1..2 channel) cases, found {} channels",
+                format.channels
+            )));
+        }
+        if format.valid_bits_per_sample != container_bits_per_sample {
+            return Err(Error::UnsupportedWav(
+                "canonical PCM requires valid bits to match container bits".into(),
+            ));
+        }
+
+        PcmEnvelope {
+            channels: format.channels,
+            valid_bits_per_sample: format.valid_bits_per_sample,
+            container_bits_per_sample,
+            channel_mask: ordinary_channel_mask(format.channels).ok_or_else(|| {
+                Error::UnsupportedWav(format!(
+                    "no ordinary mask exists for {} channels",
+                    format.channels
+                ))
+            })?,
+        }
+    } else if format.format_tag == 0xFFFE {
+        if !(1..=8).contains(&format.channels) {
+            return Err(Error::UnsupportedWav(format!(
+                "WAVEFORMATEXTENSIBLE input only supports ordinary 1..8 channel layouts, found {} channels",
+                format.channels
+            )));
+        }
+        if format.valid_bits_per_sample < 4 || format.valid_bits_per_sample > 32 {
+            return Err(Error::UnsupportedWav(format!(
+                "valid bits must be in the FLAC-native 4..32 range, found {}",
+                format.valid_bits_per_sample
+            )));
+        }
+        if format.valid_bits_per_sample > container_bits_per_sample {
+            return Err(Error::UnsupportedWav(format!(
+                "valid bits cannot exceed container bits ({} > {})",
+                format.valid_bits_per_sample, container_bits_per_sample
+            )));
+        }
+
+        let ordinary_mask = ordinary_channel_mask(format.channels).ok_or_else(|| {
+            Error::UnsupportedWav(format!(
+                "no ordinary mask exists for {} channels",
+                format.channels
+            ))
+        })?;
+        let channel_mask = match format.channel_mask {
+            0 => ordinary_mask,
+            mask if mask == ordinary_mask => mask,
+            mask => {
+                return Err(Error::UnsupportedWav(format!(
+                    "non-ordinary channel mask {mask:#010x} is not supported in this pass"
+                )));
+            }
+        };
+
+        PcmEnvelope {
+            channels: format.channels,
+            valid_bits_per_sample: format.valid_bits_per_sample,
+            container_bits_per_sample,
+            channel_mask,
+        }
+    } else {
+        return Err(Error::UnsupportedWav(format!(
+            "only PCM format tag 1 and WAVEFORMATEXTENSIBLE PCM are supported, found {}",
+            format.format_tag
+        )));
+    };
+
     let expected_byte_rate =
-        format.sample_rate * u32::from(format.channels) * u32::from(format.bits_per_sample / 8);
+        format.sample_rate * u32::from(format.channels) * u32::from(container_bits_per_sample / 8);
     if format.byte_rate != expected_byte_rate {
         return Err(Error::InvalidWav(
             "fmt byte rate does not match the PCM payload shape",
         ));
     }
 
-    Ok(())
+    Ok(envelope)
 }
 
-fn decode_samples(data: &[u8], bits_per_sample: u16) -> Result<Vec<i32>> {
-    match bits_per_sample {
+fn decode_samples(data: &[u8], envelope: PcmEnvelope) -> Result<Vec<i32>> {
+    let shift = envelope
+        .container_bits_per_sample
+        .checked_sub(envelope.valid_bits_per_sample)
+        .ok_or_else(|| {
+            Error::InvalidWav("valid bits cannot exceed container bits for decoding".into())
+        })? as u32;
+
+    match envelope.container_bits_per_sample {
+        8 => {
+            let bias = 1i32 << (envelope.valid_bits_per_sample - 1);
+            Ok(data
+                .iter()
+                .map(|&byte| (i32::from(byte) >> shift) - bias)
+                .collect())
+        }
         16 => Ok(data
             .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as i32)
+            .map(|chunk| {
+                let value = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                if shift == 0 { value } else { value >> shift }
+            })
             .collect()),
         24 => Ok(data
             .chunks_exact(3)
@@ -237,13 +387,95 @@ fn decode_samples(data: &[u8], bits_per_sample: u16) -> Result<Vec<i32>> {
                 if value & 0x0080_0000 != 0 {
                     value |= !0x00ff_ffff;
                 }
-                value
+                if shift == 0 { value } else { value >> shift }
+            })
+            .collect()),
+        32 => Ok(data
+            .chunks_exact(4)
+            .map(|chunk| {
+                let value = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if shift == 0 { value } else { value >> shift }
             })
             .collect()),
         _ => Err(Error::UnsupportedWav(format!(
-            "unsupported bits/sample for decoder: {bits_per_sample}"
+            "unsupported container bits/sample for decoder: {}",
+            envelope.container_bits_per_sample
         ))),
     }
+}
+
+pub(crate) fn container_bits_from_valid_bits(valid_bits: u16) -> u16 {
+    match valid_bits {
+        0..=8 => 8,
+        9..=16 => 16,
+        17..=24 => 24,
+        25..=32 => 32,
+        _ => valid_bits.div_ceil(8) * 8,
+    }
+}
+
+pub(crate) fn append_encoded_sample(
+    buffer: &mut Vec<u8>,
+    sample: i32,
+    envelope: PcmEnvelope,
+) -> Result<()> {
+    let shift = envelope
+        .container_bits_per_sample
+        .checked_sub(envelope.valid_bits_per_sample)
+        .ok_or_else(|| {
+            Error::InvalidWav("valid bits cannot exceed container bits for encoding".into())
+        })? as u32;
+
+    match envelope.container_bits_per_sample {
+        8 => {
+            let bias = 1i32 << (envelope.valid_bits_per_sample - 1);
+            let stored = (i64::from(sample) + i64::from(bias))
+                .checked_shl(shift)
+                .ok_or_else(|| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+            let stored = u8::try_from(stored)
+                .map_err(|_| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+            buffer.push(stored);
+            Ok(())
+        }
+        16 => {
+            let stored =
+                i16::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                    Error::UnsupportedWav("16-bit sample is out of range".into())
+                })?)
+                .map_err(|_| Error::UnsupportedWav("16-bit sample is out of range".into()))?;
+            buffer.extend_from_slice(&stored.to_le_bytes());
+            Ok(())
+        }
+        24 => {
+            let stored =
+                i32::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                    Error::UnsupportedWav("24-bit sample is out of range".into())
+                })?)
+                .map_err(|_| Error::UnsupportedWav("24-bit sample is out of range".into()))?;
+            let value = stored as u32;
+            buffer.extend_from_slice(&[
+                (value & 0xff) as u8,
+                ((value >> 8) & 0xff) as u8,
+                ((value >> 16) & 0xff) as u8,
+            ]);
+            Ok(())
+        }
+        32 => {
+            let stored =
+                i32::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                    Error::UnsupportedWav("32-bit sample is out of range".into())
+                })?)
+                .map_err(|_| Error::UnsupportedWav("32-bit sample is out of range".into()))?;
+            buffer.extend_from_slice(&stored.to_le_bytes());
+            Ok(())
+        }
+        _ => Err(Error::UnsupportedWav(format!(
+            "unsupported container bits/sample for encoder: {}",
+            envelope.container_bits_per_sample
+        ))),
+    }?;
+
+    Ok(())
 }
 
 fn read_chunk_payload<R: Read>(reader: &mut R, chunk_size: u32) -> Result<Vec<u8>> {
@@ -270,7 +502,7 @@ mod tests {
 
     use crate::metadata::FlacMetadataBlock;
 
-    use super::{WavData, WavSpec, read_wav, read_wav_for_encode};
+    use super::{WavData, WavSpec, ordinary_channel_mask, read_wav, read_wav_for_encode};
 
     fn pcm_wav_bytes(
         bits_per_sample: u16,
@@ -384,6 +616,7 @@ mod tests {
                     bits_per_sample: 16,
                     total_samples: 2,
                     bytes_per_sample: 2,
+                    channel_mask: ordinary_channel_mask(2u16).unwrap(),
                 },
                 samples: samples.to_vec(),
             }
@@ -408,9 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_stereo_or_mono_input() {
+    fn rejects_non_extensible_multichannel_pcm_tag1_input() {
         let error = read_wav(Cursor::new(pcm_wav_bytes(16, 3, 44_100, &[0; 9]))).unwrap_err();
-        assert!(error.to_string().contains("mono/stereo"));
+        assert!(error.to_string().contains("exact mono/stereo"));
     }
 
     #[test]

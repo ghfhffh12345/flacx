@@ -106,6 +106,11 @@ pub(crate) fn serialize_frame(
     if analysis.subframes.is_empty() {
         return Err(Error::Encode("frame analysis is missing subframes".into()));
     }
+    if analysis.subframes.len() != analysis.channel_assignment.channel_count() {
+        return Err(Error::Encode(
+            "frame analysis subframe count does not match channel assignment".into(),
+        ));
+    }
     let mut frame = encode_frame_header(
         analysis.block_size,
         sample_rate,
@@ -113,10 +118,25 @@ pub(crate) fn serialize_frame(
         bits_per_sample,
         frame_index,
     )?;
-    let effective_bps = channel_bits_per_sample(analysis.channel_assignment, bits_per_sample);
     let mut subframes = BitWriter::endian(Vec::new(), BigEndian);
-    for (subframe, subframe_bps) in analysis.subframes.iter().zip(effective_bps) {
-        write_subframe(&mut subframes, subframe, subframe_bps)?;
+    match analysis.channel_assignment {
+        ChannelAssignment::Independent(_) => {
+            for subframe in &analysis.subframes {
+                write_subframe(&mut subframes, subframe, bits_per_sample)?;
+            }
+        }
+        ChannelAssignment::LeftSide => {
+            write_subframe(&mut subframes, &analysis.subframes[0], bits_per_sample)?;
+            write_subframe(&mut subframes, &analysis.subframes[1], bits_per_sample + 1)?;
+        }
+        ChannelAssignment::SideRight => {
+            write_subframe(&mut subframes, &analysis.subframes[0], bits_per_sample + 1)?;
+            write_subframe(&mut subframes, &analysis.subframes[1], bits_per_sample)?;
+        }
+        ChannelAssignment::MidSide => {
+            write_subframe(&mut subframes, &analysis.subframes[0], bits_per_sample)?;
+            write_subframe(&mut subframes, &analysis.subframes[1], bits_per_sample + 1)?;
+        }
     }
     subframes.byte_align()?;
     frame.extend_from_slice(&subframes.into_writer());
@@ -161,21 +181,10 @@ fn encode_frame_header(
 
 fn channel_assignment_bits(assignment: ChannelAssignment) -> u8 {
     match assignment {
-        ChannelAssignment::IndependentMono => 0b0000,
-        ChannelAssignment::IndependentStereo => 0b0001,
+        ChannelAssignment::Independent(channels) => channels - 1,
         ChannelAssignment::LeftSide => 0b1000,
         ChannelAssignment::SideRight => 0b1001,
         ChannelAssignment::MidSide => 0b1010,
-    }
-}
-
-fn channel_bits_per_sample(assignment: ChannelAssignment, bits_per_sample: u8) -> [u8; 2] {
-    match assignment {
-        ChannelAssignment::IndependentMono => [bits_per_sample, bits_per_sample],
-        ChannelAssignment::IndependentStereo => [bits_per_sample, bits_per_sample],
-        ChannelAssignment::LeftSide => [bits_per_sample, bits_per_sample + 1],
-        ChannelAssignment::SideRight => [bits_per_sample + 1, bits_per_sample],
-        ChannelAssignment::MidSide => [bits_per_sample, bits_per_sample + 1],
     }
 }
 
@@ -187,8 +196,9 @@ fn bit_depth_bits(bits_per_sample: u8) -> Result<u8> {
         20 => Ok(0b101),
         24 => Ok(0b110),
         32 => Ok(0b111),
+        4..=32 => Ok(0b000),
         _ => Err(Error::UnsupportedFlac(format!(
-            "bit depth {bits_per_sample} is not encodable in a frame header"
+            "bit depth {bits_per_sample} is not supported by FLAC encoding"
         ))),
     }
 }
@@ -406,8 +416,8 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        FlacWriter, channel_assignment_bits, encode_utf8_number, metadata_block_header,
-        sample_rate_is_representable,
+        FlacWriter, bit_depth_bits, channel_assignment_bits, encode_utf8_number,
+        metadata_block_header, sample_rate_is_representable,
     };
     use crate::{
         level::LevelProfile,
@@ -439,10 +449,22 @@ mod tests {
     }
 
     #[test]
-    fn stereo_assignment_bits_match_rfc_table() {
+    fn independent_assignment_bits_match_rfc_table() {
         assert_eq!(
-            channel_assignment_bits(ChannelAssignment::IndependentStereo),
+            channel_assignment_bits(ChannelAssignment::Independent(1)),
+            0b0000
+        );
+        assert_eq!(
+            channel_assignment_bits(ChannelAssignment::Independent(2)),
             0b0001
+        );
+        assert_eq!(
+            channel_assignment_bits(ChannelAssignment::Independent(3)),
+            0b0010
+        );
+        assert_eq!(
+            channel_assignment_bits(ChannelAssignment::Independent(8)),
+            0b0111
         );
         assert_eq!(channel_assignment_bits(ChannelAssignment::LeftSide), 0b1000);
         assert_eq!(
@@ -450,6 +472,20 @@ mod tests {
             0b1001
         );
         assert_eq!(channel_assignment_bits(ChannelAssignment::MidSide), 0b1010);
+    }
+
+    #[test]
+    fn frame_header_uses_supported_independent_assignment_bits() {
+        let mut interleaved = Vec::new();
+        for sample in 0..32i32 {
+            interleaved.push(sample * 16);
+            interleaved.push(sample * 16 + (sample & 1));
+            interleaved.push(sample * 16 + 2);
+        }
+        let profile = LevelProfile::new(256, 4, 12, 4, true, true);
+        let encoded = encode_frame(&interleaved, 3, 16, 44_100, 0, profile).unwrap();
+        let assignment = (encoded.bytes[3] >> 4) & 0x0f;
+        assert_eq!(assignment, 0b0010);
     }
 
     #[test]
@@ -463,6 +499,18 @@ mod tests {
         let encoded = encode_frame(&interleaved, 2, 16, 44_100, 0, profile).unwrap();
         let assignment = (encoded.bytes[3] >> 4) & 0x0f;
         assert!(matches!(assignment, 0b0001 | 0b1000 | 0b1001 | 0b1010));
+    }
+
+    #[test]
+    fn bit_depth_codes_fall_back_to_streaminfo_for_non_explicit_depths() {
+        assert_eq!(bit_depth_bits(4).unwrap(), 0b000);
+        assert_eq!(bit_depth_bits(8).unwrap(), 0b001);
+        assert_eq!(bit_depth_bits(11).unwrap(), 0b000);
+        assert_eq!(bit_depth_bits(12).unwrap(), 0b010);
+        assert_eq!(bit_depth_bits(16).unwrap(), 0b100);
+        assert_eq!(bit_depth_bits(20).unwrap(), 0b101);
+        assert_eq!(bit_depth_bits(24).unwrap(), 0b110);
+        assert_eq!(bit_depth_bits(32).unwrap(), 0b111);
     }
 
     fn parse_metadata_blocks(flac: &[u8]) -> Vec<(bool, u8, Vec<u8>)> {

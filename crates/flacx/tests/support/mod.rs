@@ -6,24 +6,32 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const PCM_GUID: [u8; 16] = [
+    0x01, 0x00, 0x00, 0x00, // PCM subformat
+    0x00, 0x00, 0x10, 0x00, // GUID data2/data3
+    0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, // GUID data4
+];
+const PCM_FMT_CHUNK_SIZE: u32 = 16;
+const EXTENSIBLE_FMT_CHUNK_SIZE: u32 = 40;
+
 pub fn pcm_wav_bytes(
     bits_per_sample: u16,
     channels: u16,
     sample_rate: u32,
     samples: &[i32],
 ) -> Vec<u8> {
-    let bytes_per_sample = usize::from(bits_per_sample / 8);
+    let bytes_per_sample = bytes_per_sample(bits_per_sample);
     let block_align = usize::from(channels) * bytes_per_sample;
     let data_bytes = samples.len() * bytes_per_sample;
-    let riff_size = 4 + (8 + 16) + (8 + data_bytes);
+    let riff_size = 4 + (8 + PCM_FMT_CHUNK_SIZE as usize) + (8 + data_bytes);
 
-    let mut bytes = Vec::with_capacity(12 + 8 + 16 + 8 + data_bytes);
+    let mut bytes = Vec::with_capacity(12 + 8 + PCM_FMT_CHUNK_SIZE as usize + 8 + data_bytes);
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(riff_size as u32).to_le_bytes());
     bytes.extend_from_slice(b"WAVE");
 
     bytes.extend_from_slice(b"fmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&PCM_FMT_CHUNK_SIZE.to_le_bytes());
     bytes.extend_from_slice(&1u16.to_le_bytes());
     bytes.extend_from_slice(&channels.to_le_bytes());
     bytes.extend_from_slice(&sample_rate.to_le_bytes());
@@ -33,26 +41,150 @@ pub fn pcm_wav_bytes(
 
     bytes.extend_from_slice(b"data");
     bytes.extend_from_slice(&(data_bytes as u32).to_le_bytes());
-    match bits_per_sample {
-        16 => {
-            for &sample in samples {
-                bytes.extend_from_slice(&(sample as i16).to_le_bytes());
-            }
-        }
-        24 => {
-            for &sample in samples {
-                let value = sample as u32;
-                bytes.extend_from_slice(&[
-                    (value & 0xff) as u8,
-                    ((value >> 8) & 0xff) as u8,
-                    ((value >> 16) & 0xff) as u8,
-                ]);
-            }
-        }
-        _ => unreachable!(),
-    }
+    write_pcm_samples(&mut bytes, bits_per_sample, samples);
 
     bytes
+}
+
+pub fn extensible_pcm_wav_bytes(
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    channel_mask: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    assert!(matches!(container_bits_per_sample, 8 | 16 | 24 | 32));
+    assert!(valid_bits_per_sample >= 4);
+    assert!(valid_bits_per_sample <= container_bits_per_sample);
+    assert!(channel_mask != 0);
+
+    let bytes_per_sample = bytes_per_sample(container_bits_per_sample);
+    let block_align = usize::from(channels) * bytes_per_sample;
+    let data_bytes = samples.len() * bytes_per_sample;
+    let riff_size = 4 + (8 + EXTENSIBLE_FMT_CHUNK_SIZE as usize) + (8 + data_bytes);
+
+    let mut bytes =
+        Vec::with_capacity(12 + 8 + EXTENSIBLE_FMT_CHUNK_SIZE as usize + 8 + data_bytes);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(riff_size as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&EXTENSIBLE_FMT_CHUNK_SIZE.to_le_bytes());
+    bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * block_align as u32).to_le_bytes());
+    bytes.extend_from_slice(&(block_align as u16).to_le_bytes());
+    bytes.extend_from_slice(&container_bits_per_sample.to_le_bytes());
+    bytes.extend_from_slice(&22u16.to_le_bytes());
+    bytes.extend_from_slice(&valid_bits_per_sample.to_le_bytes());
+    bytes.extend_from_slice(&channel_mask.to_le_bytes());
+    bytes.extend_from_slice(&PCM_GUID);
+
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+    write_left_aligned_samples(
+        &mut bytes,
+        container_bits_per_sample,
+        valid_bits_per_sample,
+        samples,
+    );
+
+    bytes
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedWavFormat {
+    pub format_tag: u16,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub byte_rate: u32,
+    pub block_align: u16,
+    pub bits_per_sample: u16,
+    pub valid_bits_per_sample: Option<u16>,
+    pub channel_mask: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedFlacFrameHeader {
+    pub channel_assignment_bits: u8,
+    pub sample_size_bits: u8,
+}
+
+pub fn parse_wav_format(wav_bytes: &[u8]) -> ParsedWavFormat {
+    for (chunk_id, payload) in wav_chunks(wav_bytes) {
+        if chunk_id == *b"fmt " {
+            assert!(payload.len() >= 16, "fmt chunk too short");
+            let format_tag = u16::from_le_bytes(payload[0..2].try_into().unwrap());
+            let channels = u16::from_le_bytes(payload[2..4].try_into().unwrap());
+            let sample_rate = u32::from_le_bytes(payload[4..8].try_into().unwrap());
+            let byte_rate = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+            let block_align = u16::from_le_bytes(payload[12..14].try_into().unwrap());
+            let bits_per_sample = u16::from_le_bytes(payload[14..16].try_into().unwrap());
+            let mut valid_bits_per_sample = None;
+            let mut channel_mask = None;
+            if payload.len() >= 40 {
+                valid_bits_per_sample =
+                    Some(u16::from_le_bytes(payload[18..20].try_into().unwrap()));
+                channel_mask = Some(u32::from_le_bytes(payload[20..24].try_into().unwrap()));
+            }
+            return ParsedWavFormat {
+                format_tag,
+                channels,
+                sample_rate,
+                byte_rate,
+                block_align,
+                bits_per_sample,
+                valid_bits_per_sample,
+                channel_mask,
+            };
+        }
+    }
+
+    panic!("fmt chunk not found")
+}
+
+pub fn wav_data_bytes(wav_bytes: &[u8]) -> Vec<u8> {
+    for (chunk_id, payload) in wav_chunks(wav_bytes) {
+        if chunk_id == *b"data" {
+            return payload;
+        }
+    }
+
+    panic!("data chunk not found")
+}
+
+pub fn ordinary_channel_mask(channels: u16) -> Option<u32> {
+    match channels {
+        1 => Some(0x0004),
+        2 => Some(0x0003),
+        3 => Some(0x0007),
+        4 => Some(0x0033),
+        5 => Some(0x0037),
+        6 => Some(0x003F),
+        7 => Some(0x070F),
+        8 => Some(0x063F),
+        _ => None,
+    }
+}
+
+pub fn parse_first_flac_frame_header(flac_bytes: &[u8]) -> ParsedFlacFrameHeader {
+    let frame_offset = first_flac_frame_offset(flac_bytes);
+    let mut bit_offset = frame_offset * 8;
+    assert_eq!(read_bits(flac_bytes, &mut bit_offset, 14), 0x3FFE);
+    let _first_flag = read_bits(flac_bytes, &mut bit_offset, 1);
+    let _second_flag = read_bits(flac_bytes, &mut bit_offset, 1);
+    let _block_size_bits = read_bits(flac_bytes, &mut bit_offset, 4);
+    let _sample_rate_bits = read_bits(flac_bytes, &mut bit_offset, 4);
+    let channel_assignment_bits = read_bits(flac_bytes, &mut bit_offset, 4) as u8;
+    let sample_size_bits = read_bits(flac_bytes, &mut bit_offset, 3) as u8;
+
+    ParsedFlacFrameHeader {
+        channel_assignment_bits,
+        sample_size_bits,
+    }
 }
 
 pub fn wav_with_chunks(mut wav: Vec<u8>, chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
@@ -237,104 +369,12 @@ pub fn wav_cue_points(wav_bytes: &[u8]) -> Vec<u32> {
     Vec::new()
 }
 
-fn split_flac_stream(flac_bytes: &[u8]) -> (Vec<ParsedMetadataBlock>, Vec<u8>) {
-    assert_eq!(&flac_bytes[..4], b"fLaC");
-    let mut offset = 4usize;
-    let mut blocks = Vec::new();
-    loop {
-        let header = flac_bytes[offset];
-        let is_last = header & 0x80 != 0;
-        let block_type = header & 0x7f;
-        let length = u32::from_be_bytes([
-            0,
-            flac_bytes[offset + 1],
-            flac_bytes[offset + 2],
-            flac_bytes[offset + 3],
-        ]) as usize;
-        offset += 4;
-        blocks.push(ParsedMetadataBlock {
-            is_last,
-            block_type,
-            payload: flac_bytes[offset..offset + length].to_vec(),
-        });
-        offset += length;
-        if is_last {
-            return (blocks, flac_bytes[offset..].to_vec());
-        }
-    }
-}
-
-pub fn vorbis_comments(payload: &[u8]) -> Vec<String> {
-    let vendor_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
-    let mut offset = 4 + vendor_len;
-    let comment_count =
-        u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
-    offset += 4;
-    let mut comments = Vec::with_capacity(comment_count);
-    for _ in 0..comment_count {
-        let length = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
-        offset += 4;
-        comments.push(String::from_utf8(payload[offset..offset + length].to_vec()).unwrap());
-        offset += length;
-    }
-    comments
-}
-
-fn append_chunk(bytes: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
-    bytes.extend_from_slice(id);
-    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(payload);
-    if payload.len() % 2 != 0 {
-        bytes.push(0);
-    }
-}
-
-fn flac_metadata_header(block_type: u8, is_last: bool, payload_len: usize) -> [u8; 4] {
-    let [_, b1, b2, b3] = (payload_len as u32).to_be_bytes();
-    [
-        if is_last {
-            0x80 | block_type
-        } else {
-            block_type
-        },
-        b1,
-        b2,
-        b3,
-    ]
-}
-
-fn wav_chunks(wav_bytes: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
-    assert_eq!(&wav_bytes[..4], b"RIFF");
-    assert_eq!(&wav_bytes[8..12], b"WAVE");
-    let mut chunks = Vec::new();
-    let mut offset = 12usize;
-    while offset + 8 <= wav_bytes.len() {
-        let id = wav_bytes[offset..offset + 4]
-            .try_into()
-            .expect("fixed wav chunk id slice");
-        let size = u32::from_le_bytes(
-            wav_bytes[offset + 4..offset + 8]
-                .try_into()
-                .expect("fixed wav chunk size slice"),
-        ) as usize;
-        offset += 8;
-        chunks.push((id, wav_bytes[offset..offset + size].to_vec()));
-        offset += size;
-        if size % 2 != 0 {
-            offset += 1;
-        }
-    }
-    chunks
-}
-
 pub fn sample_fixture(channels: u16, frames: usize) -> Vec<i32> {
     let mut samples = Vec::with_capacity(frames * usize::from(channels));
     for frame in 0..frames {
-        let left = ((frame as i32 * 97) % 30_000) - 15_000;
-        samples.push(left);
-        if channels == 2 {
-            let right = ((frame as i32 * 131) % 28_000) - 14_000;
-            samples.push(right);
+        for channel in 0..channels {
+            let sample = (((frame as i32 * 97) + (channel as i32 * 1_013)) % 30_000) - 15_000;
+            samples.push(sample);
         }
     }
     samples
@@ -449,4 +489,179 @@ pub fn corrupt_last_frame_crc(flac_bytes: &[u8]) -> Vec<u8> {
         *last ^= 0x01;
     }
     bytes
+}
+
+fn split_flac_stream(flac_bytes: &[u8]) -> (Vec<ParsedMetadataBlock>, Vec<u8>) {
+    assert_eq!(&flac_bytes[..4], b"fLaC");
+    let mut offset = 4usize;
+    let mut blocks = Vec::new();
+    loop {
+        let header = flac_bytes[offset];
+        let is_last = header & 0x80 != 0;
+        let block_type = header & 0x7f;
+        let length = u32::from_be_bytes([
+            0,
+            flac_bytes[offset + 1],
+            flac_bytes[offset + 2],
+            flac_bytes[offset + 3],
+        ]) as usize;
+        offset += 4;
+        blocks.push(ParsedMetadataBlock {
+            is_last,
+            block_type,
+            payload: flac_bytes[offset..offset + length].to_vec(),
+        });
+        offset += length;
+        if is_last {
+            return (blocks, flac_bytes[offset..].to_vec());
+        }
+    }
+}
+
+pub fn vorbis_comments(payload: &[u8]) -> Vec<String> {
+    let vendor_len = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+    let mut offset = 4 + vendor_len;
+    let comment_count =
+        u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
+    let mut comments = Vec::with_capacity(comment_count);
+    for _ in 0..comment_count {
+        let length = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        comments.push(String::from_utf8(payload[offset..offset + length].to_vec()).unwrap());
+        offset += length;
+    }
+    comments
+}
+
+fn append_chunk(bytes: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
+    bytes.extend_from_slice(id);
+    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(payload);
+    if payload.len() % 2 != 0 {
+        bytes.push(0);
+    }
+}
+
+fn flac_metadata_header(block_type: u8, is_last: bool, payload_len: usize) -> [u8; 4] {
+    let [_, b1, b2, b3] = (payload_len as u32).to_be_bytes();
+    [
+        if is_last {
+            0x80 | block_type
+        } else {
+            block_type
+        },
+        b1,
+        b2,
+        b3,
+    ]
+}
+
+fn wav_chunks(wav_bytes: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    assert_eq!(&wav_bytes[..4], b"RIFF");
+    assert_eq!(&wav_bytes[8..12], b"WAVE");
+    let mut chunks = Vec::new();
+    let mut offset = 12usize;
+    while offset + 8 <= wav_bytes.len() {
+        let id = wav_bytes[offset..offset + 4]
+            .try_into()
+            .expect("fixed wav chunk id slice");
+        let size = u32::from_le_bytes(
+            wav_bytes[offset + 4..offset + 8]
+                .try_into()
+                .expect("fixed wav chunk size slice"),
+        ) as usize;
+        offset += 8;
+        chunks.push((id, wav_bytes[offset..offset + size].to_vec()));
+        offset += size;
+        if size % 2 != 0 {
+            offset += 1;
+        }
+    }
+    chunks
+}
+
+fn first_flac_frame_offset(flac_bytes: &[u8]) -> usize {
+    assert_eq!(&flac_bytes[..4], b"fLaC");
+    let mut offset = 4usize;
+    loop {
+        let header = flac_bytes[offset];
+        let is_last = header & 0x80 != 0;
+        let length = u32::from_be_bytes([
+            0,
+            flac_bytes[offset + 1],
+            flac_bytes[offset + 2],
+            flac_bytes[offset + 3],
+        ]) as usize;
+        offset += 4 + length;
+        if is_last {
+            return offset;
+        }
+    }
+}
+
+fn read_bits(bytes: &[u8], bit_offset: &mut usize, width: usize) -> u64 {
+    let mut value = 0u64;
+    for _ in 0..width {
+        let byte = bytes[*bit_offset / 8];
+        let bit = 7 - (*bit_offset % 8);
+        value = (value << 1) | u64::from((byte >> bit) & 1);
+        *bit_offset += 1;
+    }
+    value
+}
+
+fn bytes_per_sample(bits_per_sample: u16) -> usize {
+    match bits_per_sample {
+        8 => 1,
+        16 => 2,
+        24 => 3,
+        32 => 4,
+        _ => unreachable!("unsupported bits per sample: {bits_per_sample}"),
+    }
+}
+
+fn write_pcm_samples(bytes: &mut Vec<u8>, bits_per_sample: u16, samples: &[i32]) {
+    for &sample in samples {
+        match bits_per_sample {
+            8 => bytes.push(sample as u8),
+            16 => bytes.extend_from_slice(&(sample as i16).to_le_bytes()),
+            24 => {
+                let value = sample as u32;
+                bytes.extend_from_slice(&[
+                    (value & 0xff) as u8,
+                    ((value >> 8) & 0xff) as u8,
+                    ((value >> 16) & 0xff) as u8,
+                ]);
+            }
+            32 => bytes.extend_from_slice(&sample.to_le_bytes()),
+            _ => unreachable!("unsupported bits per sample: {bits_per_sample}"),
+        }
+    }
+}
+
+fn write_left_aligned_samples(
+    bytes: &mut Vec<u8>,
+    container_bits_per_sample: u16,
+    valid_bits_per_sample: u16,
+    samples: &[i32],
+) {
+    let shift = container_bits_per_sample - valid_bits_per_sample;
+    for &sample in samples {
+        let shifted = if shift == 0 { sample } else { sample << shift };
+        match container_bits_per_sample {
+            8 => bytes.push(shifted as u8),
+            16 => bytes.extend_from_slice(&(shifted as i16).to_le_bytes()),
+            24 => {
+                let value = shifted as u32;
+                bytes.extend_from_slice(&[
+                    (value & 0xff) as u8,
+                    ((value >> 8) & 0xff) as u8,
+                    ((value >> 16) & 0xff) as u8,
+                ]);
+            }
+            32 => bytes.extend_from_slice(&shifted.to_le_bytes()),
+            _ => unreachable!("unsupported container bits per sample: {container_bits_per_sample}"),
+        }
+    }
 }

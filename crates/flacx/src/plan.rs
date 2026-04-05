@@ -69,6 +69,18 @@ fn validate_stream(spec: &WavSpec, block_size: u16) -> Result<()> {
             "sample rate 0 is not allowed".into(),
         ));
     }
+    if !(1..=8).contains(&spec.channels) {
+        return Err(Error::UnsupportedFlac(format!(
+            "only the ordinary 1..8 channel envelope is supported, found {} channels",
+            spec.channels
+        )));
+    }
+    if !(4..=32).contains(&spec.bits_per_sample) {
+        return Err(Error::UnsupportedFlac(format!(
+            "only FLAC-native 4..=32 valid bits/sample are supported, found {}",
+            spec.bits_per_sample
+        )));
+    }
 
     if block_size < 16 {
         return Err(Error::UnsupportedFlac(
@@ -101,7 +113,11 @@ fn validate_stream(spec: &WavSpec, block_size: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::EncodePlan;
-    use crate::{config::EncoderConfig, input::WavSpec, level::Level};
+    use crate::{
+        config::EncoderConfig,
+        input::{WavSpec, ordinary_channel_mask},
+        level::Level,
+    };
 
     #[test]
     fn computes_total_frames_from_block_size() {
@@ -112,6 +128,7 @@ mod tests {
                 bits_per_sample: 16,
                 total_samples: 10_000,
                 bytes_per_sample: 2,
+                channel_mask: ordinary_channel_mask(2u16).unwrap(),
             },
             EncoderConfig::default()
                 .with_level(Level::Level0)
@@ -132,6 +149,7 @@ mod tests {
                 bits_per_sample: 16,
                 total_samples: 100,
                 bytes_per_sample: 2,
+                channel_mask: ordinary_channel_mask(2u16).unwrap(),
             },
             EncoderConfig::default(),
         )
