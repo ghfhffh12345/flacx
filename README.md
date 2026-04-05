@@ -60,20 +60,31 @@ usage guide.
 Run the workspace CLI crate:
 
 ```bash
-cargo run -p flacx-cli -- encode input.wav output.flac --level 8 --threads 4
+cargo run -p flacx-cli -- encode input.wav -o output.flac --level 8 --threads 4
+cargo run -p flacx-cli -- encode album-dir -o encoded-album --depth 0
 cargo run -p flacx-cli -- decode input.flac output.wav --threads 4
 ```
 
 Supported CLI shape:
 
-- `flacx encode <input> <output>`
+- `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
 - `flacx decode <input> <output>`
 - encode-only flags:
+  - `--output`
   - `--level`
   - `--threads`
   - `--block-size`
+  - `--depth`
 - decode-only flags:
   - `--threads`
+
+Encode defaults and folder behavior:
+
+- single-file input with no `-o` writes a sibling `.flac` next to the source WAV
+- folder input with no `-o` writes `.flac` siblings next to each discovered WAV
+- folder input with `-o <dir>` preserves relative subpaths under the destination root
+- `--depth` defaults to `1`, affects directory input only, and uses `0` for unlimited traversal
+- encode `--threads` defaults to `8`
 
 Progress display:
 
