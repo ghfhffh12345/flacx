@@ -2,11 +2,20 @@ use std::io::Write;
 
 use crate::{
     error::{Error, Result},
-    input::WavSpec,
+    input::{
+        PcmEnvelope, WavSpec, append_encoded_sample, container_bits_from_valid_bits,
+        ordinary_channel_mask,
+    },
     metadata::WavMetadata,
 };
 
-const FMT_CHUNK_SIZE: u32 = 16;
+const PCM_FMT_CHUNK_SIZE: u32 = 16;
+const EXTENSIBLE_FMT_CHUNK_SIZE: u32 = 40;
+const PCM_SUBFORMAT_GUID: [u8; 16] = [
+    0x01, 0x00, 0x00, 0x00, // PCM subformat
+    0x00, 0x00, 0x10, 0x00, // GUID data2/data3
+    0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, // GUID data4
+];
 
 #[allow(dead_code)]
 pub(crate) fn write_wav<W: Write>(writer: &mut W, spec: WavSpec, samples: &[i32]) -> Result<()> {
@@ -19,15 +28,21 @@ pub(crate) fn write_wav_with_metadata<W: Write>(
     samples: &[i32],
     metadata: &WavMetadata,
 ) -> Result<()> {
-    if !(1..=2).contains(&spec.channels) {
+    if !(1..=8).contains(&spec.channels) {
         return Err(Error::UnsupportedWav(format!(
-            "only mono/stereo output is supported, found {} channels",
+            "only the ordinary 1..8 channel envelope is supported, found {} channels",
             spec.channels
         )));
     }
-    if !matches!(spec.bits_per_sample, 16 | 24) {
+    if !matches!(spec.bytes_per_sample, 1 | 2 | 3 | 4) {
         return Err(Error::UnsupportedWav(format!(
-            "only 16-bit and 24-bit PCM are supported, found {} bits/sample",
+            "only byte-aligned PCM containers are supported, found {} bytes/sample",
+            spec.bytes_per_sample
+        )));
+    }
+    if !(4..=32).contains(&spec.bits_per_sample) {
+        return Err(Error::UnsupportedWav(format!(
+            "only FLAC-native 4..32 valid bits/sample are supported, found {}",
             spec.bits_per_sample
         )));
     }
@@ -37,44 +52,74 @@ pub(crate) fn write_wav_with_metadata<W: Write>(
         ));
     }
 
-    let bytes_per_sample = usize::from(spec.bits_per_sample / 8);
-    let block_align = usize::from(spec.channels) * bytes_per_sample;
-    let data_bytes = samples.len() * bytes_per_sample;
+    let container_bits_per_sample = container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
+    if u16::from(spec.bytes_per_sample) * 8 != container_bits_per_sample {
+        return Err(Error::UnsupportedWav(format!(
+            "bytes/sample does not match the chosen container width for {} valid bits/sample",
+            spec.bits_per_sample
+        )));
+    }
+
+    let ordinary_mask = ordinary_channel_mask(u16::from(spec.channels)).ok_or_else(|| {
+        Error::UnsupportedWav(format!(
+            "no ordinary channel mask exists for {} channels",
+            spec.channels
+        ))
+    })?;
+    let channel_mask = match spec.channel_mask {
+        0 => ordinary_mask,
+        mask if mask == ordinary_mask => mask,
+        mask => {
+            return Err(Error::UnsupportedWav(format!(
+                "non-ordinary channel mask {mask:#010x} is not supported on output"
+            )));
+        }
+    };
+    let envelope = PcmEnvelope {
+        channels: u16::from(spec.channels),
+        valid_bits_per_sample: u16::from(spec.bits_per_sample),
+        container_bits_per_sample,
+        channel_mask,
+    };
+    let use_canonical_pcm =
+        spec.channels <= 2 && envelope.valid_bits_per_sample == envelope.container_bits_per_sample;
+    let fmt_chunk_size = if use_canonical_pcm {
+        PCM_FMT_CHUNK_SIZE
+    } else {
+        EXTENSIBLE_FMT_CHUNK_SIZE
+    };
+
+    let block_align = usize::from(spec.channels) * usize::from(container_bits_per_sample / 8);
+    let data_bytes = samples.len() * usize::from(container_bits_per_sample / 8);
     let metadata_bytes = wav_metadata_bytes(metadata);
-    let riff_size = 4 + (8 + FMT_CHUNK_SIZE as usize) + metadata_bytes.len() + (8 + data_bytes);
+    let riff_size = 4 + (8 + fmt_chunk_size as usize) + metadata_bytes.len() + (8 + data_bytes);
 
     writer.write_all(b"RIFF")?;
     writer.write_all(&(riff_size as u32).to_le_bytes())?;
     writer.write_all(b"WAVE")?;
 
     writer.write_all(b"fmt ")?;
-    writer.write_all(&FMT_CHUNK_SIZE.to_le_bytes())?;
-    writer.write_all(&1u16.to_le_bytes())?;
+    writer.write_all(&fmt_chunk_size.to_le_bytes())?;
+    writer.write_all(&(if use_canonical_pcm { 1u16 } else { 0xFFFEu16 }).to_le_bytes())?;
     writer.write_all(&(u16::from(spec.channels)).to_le_bytes())?;
     writer.write_all(&spec.sample_rate.to_le_bytes())?;
     writer.write_all(&(spec.sample_rate * block_align as u32).to_le_bytes())?;
     writer.write_all(&(block_align as u16).to_le_bytes())?;
-    writer.write_all(&(u16::from(spec.bits_per_sample)).to_le_bytes())?;
+    writer.write_all(&container_bits_per_sample.to_le_bytes())?;
+
+    if !use_canonical_pcm {
+        writer.write_all(&22u16.to_le_bytes())?;
+        writer.write_all(&(u16::from(spec.bits_per_sample)).to_le_bytes())?;
+        writer.write_all(&channel_mask.to_le_bytes())?;
+        writer.write_all(&PCM_SUBFORMAT_GUID)?;
+    }
 
     writer.write_all(&metadata_bytes)?;
 
     writer.write_all(b"data")?;
     writer.write_all(&(data_bytes as u32).to_le_bytes())?;
 
-    match spec.bits_per_sample {
-        16 => write_sample_bytes(writer, samples, |sample, buffer| {
-            buffer.extend_from_slice(&(sample as i16).to_le_bytes());
-        })?,
-        24 => write_sample_bytes(writer, samples, |sample, buffer| {
-            let value = sample as u32;
-            buffer.extend_from_slice(&[
-                (value & 0xff) as u8,
-                ((value >> 8) & 0xff) as u8,
-                ((value >> 16) & 0xff) as u8,
-            ]);
-        })?,
-        _ => unreachable!(),
-    }
+    write_sample_bytes(writer, samples, envelope)?;
 
     Ok(())
 }
@@ -102,16 +147,16 @@ fn append_wav_chunk(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
     }
 }
 
-fn write_sample_bytes<W, F>(writer: &mut W, samples: &[i32], mut encode: F) -> Result<()>
-where
-    W: Write,
-    F: FnMut(i32, &mut Vec<u8>),
-{
+fn write_sample_bytes<W: Write>(
+    writer: &mut W,
+    samples: &[i32],
+    envelope: PcmEnvelope,
+) -> Result<()> {
     const CHUNK_CAPACITY: usize = 64 * 1024;
     let mut buffer = Vec::with_capacity(CHUNK_CAPACITY);
 
     for &sample in samples {
-        encode(sample, &mut buffer);
+        append_encoded_sample(&mut buffer, sample, envelope)?;
         if buffer.len() >= CHUNK_CAPACITY {
             writer.write_all(&buffer)?;
             buffer.clear();
@@ -127,7 +172,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{input::WavSpec, metadata::WavMetadata};
+    use crate::{
+        input::{WavSpec, ordinary_channel_mask},
+        metadata::WavMetadata,
+    };
 
     use super::{write_wav, write_wav_with_metadata};
 
@@ -188,6 +236,7 @@ mod tests {
             bits_per_sample: 16,
             total_samples: 2,
             bytes_per_sample: 2,
+            channel_mask: ordinary_channel_mask(2u16).unwrap(),
         };
         let samples = [1, -2, 3, -4];
         let mut wav = Vec::new();
@@ -203,6 +252,28 @@ mod tests {
     }
 
     #[test]
+    fn writes_extensible_wav_for_padded_container() {
+        let spec = WavSpec {
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 12,
+            total_samples: 2,
+            bytes_per_sample: 2,
+            channel_mask: ordinary_channel_mask(2u16).unwrap(),
+        };
+        let samples = [0x123, -0x123];
+        let mut wav = Vec::new();
+
+        write_wav(&mut wav, spec, &samples).unwrap();
+
+        assert_eq!(
+            parse_chunk_layout(&wav),
+            vec![(*b"fmt ", 40), (*b"data", 4)]
+        );
+        assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 0xFFFE);
+    }
+
+    #[test]
     fn metadata_wav_layout_is_fixed_and_padded() {
         let spec = WavSpec {
             sample_rate: 44_100,
@@ -210,6 +281,7 @@ mod tests {
             bits_per_sample: 16,
             total_samples: 2,
             bytes_per_sample: 2,
+            channel_mask: ordinary_channel_mask(1u16).unwrap(),
         };
         let samples = [1, -2];
         let mut metadata = WavMetadata::default();

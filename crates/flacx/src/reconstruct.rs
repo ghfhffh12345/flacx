@@ -86,18 +86,8 @@ pub(crate) fn interleave_channels(
     channels: &[Vec<i32>],
 ) -> Result<Vec<i32>> {
     match assignment {
-        ChannelAssignment::IndependentMono => Ok(channels
-            .first()
-            .cloned()
-            .ok_or_else(|| Error::Decode("mono frame is missing samples".into()))?),
-        ChannelAssignment::IndependentStereo => {
-            let left = channels
-                .first()
-                .ok_or_else(|| Error::Decode("stereo frame is missing left samples".into()))?;
-            let right = channels
-                .get(1)
-                .ok_or_else(|| Error::Decode("stereo frame is missing right samples".into()))?;
-            interleave_stereo(left, right)
+        ChannelAssignment::Independent(channels_count) => {
+            interleave_independent(usize::from(channels_count), channels)
         }
         ChannelAssignment::LeftSide => {
             let left = channels
@@ -174,17 +164,32 @@ pub(crate) fn interleave_channels(
     }
 }
 
-fn interleave_stereo(left: &[i32], right: &[i32]) -> Result<Vec<i32>> {
-    if left.len() != right.len() {
+fn interleave_independent(expected_channels: usize, channels: &[Vec<i32>]) -> Result<Vec<i32>> {
+    if channels.len() != expected_channels {
+        return Err(Error::Decode(format!(
+            "independent frame expected {expected_channels} channels, found {}",
+            channels.len()
+        )));
+    }
+
+    let Some(first) = channels.first() else {
+        return Err(Error::Decode("independent frame is missing samples".into()));
+    };
+    if channels
+        .iter()
+        .skip(1)
+        .any(|channel| channel.len() != first.len())
+    {
         return Err(Error::Decode(
-            "left and right channels differ in length".into(),
+            "independent channels differ in length".into(),
         ));
     }
 
-    let mut interleaved = Vec::with_capacity(left.len() * 2);
-    for (&left_sample, &right_sample) in left.iter().zip(right) {
-        interleaved.push(left_sample);
-        interleaved.push(right_sample);
+    let mut interleaved = Vec::with_capacity(first.len() * expected_channels);
+    for frame_index in 0..first.len() {
+        for channel in channels {
+            interleaved.push(channel[frame_index]);
+        }
     }
     Ok(interleaved)
 }
@@ -209,5 +214,16 @@ mod tests {
             interleave_channels(ChannelAssignment::MidSide, &[vec![10, 11], vec![2, -1]]).unwrap();
 
         assert_eq!(interleaved, vec![11, 9, 11, 12]);
+    }
+
+    #[test]
+    fn reconstructs_independent_multichannel_frames() {
+        let interleaved = interleave_channels(
+            ChannelAssignment::Independent(3),
+            &[vec![1, 2], vec![3, 4], vec![5, 6]],
+        )
+        .unwrap();
+
+        assert_eq!(interleaved, vec![1, 3, 5, 2, 4, 6]);
     }
 }

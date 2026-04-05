@@ -11,11 +11,19 @@ const MAX_ESCAPE_BITS: u8 = 31;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum ChannelAssignment {
-    IndependentMono,
-    IndependentStereo,
+    Independent(u8),
     LeftSide,
     SideRight,
     MidSide,
+}
+
+impl ChannelAssignment {
+    pub(crate) fn channel_count(self) -> usize {
+        match self {
+            Self::Independent(channels) => usize::from(channels),
+            Self::LeftSide | Self::SideRight | Self::MidSide => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +85,19 @@ struct QuantizedLpc {
     coefficients: Vec<i16>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PartitionEncodingKind {
+    Rice { parameter: u8 },
+    Escape { bits: u8 },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PartitionEncodingSpec {
+    kind: PartitionEncodingKind,
+    start: usize,
+    end: usize,
+}
+
 pub(crate) fn encode_frame(
     interleaved_samples: &[i32],
     channels: u8,
@@ -102,6 +123,12 @@ fn analyze_frame(
     sample_rate: u32,
     profile: LevelProfile,
 ) -> Result<FrameAnalysis> {
+    if !(1..=8).contains(&channels) {
+        return Err(Error::UnsupportedFlac(format!(
+            "only independent 1..8 channel frame assignments are supported, found {channels} channels"
+        )));
+    }
+
     let channel_count = usize::from(channels);
     if interleaved_samples.len() % channel_count != 0 {
         return Err(Error::Encode(
@@ -109,16 +136,15 @@ fn analyze_frame(
         ));
     }
 
-    let mut candidates = Vec::new();
-    match channels {
+    let candidates = match channels {
         1 => {
-            let subframe =
-                choose_subframe(interleaved_samples, bits_per_sample, sample_rate, profile)?;
-            candidates.push(Candidate {
+            let samples = extract_channel(interleaved_samples, channel_count, 0);
+            let subframe = choose_subframe(&samples, bits_per_sample, sample_rate, profile)?;
+            vec![Candidate {
                 bits: subframe.bit_len(bits_per_sample),
-                assignment: ChannelAssignment::IndependentMono,
+                assignment: ChannelAssignment::Independent(1),
                 subframes: vec![subframe],
-            });
+            }]
         }
         2 => {
             let (left, right) = extract_stereo_channels(interleaved_samples);
@@ -133,38 +159,44 @@ fn analyze_frame(
                 let mid_side_cost = sample_magnitude_cost(&mid) + sample_magnitude_cost(&side);
 
                 if mid_side_cost < independent_cost {
-                    candidates.push(analyze_stereo_candidate(
+                    vec![analyze_stereo_candidate(
                         ChannelAssignment::MidSide,
                         [&mid, &side],
                         [bits_per_sample, bits_per_sample + 1],
                         sample_rate,
                         profile,
-                    )?);
+                    )?]
                 } else {
-                    candidates.push(analyze_stereo_candidate(
-                        ChannelAssignment::IndependentStereo,
+                    vec![analyze_stereo_candidate(
+                        ChannelAssignment::Independent(2),
                         [&left, &right],
                         [bits_per_sample, bits_per_sample],
                         sample_rate,
                         profile,
-                    )?);
+                    )?]
                 }
             } else {
-                candidates.push(analyze_stereo_candidate(
-                    ChannelAssignment::IndependentStereo,
+                vec![analyze_stereo_candidate(
+                    ChannelAssignment::Independent(2),
                     [&left, &right],
                     [bits_per_sample, bits_per_sample],
                     sample_rate,
                     profile,
-                )?);
+                )?]
             }
         }
         _ => {
-            return Err(Error::UnsupportedFlac(format!(
-                "only mono/stereo frame assignment is supported, found {channels} channels"
-            )));
+            let split_channels = split_channels(interleaved_samples, channel_count);
+            vec![analyze_independent_candidate(
+                ChannelAssignment::Independent(channels),
+                &split_channels,
+                channel_count,
+                bits_per_sample,
+                sample_rate,
+                profile,
+            )?]
         }
-    }
+    };
 
     let best = candidates
         .into_iter()
@@ -176,6 +208,29 @@ fn analyze_frame(
         block_size,
         channel_assignment: best.assignment,
         subframes: best.subframes,
+    })
+}
+
+fn analyze_independent_candidate(
+    assignment: ChannelAssignment,
+    channels: &[i32],
+    channel_count: usize,
+    bits_per_sample: u8,
+    sample_rate: u32,
+    profile: LevelProfile,
+) -> Result<Candidate> {
+    let mut bits = 0usize;
+    let frame_count = channels.len() / channel_count;
+    let mut subframes = Vec::with_capacity(channel_count);
+    for samples in channels.chunks_exact(frame_count) {
+        let subframe = choose_subframe(samples, bits_per_sample, sample_rate, profile)?;
+        bits += subframe.bit_len(bits_per_sample);
+        subframes.push(subframe);
+    }
+    Ok(Candidate {
+        bits,
+        assignment,
+        subframes,
     })
 }
 
@@ -200,6 +255,13 @@ fn analyze_stereo_candidate(
     })
 }
 
+fn extract_channel(interleaved: &[i32], channels: usize, channel: usize) -> Vec<i32> {
+    interleaved
+        .chunks_exact(channels)
+        .map(|frame| frame[channel])
+        .collect()
+}
+
 fn extract_stereo_channels(interleaved: &[i32]) -> (Vec<i32>, Vec<i32>) {
     let frame_count = interleaved.len() / 2;
     let mut left = Vec::with_capacity(frame_count);
@@ -209,6 +271,17 @@ fn extract_stereo_channels(interleaved: &[i32]) -> (Vec<i32>, Vec<i32>) {
         right.push(frame[1]);
     }
     (left, right)
+}
+
+fn split_channels(interleaved: &[i32], channels: usize) -> Vec<i32> {
+    let frame_count = interleaved.len() / channels;
+    let mut split = vec![0; interleaved.len()];
+    for (frame_index, frame) in interleaved.chunks_exact(channels).enumerate() {
+        for (channel_index, &sample) in frame.iter().enumerate() {
+            split[channel_index * frame_count + frame_index] = sample;
+        }
+    }
+    split
 }
 
 fn sample_magnitude_cost(samples: &[i32]) -> u64 {
@@ -520,7 +593,7 @@ fn choose_residual_encoding(
     max_partition_order: u8,
 ) -> Option<ResidualEncoding> {
     let block_size = residuals.len() + usize::from(predictor_order);
-    let mut best: Option<(usize, ResidualEncoding)> = None;
+    let mut best: Option<(usize, RiceMethod, u8, Vec<PartitionEncodingSpec>)> = None;
     let (partition_orders, partition_order_count) =
         partition_order_candidates(block_size, predictor_order, max_partition_order);
     for &partition_order in partition_orders[..partition_order_count].iter() {
@@ -531,6 +604,7 @@ fn choose_residual_encoding(
         let (methods, method_count) = candidate_rice_methods(residuals);
         for &method in methods[..method_count].iter() {
             let mut offset = 0usize;
+            let mut bit_len = 2 + 4;
             let mut partitions = Vec::with_capacity(partition_count);
             let mut valid = true;
             for partition_index in 0..partition_count {
@@ -540,9 +614,15 @@ fn choose_residual_encoding(
                     partition_len
                 };
                 let end = offset + count;
-                if let Some(partition) = choose_partition_encoding(&residuals[offset..end], method)
+                if let Some((partition_bits, kind)) =
+                    choose_partition_encoding(&residuals[offset..end], method)
                 {
-                    partitions.push(partition);
+                    bit_len += partition_bits;
+                    partitions.push(PartitionEncodingSpec {
+                        kind,
+                        start: offset,
+                        end,
+                    });
                 } else {
                     valid = false;
                     break;
@@ -550,21 +630,24 @@ fn choose_residual_encoding(
                 offset = end;
             }
             if valid {
-                let encoding = ResidualEncoding {
-                    method,
-                    partition_order,
-                    partitions,
-                };
-                let bit_len = encoding.bit_len();
                 best = match best {
-                    Some((best_bits, _)) if best_bits <= bit_len => best,
-                    _ => Some((bit_len, encoding)),
+                    Some((best_bits, ..)) if best_bits <= bit_len => best,
+                    _ => Some((bit_len, method, partition_order, partitions)),
                 };
             }
         }
     }
 
-    best.map(|(_, encoding)| encoding)
+    best.map(
+        |(_, method, partition_order, partitions)| ResidualEncoding {
+            method,
+            partition_order,
+            partitions: partitions
+                .into_iter()
+                .map(|partition| materialize_partition_encoding(partition, residuals))
+                .collect(),
+        },
+    )
 }
 
 fn partition_order_candidates(
@@ -605,28 +688,23 @@ fn candidate_rice_methods(residuals: &[i32]) -> ([RiceMethod; 2], usize) {
     }
 }
 
-fn choose_partition_encoding(residuals: &[i32], method: RiceMethod) -> Option<ResidualPartition> {
-    enum BestPartition {
-        Rice(u8),
-        Escape(u8),
-    }
-
-    let folded_residuals: Vec<usize> = residuals
-        .iter()
-        .map(|&residual| fold_residual(residual))
-        .collect();
-    let mut best: Option<(usize, BestPartition)> = None;
+fn choose_partition_encoding(
+    residuals: &[i32],
+    method: RiceMethod,
+) -> Option<(usize, PartitionEncodingKind)> {
+    let mut best: Option<(usize, PartitionEncodingKind)> = None;
     if let Some(bits) = residual_escape_width(residuals) {
         let bit_len = method.parameter_bits() + 5 + residuals.len() * usize::from(bits);
-        best = Some((bit_len, BestPartition::Escape(bits)));
+        best = Some((bit_len, PartitionEncodingKind::Escape { bits }));
     }
 
-    let (parameters, parameter_count) = candidate_rice_parameters(&folded_residuals, method);
+    let (parameters, parameter_count) = candidate_rice_parameters(residuals, method);
     for &parameter in parameters[..parameter_count].iter() {
         let mut bit_len = method.parameter_bits();
         let parameter_shift = usize::from(parameter);
         let mut valid = true;
-        for &folded in &folded_residuals {
+        for &residual in residuals {
+            let folded = fold_residual(residual);
             let quotient = folded >> parameter_shift;
             if quotient > u32::MAX as usize {
                 valid = false;
@@ -637,30 +715,35 @@ fn choose_partition_encoding(residuals: &[i32], method: RiceMethod) -> Option<Re
         if valid {
             best = match best {
                 Some((best_bits, _)) if best_bits <= bit_len => best,
-                _ => Some((bit_len, BestPartition::Rice(parameter))),
+                _ => Some((bit_len, PartitionEncodingKind::Rice { parameter })),
             };
         }
     }
 
-    best.map(|(_, partition)| match partition {
-        BestPartition::Rice(parameter) => ResidualPartition::Rice {
-            parameter,
-            residuals: residuals.to_vec(),
-        },
-        BestPartition::Escape(bits) => ResidualPartition::Escape {
-            bits,
-            residuals: residuals.to_vec(),
-        },
-    })
+    best
 }
 
-fn candidate_rice_parameters(folded_residuals: &[usize], method: RiceMethod) -> ([u8; 2], usize) {
+fn materialize_partition_encoding(
+    partition: PartitionEncodingSpec,
+    residuals: &[i32],
+) -> ResidualPartition {
+    let residuals = residuals[partition.start..partition.end].to_vec();
+    match partition.kind {
+        PartitionEncodingKind::Rice { parameter } => ResidualPartition::Rice {
+            parameter,
+            residuals,
+        },
+        PartitionEncodingKind::Escape { bits } => ResidualPartition::Escape { bits, residuals },
+    }
+}
+
+fn candidate_rice_parameters(residuals: &[i32], method: RiceMethod) -> ([u8; 2], usize) {
     let max_parameter = method.max_parameter();
-    if folded_residuals.is_empty() {
+    if residuals.is_empty() {
         return ([0, 0], 1);
     }
 
-    let estimated = estimate_rice_parameter(folded_residuals).min(max_parameter);
+    let estimated = estimate_rice_parameter_from_residuals(residuals).min(max_parameter);
 
     let mut parameters = [0; 2];
     let mut count = 0usize;
@@ -673,16 +756,6 @@ fn candidate_rice_parameters(folded_residuals: &[usize], method: RiceMethod) -> 
         count += 1;
     }
     (parameters, count)
-}
-
-fn estimate_rice_parameter(folded_residuals: &[usize]) -> u8 {
-    let mean_folded =
-        folded_residuals.iter().copied().sum::<usize>() / folded_residuals.len().max(1);
-    if mean_folded == 0 {
-        0
-    } else {
-        (usize::BITS - mean_folded.leading_zeros() - 1) as u8
-    }
 }
 
 fn estimate_rice_parameter_from_residuals(residuals: &[i32]) -> u8 {
@@ -867,10 +940,24 @@ mod tests {
         let analysis = analyze_frame(&interleaved, 2, 16, 44_100, profile).unwrap();
         assert!(matches!(
             analysis.channel_assignment,
-            ChannelAssignment::IndependentStereo
-                | ChannelAssignment::LeftSide
-                | ChannelAssignment::SideRight
-                | ChannelAssignment::MidSide
+            ChannelAssignment::Independent(2) | ChannelAssignment::MidSide
         ));
+    }
+
+    #[test]
+    fn multichannel_analysis_uses_independent_assignment() {
+        let mut interleaved = Vec::new();
+        for sample in 0..32i32 {
+            interleaved.push(sample);
+            interleaved.push(sample + 1);
+            interleaved.push(sample + 2);
+        }
+        let profile = LevelProfile::new(64, 4, 12, 4, true, true);
+        let analysis = analyze_frame(&interleaved, 3, 16, 44_100, profile).unwrap();
+        assert!(matches!(
+            analysis.channel_assignment,
+            ChannelAssignment::Independent(3)
+        ));
+        assert_eq!(analysis.subframes.len(), 3);
     }
 }
