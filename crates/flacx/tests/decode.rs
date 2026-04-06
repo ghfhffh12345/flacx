@@ -9,9 +9,10 @@ mod support;
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
-    cuesheet_block, info_list_chunk, parse_first_flac_frame_header, pcm_wav_bytes,
-    replace_flac_optional_metadata, sample_fixture, truncate_bytes, unique_temp_path,
-    vorbis_comment_block, wav_cue_points, wav_info_entries, wav_with_chunks,
+    cuesheet_block, flac_frames, info_list_chunk, parse_first_flac_frame_header, pcm_wav_bytes,
+    replace_flac_optional_metadata, rewrite_streaminfo_md5, sample_fixture, streaminfo_md5,
+    truncate_bytes, unique_temp_path, vorbis_comment_block, wav_cue_points, wav_info_entries,
+    wav_with_chunks,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -254,6 +255,53 @@ fn rejects_bad_frame_crc() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     assert_decode_error_stable(&corrupt_last_frame_crc(&flac));
+}
+
+#[test]
+fn rejects_streaminfo_md5_mismatch() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let mut bad_md5 = streaminfo_md5(&flac);
+    bad_md5[0] ^= 0xFF;
+    let corrupt = rewrite_streaminfo_md5(&flac, bad_md5);
+
+    assert_eq!(flac_frames(&corrupt), flac_frames(&flac));
+    assert_ne!(streaminfo_md5(&corrupt), streaminfo_md5(&flac));
+
+    for threads in decode_thread_variants() {
+        let error = decoder_for_threads(threads)
+            .decode_bytes(&corrupt)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid flac: STREAMINFO MD5 mismatch",
+            "unexpected MD5 mismatch error for threads={threads}"
+        );
+    }
+}
+
+#[test]
+fn skips_streaminfo_md5_verification_when_digest_is_all_zeroes() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = rewrite_streaminfo_md5(&flac, [0; 16]);
+
+    assert_round_trips_bytes_exactly(&wav, &flac);
+}
+
+#[test]
+fn zero_sample_stream_round_trips_with_empty_stream_md5() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &[]);
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    assert_eq!(
+        streaminfo_md5(&flac),
+        [
+            0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8,
+            0x42, 0x7e,
+        ]
+    );
+
+    assert_round_trips_bytes_exactly(&wav, &flac);
 }
 
 #[test]

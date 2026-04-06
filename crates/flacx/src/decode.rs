@@ -8,10 +8,11 @@ use std::{
 use crate::{
     config::{DecodeBuilder, DecodeConfig},
     error::{Error, Result},
+    md5::verify_streaminfo_digest,
     progress::{NoProgress, ProgressSink},
     read::read_flac_for_decode,
     stream_info::StreamInfo,
-    wav_output::write_wav_with_metadata,
+    wav_output::write_wav_with_metadata_and_md5,
 };
 
 #[cfg(feature = "progress")]
@@ -134,12 +135,13 @@ impl Decoder {
         P: ProgressSink,
     {
         let decoded = read_flac_for_decode(input, self.config, progress)?;
-        write_wav_with_metadata(
+        let streaminfo_md5 = write_wav_with_metadata_and_md5(
             &mut output,
             decoded.wav.spec,
             &decoded.wav.samples,
             &decoded.metadata,
         )?;
+        verify_streaminfo_digest(streaminfo_md5, decoded.stream_info.md5)?;
         output.flush()?;
         Ok(summary_from_stream_info(
             decoded.stream_info,

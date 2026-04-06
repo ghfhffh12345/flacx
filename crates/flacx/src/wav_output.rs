@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{io::Write, sync::mpsc, thread};
 
 use crate::{
     error::{Error, Result},
@@ -6,6 +6,7 @@ use crate::{
         PcmEnvelope, WavSpec, append_encoded_sample, container_bits_from_valid_bits,
         ordinary_channel_mask,
     },
+    md5::Md5,
     metadata::WavMetadata,
 };
 
@@ -28,6 +29,15 @@ pub(crate) fn write_wav_with_metadata<W: Write>(
     samples: &[i32],
     metadata: &WavMetadata,
 ) -> Result<()> {
+    write_wav_with_metadata_and_md5(writer, spec, samples, metadata).map(|_| ())
+}
+
+pub(crate) fn write_wav_with_metadata_and_md5<W: Write>(
+    writer: &mut W,
+    spec: WavSpec,
+    samples: &[i32],
+    metadata: &WavMetadata,
+) -> Result<[u8; 16]> {
     if !(1..=8).contains(&spec.channels) {
         return Err(Error::UnsupportedWav(format!(
             "only the ordinary 1..8 channel envelope is supported, found {} channels",
@@ -119,9 +129,9 @@ pub(crate) fn write_wav_with_metadata<W: Write>(
     writer.write_all(b"data")?;
     writer.write_all(&(data_bytes as u32).to_le_bytes())?;
 
-    write_sample_bytes(writer, samples, envelope)?;
+    let streaminfo_md5 = write_sample_bytes(writer, samples, envelope)?;
 
-    Ok(())
+    Ok(streaminfo_md5)
 }
 
 fn wav_metadata_bytes(metadata: &WavMetadata) -> Vec<u8> {
@@ -151,23 +161,42 @@ fn write_sample_bytes<W: Write>(
     writer: &mut W,
     samples: &[i32],
     envelope: PcmEnvelope,
-) -> Result<()> {
+) -> Result<[u8; 16]> {
     const CHUNK_CAPACITY: usize = 64 * 1024;
+    let (hash_sender, hash_receiver) = mpsc::sync_channel::<Vec<u8>>(2);
+    let hash_worker = thread::spawn(move || {
+        let mut md5 = Md5::new();
+        for chunk in hash_receiver {
+            md5.update(&chunk);
+        }
+        md5.finalize()
+    });
     let mut buffer = Vec::with_capacity(CHUNK_CAPACITY);
 
     for &sample in samples {
         append_encoded_sample(&mut buffer, sample, envelope)?;
         if buffer.len() >= CHUNK_CAPACITY {
             writer.write_all(&buffer)?;
-            buffer.clear();
+            hash_sender
+                .send(std::mem::replace(
+                    &mut buffer,
+                    Vec::with_capacity(CHUNK_CAPACITY),
+                ))
+                .map_err(|_| Error::Thread("streaminfo md5 worker stopped".into()))?;
         }
     }
 
     if !buffer.is_empty() {
         writer.write_all(&buffer)?;
+        hash_sender
+            .send(buffer)
+            .map_err(|_| Error::Thread("streaminfo md5 worker stopped".into()))?;
     }
+    drop(hash_sender);
 
-    Ok(())
+    hash_worker
+        .join()
+        .map_err(|_| Error::Thread("streaminfo md5 worker panicked".into()))
 }
 
 #[cfg(test)]

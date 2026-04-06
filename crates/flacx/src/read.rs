@@ -155,7 +155,6 @@ where
             samples.len()
         )));
     }
-
     Ok(DecodedFlacData {
         wav: WavData {
             spec: wav_spec,

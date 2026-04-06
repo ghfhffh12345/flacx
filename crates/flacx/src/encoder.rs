@@ -149,10 +149,16 @@ impl Encoder {
         W: Write + Seek,
         P: ProgressSink,
     {
-        let crate::input::EncodeWavData { wav, metadata } = input;
+        let crate::input::EncodeWavData {
+            wav,
+            metadata,
+            streaminfo_md5,
+        } = input;
         let plan = EncodePlan::new(wav.spec, self.config.clone())?;
+        let mut stream_info = plan.stream_info();
+        stream_info.md5 = streaminfo_md5;
         let metadata_blocks = metadata.flac_blocks();
-        let mut writer = FlacWriter::new(output, plan.stream_info(), &metadata_blocks)?;
+        let mut writer = FlacWriter::new(output, stream_info, &metadata_blocks)?;
 
         if plan.total_frames == 0 {
             let (_, stream_info) = writer.finalize()?;

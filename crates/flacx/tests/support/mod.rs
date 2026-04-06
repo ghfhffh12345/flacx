@@ -319,6 +319,39 @@ pub fn replace_flac_optional_metadata(
     rebuilt
 }
 
+pub fn streaminfo_md5(flac_bytes: &[u8]) -> [u8; 16] {
+    let blocks = split_flac_stream(flac_bytes).0;
+    blocks[0].payload[18..34]
+        .try_into()
+        .expect("fixed STREAMINFO md5 slice")
+}
+
+pub fn flac_frames(flac_bytes: &[u8]) -> Vec<u8> {
+    split_flac_stream(flac_bytes).1
+}
+
+pub fn rewrite_streaminfo_md5(flac_bytes: &[u8], md5: [u8; 16]) -> Vec<u8> {
+    let (mut blocks, frames) = split_flac_stream(flac_bytes);
+    let streaminfo = blocks
+        .first_mut()
+        .expect("streaminfo metadata block present");
+    streaminfo.payload[18..34].copy_from_slice(&md5);
+
+    let mut rebuilt = Vec::new();
+    rebuilt.extend_from_slice(b"fLaC");
+    let total_blocks = blocks.len();
+    for (index, block) in blocks.into_iter().enumerate() {
+        rebuilt.extend_from_slice(&flac_metadata_header(
+            block.block_type,
+            index + 1 == total_blocks,
+            block.payload.len(),
+        ));
+        rebuilt.extend_from_slice(&block.payload);
+    }
+    rebuilt.extend_from_slice(&frames);
+    rebuilt
+}
+
 pub fn vorbis_comment_block(entries: &[(&str, &str)]) -> ParsedMetadataBlock {
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());

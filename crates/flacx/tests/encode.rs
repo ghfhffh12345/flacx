@@ -32,6 +32,36 @@ fn patches_streaminfo_after_encoding() {
 }
 
 #[test]
+fn writes_streaminfo_md5_for_nonempty_pcm() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &[1, -2, 3, -4]);
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let md5 = &flac_metadata_blocks(&flac)[0].payload[18..34];
+
+    assert_eq!(
+        md5,
+        &[
+            0x4e, 0xee, 0x3c, 0x56, 0x22, 0x45, 0x41, 0xfe, 0x00, 0x81, 0x1d, 0x91, 0xd5, 0x24,
+            0x24, 0x56,
+        ]
+    );
+}
+
+#[test]
+fn writes_empty_stream_md5_for_zero_sample_pcm() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &[]);
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let md5 = &flac_metadata_blocks(&flac)[0].payload[18..34];
+
+    assert_eq!(
+        md5,
+        &[
+            0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8,
+            0x42, 0x7e,
+        ]
+    );
+}
+
+#[test]
 fn default_encoder_path_remains_fixed_blocksize() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();

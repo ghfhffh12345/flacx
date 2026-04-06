@@ -1,7 +1,14 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::{
+    io::{Read, Seek, SeekFrom},
+    sync::Arc,
+    thread,
+};
 
-use crate::error::{Error, Result};
 use crate::metadata::{EncodeMetadata, MetadataDraft};
+use crate::{
+    error::{Error, Result},
+    md5::digest_bytes,
+};
 
 const PCM_SUBFORMAT_GUID: [u8; 16] = [
     0x01, 0x00, 0x00, 0x00, // PCM subformat
@@ -30,6 +37,7 @@ pub struct WavData {
 pub(crate) struct EncodeWavData {
     pub(crate) wav: WavData,
     pub(crate) metadata: EncodeMetadata,
+    pub(crate) streaminfo_md5: [u8; 16],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,7 +209,13 @@ fn read_wav_internal<R: Read + Seek>(
     reader.seek(SeekFrom::Start(layout.data_offset))?;
     let mut data = vec![0u8; layout.data_size as usize];
     reader.read_exact(&mut data)?;
+    let data: Arc<[u8]> = Arc::from(data);
+    let md5_input = Arc::clone(&data);
+    let md5_worker = thread::spawn(move || digest_bytes(&md5_input));
     let samples = decode_samples(&data, layout.envelope)?;
+    let streaminfo_md5 = md5_worker
+        .join()
+        .map_err(|_| Error::Thread("streaminfo md5 worker panicked".into()))?;
 
     let wav = WavData {
         spec: WavSpec {
@@ -218,6 +232,7 @@ fn read_wav_internal<R: Read + Seek>(
     Ok(EncodeWavData {
         wav,
         metadata: layout.metadata,
+        streaminfo_md5,
     })
 }
 
