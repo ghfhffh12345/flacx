@@ -10,7 +10,7 @@ crate.
 
 ```toml
 [dependencies]
-flacx = "0.5.1"
+flacx = "0.6.0"
 ```
 
 ## Quick start
@@ -58,7 +58,7 @@ disabled by default.
 
 ```toml
 [dependencies]
-flacx = { version = "0.5.1", features = ["progress"] }
+flacx = { version = "0.6.0", features = ["progress"] }
 ```
 
 When enabled, the additional progress-specific API surface includes:
