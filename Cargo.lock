@@ -118,14 +118,14 @@ dependencies = [
 
 [[package]]
 name = "flacx"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bitstream-io",
 ]
 
 [[package]]
 name = "flacx-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap",
  "flacx",
