@@ -6,8 +6,8 @@ mod support;
 
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, decode_with_ffmpeg,
-    flac_metadata_blocks, info_list_chunk, parse_first_flac_frame_header, pcm_wav_bytes,
-    sample_fixture, vorbis_comments, wav_with_chunks,
+    flac_metadata_blocks, info_list_chunk, parse_first_flac_frame_header, parse_wav_format,
+    pcm_wav_bytes, sample_fixture, vorbis_comments, wav_with_chunks,
 };
 
 #[test]
@@ -73,6 +73,50 @@ fn default_encoder_path_remains_fixed_blocksize() {
         ParsedFlacCodedNumberKind::FrameNumber
     );
     assert_eq!(header.coded_number_value, 0);
+}
+
+#[test]
+fn encodes_legal_streaminfo_only_sample_rate_using_zero_frame_header_code() {
+    let wav = pcm_wav_bytes(16, 1, 700_001, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+    let header = parse_first_flac_frame_header(&flac);
+    let format = parse_wav_format(&decoded);
+
+    assert_eq!(decoded, wav);
+    assert_eq!(header.blocking_strategy, ParsedFlacBlockingStrategy::Fixed);
+    assert_eq!(
+        header.coded_number_kind,
+        ParsedFlacCodedNumberKind::FrameNumber
+    );
+    assert_eq!(header.coded_number_value, 0);
+    assert_eq!(header.sample_rate_bits, 0b0000);
+    assert_eq!(format.sample_rate, 700_001);
+}
+
+#[test]
+fn encodes_block_sizes_above_32768_with_extended_block_header_code() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 40_000));
+    let flac = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(2)
+            .with_block_size(40_000),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+    let header = parse_first_flac_frame_header(&flac);
+
+    assert_eq!(decoded, wav);
+    assert_eq!(header.blocking_strategy, ParsedFlacBlockingStrategy::Fixed);
+    assert_eq!(
+        header.coded_number_kind,
+        ParsedFlacCodedNumberKind::FrameNumber
+    );
+    assert_eq!(header.coded_number_value, 0);
+    assert_eq!(header.block_size_bits, 0b0111);
+    assert_eq!(u16::from_be_bytes([flac[8], flac[9]]), 40_000);
+    assert_eq!(u16::from_be_bytes([flac[10], flac[11]]), 40_000);
 }
 
 #[test]
@@ -249,7 +293,7 @@ fn round_trips_16bit_stereo_with_ffmpeg_oracle() {
 #[test]
 fn round_trips_24bit_mono_with_ffmpeg_oracle() {
     let samples: Vec<i32> = (0..5_000)
-        .map(|index| ((index as i32 * 9_731) % 16_000_000) - 8_000_000)
+        .map(|index| ((index * 9_731) % 16_000_000) - 8_000_000)
         .collect();
     let wav = pcm_wav_bytes(24, 1, 96_000, &samples);
     let flac = Encoder::new(EncoderConfig::default().with_threads(3))

@@ -184,7 +184,7 @@ fn benchmark_synthetic_fixture(
         fixture.sample_rate,
         SYNTHETIC_MULTICHANNEL_FRAMES,
     );
-    let source_path = temp_path(&fixture.label, "wav");
+    let source_path = temp_path(fixture.label, "wav");
     fs::write(&source_path, &wav_bytes)?;
     let measurement = benchmark_fixture(&source_path, threads);
     let _ = fs::remove_file(source_path);
@@ -302,9 +302,15 @@ fn decode_flacx(
 
 fn benchmark_encoder(threads: usize) -> Result<Encoder, Box<dyn std::error::Error>> {
     let mut config = EncoderConfig::default();
-    if let Some(level) = env::var("FLACX_LEVEL").ok() {
+    if let Ok(level) = env::var("FLACX_LEVEL") {
         let level = level.parse::<u8>()?;
         config = config.with_level(Level::try_from(level).map_err(|_| "invalid FLACX_LEVEL")?);
+    }
+    if let Ok(block_size) = env::var("FLACX_BLOCK_SIZE") {
+        let block_size = block_size
+            .parse::<u16>()
+            .map_err(|_| "invalid FLACX_BLOCK_SIZE")?;
+        config = config.with_block_size(block_size);
     }
     Ok(Encoder::new(config.with_threads(threads)))
 }

@@ -9,10 +9,10 @@ mod support;
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
-    cuesheet_block, flac_frames, info_list_chunk, parse_first_flac_frame_header, pcm_wav_bytes,
-    replace_flac_optional_metadata, rewrite_streaminfo_md5, sample_fixture, streaminfo_md5,
-    truncate_bytes, unique_temp_path, vorbis_comment_block, wav_cue_points, wav_info_entries,
-    wav_with_chunks,
+    cuesheet_block, flac_frames, info_list_chunk, parse_first_flac_frame_header, parse_wav_format,
+    pcm_wav_bytes, replace_flac_optional_metadata, rewrite_streaminfo_md5, sample_fixture,
+    streaminfo_md5, truncate_bytes, unique_temp_path, vorbis_comment_block, wav_cue_points,
+    wav_info_entries, wav_with_chunks,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -92,7 +92,7 @@ fn round_trips_16bit_stereo_wav_bytes_exactly() {
 #[test]
 fn round_trips_24bit_mono_wav_bytes_exactly() {
     let samples: Vec<i32> = (0..5_000)
-        .map(|index| ((index as i32 * 9_731) % 16_000_000) - 8_000_000)
+        .map(|index| ((index * 9_731) % 16_000_000) - 8_000_000)
         .collect();
     let wav = pcm_wav_bytes(24, 1, 96_000, &samples);
     let flac = Encoder::new(EncoderConfig::default().with_threads(3))
@@ -137,6 +137,31 @@ fn decodes_variable_blocksize_sample_number_coded_fixture() {
         ParsedFlacCodedNumberKind::SampleNumber
     );
     assert_eq!(header.coded_number_value, 0);
+    assert_round_trips_bytes_exactly(&wav, &flac);
+}
+
+#[test]
+fn decodes_legal_streaminfo_only_sample_rate_from_zero_header_code() {
+    let wav = pcm_wav_bytes(16, 1, 700_001, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let header = parse_first_flac_frame_header(&flac);
+    let decoded = decode_bytes(&flac).unwrap();
+    let format = parse_wav_format(&decoded);
+
+    assert_eq!(header.sample_rate_bits, 0b0000);
+    assert_round_trips_bytes_exactly(&wav, &flac);
+    assert_eq!(format.sample_rate, 700_001);
+}
+
+#[test]
+fn decodes_large_block_sizes_above_32768_end_to_end() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 40_000));
+    let flac = Encoder::new(EncoderConfig::default().with_block_size(40_000))
+        .encode_bytes(&wav)
+        .unwrap();
+    let header = parse_first_flac_frame_header(&flac);
+
+    assert_eq!(header.block_size_bits, 0b0111);
     assert_round_trips_bytes_exactly(&wav, &flac);
 }
 

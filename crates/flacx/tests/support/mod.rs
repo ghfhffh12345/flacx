@@ -124,6 +124,8 @@ pub struct ParsedFlacFrameHeader {
     pub blocking_strategy: ParsedFlacBlockingStrategy,
     pub coded_number_kind: ParsedFlacCodedNumberKind,
     pub coded_number_value: u64,
+    pub block_size_bits: u8,
+    pub sample_rate_bits: u8,
     pub channel_assignment_bits: u8,
     pub sample_size_bits: u8,
 }
@@ -195,8 +197,8 @@ pub fn parse_first_flac_frame_header(flac_bytes: &[u8]) -> ParsedFlacFrameHeader
     } else {
         ParsedFlacBlockingStrategy::Variable
     };
-    let _block_size_bits = read_bits(flac_bytes, &mut bit_offset, 4);
-    let _sample_rate_bits = read_bits(flac_bytes, &mut bit_offset, 4);
+    let block_size_bits = read_bits(flac_bytes, &mut bit_offset, 4) as u8;
+    let sample_rate_bits = read_bits(flac_bytes, &mut bit_offset, 4) as u8;
     let channel_assignment_bits = read_bits(flac_bytes, &mut bit_offset, 4) as u8;
     let sample_size_bits = read_bits(flac_bytes, &mut bit_offset, 3) as u8;
     let _reserved = read_bits(flac_bytes, &mut bit_offset, 1);
@@ -211,6 +213,8 @@ pub fn parse_first_flac_frame_header(flac_bytes: &[u8]) -> ParsedFlacFrameHeader
             ParsedFlacBlockingStrategy::Variable => ParsedFlacCodedNumberKind::SampleNumber,
         },
         coded_number_value,
+        block_size_bits,
+        sample_rate_bits,
         channel_assignment_bits,
         sample_size_bits,
     }

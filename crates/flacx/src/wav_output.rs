@@ -44,7 +44,7 @@ pub(crate) fn write_wav_with_metadata_and_md5<W: Write>(
             spec.channels
         )));
     }
-    if !matches!(spec.bytes_per_sample, 1 | 2 | 3 | 4) {
+    if !matches!(spec.bytes_per_sample, 1..=4) {
         return Err(Error::UnsupportedWav(format!(
             "only byte-aligned PCM containers are supported, found {} bytes/sample",
             spec.bytes_per_sample
@@ -63,7 +63,7 @@ pub(crate) fn write_wav_with_metadata_and_md5<W: Write>(
     }
 
     let container_bits_per_sample = container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
-    if u16::from(spec.bytes_per_sample) * 8 != container_bits_per_sample {
+    if spec.bytes_per_sample * 8 != container_bits_per_sample {
         return Err(Error::UnsupportedWav(format!(
             "bytes/sample does not match the chosen container width for {} valid bits/sample",
             spec.bits_per_sample
