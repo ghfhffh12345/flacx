@@ -8,11 +8,19 @@ publishable library package.
 
 ## Run locally
 
+Build the release binary from the workspace root:
+
 ```bash
-cargo run -p flacx-cli -- encode input.wav -o output.flac --level 8 --threads 4
-cargo run -p flacx-cli -- encode album-dir -o encoded-album --depth 0
-cargo run -p flacx-cli -- decode input.flac -o output.wav --threads 4
-cargo run -p flacx-cli -- decode encoded-album -o decoded-album --depth 0
+cargo build --release
+```
+
+Then run `flacx` directly from `target/release/` (or after adding that directory to your `PATH`):
+
+```bash
+flacx encode input.wav -o output.flac --level 8 --threads 4
+flacx encode album-dir -o encoded-album --depth 0
+flacx decode input.flac -o output.wav --threads 4
+flacx decode encoded-album -o decoded-album --depth 0
 ```
 
 ## Command shape
