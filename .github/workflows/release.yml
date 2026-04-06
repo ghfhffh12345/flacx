@@ -25,7 +25,7 @@ jobs:
       release_kind: ${{ steps.validate.outputs.release_kind }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag_name) || github.ref }}
@@ -155,7 +155,7 @@ jobs:
       contents: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag_name) || github.ref }}
@@ -181,7 +181,7 @@ jobs:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag_name) || github.ref }}
@@ -208,7 +208,7 @@ jobs:
       contents: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag_name) || github.ref }}
