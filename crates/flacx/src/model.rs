@@ -1,7 +1,7 @@
 use crate::{
     error::{Error, Result},
     level::LevelProfile,
-    write::{EncodedFrame, serialize_frame},
+    write::{EncodedFrame, FrameHeaderNumber, serialize_frame},
 };
 
 const MAX_STREAMABLE_LPC_ORDER_AT_48KHZ: u8 = 12;
@@ -103,7 +103,7 @@ pub(crate) fn encode_frame(
     channels: u8,
     bits_per_sample: u8,
     sample_rate: u32,
-    frame_index: u64,
+    header_number: FrameHeaderNumber,
     profile: LevelProfile,
 ) -> Result<EncodedFrame> {
     let analysis = analyze_frame(
@@ -113,7 +113,7 @@ pub(crate) fn encode_frame(
         sample_rate,
         profile,
     )?;
-    serialize_frame(&analysis, bits_per_sample, sample_rate, frame_index)
+    serialize_frame(&analysis, bits_per_sample, sample_rate, header_number)
 }
 
 fn analyze_frame(

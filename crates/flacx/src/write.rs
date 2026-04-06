@@ -15,6 +15,12 @@ use crate::{
 const STREAMINFO_LENGTH: u32 = 34;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameHeaderNumber {
+    Frame(u64),
+    Sample(u64),
+}
+
 pub(crate) struct EncodedFrame {
     pub(crate) bytes: Vec<u8>,
     pub(crate) sample_count: u16,
@@ -101,7 +107,7 @@ pub(crate) fn serialize_frame(
     analysis: &FrameAnalysis,
     bits_per_sample: u8,
     sample_rate: u32,
-    frame_index: u64,
+    header_number: FrameHeaderNumber,
 ) -> Result<EncodedFrame> {
     if analysis.subframes.is_empty() {
         return Err(Error::Encode("frame analysis is missing subframes".into()));
@@ -116,7 +122,7 @@ pub(crate) fn serialize_frame(
         sample_rate,
         analysis.channel_assignment,
         bits_per_sample,
-        frame_index,
+        header_number,
     )?;
     let mut subframes = BitWriter::endian(Vec::new(), BigEndian);
     match analysis.channel_assignment {
@@ -153,12 +159,12 @@ fn encode_frame_header(
     sample_rate: u32,
     assignment: ChannelAssignment,
     bits_per_sample: u8,
-    frame_index: u64,
+    header_number: FrameHeaderNumber,
 ) -> Result<Vec<u8>> {
     let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     writer.write_unsigned_var(14, FLAC_SYNC_CODE)?;
     writer.write_bit(false)?;
-    writer.write_bit(false)?;
+    writer.write_bit(matches!(header_number, FrameHeaderNumber::Sample(_)))?;
     let (block_size_bits, block_size_extra) = block_size_code(block_size);
     let (sample_rate_bits, sample_rate_extra) = sample_rate_code(sample_rate).ok_or_else(|| {
         Error::UnsupportedFlac(format!(
@@ -170,13 +176,21 @@ fn encode_frame_header(
     writer.write_unsigned_var(4, channel_assignment_bits(assignment))?;
     writer.write_unsigned_var(3, bit_depth_bits(bits_per_sample)?)?;
     writer.write_bit(false)?;
-    writer.write_bytes(&encode_utf8_number(frame_index)?)?;
+    writer.write_bytes(&encode_utf8_number(header_number.value())?)?;
     writer.write_bytes(&block_size_extra)?;
     writer.write_bytes(&sample_rate_extra)?;
     writer.byte_align()?;
     let mut header = writer.into_writer();
     header.push(crc8(&header));
     Ok(header)
+}
+
+impl FrameHeaderNumber {
+    fn value(self) -> u64 {
+        match self {
+            Self::Frame(value) | Self::Sample(value) => value,
+        }
+    }
 }
 
 fn channel_assignment_bits(assignment: ChannelAssignment) -> u8 {
@@ -294,7 +308,7 @@ fn encode_utf8_number(value: u64) -> Result<Vec<u8>> {
         ],
         _ => {
             return Err(Error::UnsupportedFlac(format!(
-                "coded frame number {value} exceeds the FLAC limit"
+                "coded header number {value} exceeds the FLAC limit"
             )));
         }
     };
@@ -416,7 +430,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        FlacWriter, bit_depth_bits, channel_assignment_bits, encode_utf8_number,
+        FlacWriter, FrameHeaderNumber, bit_depth_bits, channel_assignment_bits, encode_utf8_number,
         metadata_block_header, sample_rate_is_representable,
     };
     use crate::{
@@ -483,7 +497,15 @@ mod tests {
             interleaved.push(sample * 16 + 2);
         }
         let profile = LevelProfile::new(256, 4, 12, 4, true, true);
-        let encoded = encode_frame(&interleaved, 3, 16, 44_100, 0, profile).unwrap();
+        let encoded = encode_frame(
+            &interleaved,
+            3,
+            16,
+            44_100,
+            FrameHeaderNumber::Frame(0),
+            profile,
+        )
+        .unwrap();
         let assignment = (encoded.bytes[3] >> 4) & 0x0f;
         assert_eq!(assignment, 0b0010);
     }
@@ -496,7 +518,15 @@ mod tests {
             interleaved.push(sample * 16 + (sample & 1));
         }
         let profile = LevelProfile::new(256, 4, 12, 4, true, true);
-        let encoded = encode_frame(&interleaved, 2, 16, 44_100, 0, profile).unwrap();
+        let encoded = encode_frame(
+            &interleaved,
+            2,
+            16,
+            44_100,
+            FrameHeaderNumber::Frame(0),
+            profile,
+        )
+        .unwrap();
         let assignment = (encoded.bytes[3] >> 4) & 0x0f;
         assert!(matches!(assignment, 0b0001 | 0b1000 | 0b1001 | 0b1010));
     }
@@ -560,7 +590,7 @@ mod tests {
         let blocks = parse_metadata_blocks(&writer.into_inner());
 
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].0, true);
+        assert!(blocks[0].0);
         assert_eq!(blocks[0].1, 0);
     }
 

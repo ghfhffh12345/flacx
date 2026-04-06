@@ -1,11 +1,12 @@
 use std::io::Cursor;
 
-use flacx::{Encoder, EncoderConfig};
+use flacx::{Encoder, EncoderConfig, decode_bytes};
 
 mod support;
 
 use support::{
-    cue_chunk, decode_with_ffmpeg, flac_metadata_blocks, info_list_chunk, pcm_wav_bytes,
+    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, decode_with_ffmpeg,
+    flac_metadata_blocks, info_list_chunk, parse_first_flac_frame_header, pcm_wav_bytes,
     sample_fixture, vorbis_comments, wav_with_chunks,
 };
 
@@ -28,6 +29,49 @@ fn patches_streaminfo_after_encoding() {
     assert_eq!(max_block, expected_block_size);
     assert!(min_frame > 0);
     assert!(max_frame >= min_frame);
+}
+
+#[test]
+fn default_encoder_path_remains_fixed_blocksize() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let header = parse_first_flac_frame_header(&flac);
+
+    assert_eq!(header.blocking_strategy, ParsedFlacBlockingStrategy::Fixed);
+    assert_eq!(
+        header.coded_number_kind,
+        ParsedFlacCodedNumberKind::FrameNumber
+    );
+    assert_eq!(header.coded_number_value, 0);
+}
+
+#[test]
+fn encodes_variable_blocksize_schedule_with_sample_number_coded_headers() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_352));
+    let encoder = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(2)
+            .with_block_schedule(vec![576, 1_152, 576, 2_048]),
+    );
+    let flac = encoder.encode_bytes(&wav).unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+    let header = parse_first_flac_frame_header(&flac);
+
+    assert_eq!(decoded, wav);
+    assert_eq!(
+        header.blocking_strategy,
+        ParsedFlacBlockingStrategy::Variable
+    );
+    assert_eq!(
+        header.coded_number_kind,
+        ParsedFlacCodedNumberKind::SampleNumber
+    );
+    assert_eq!(header.coded_number_value, 0);
+
+    let min_block = u16::from_be_bytes([flac[8], flac[9]]);
+    let max_block = u16::from_be_bytes([flac[10], flac[11]]);
+    assert_eq!(min_block, 576);
+    assert_eq!(max_block, 2_048);
 }
 
 #[test]

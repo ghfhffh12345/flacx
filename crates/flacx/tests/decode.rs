@@ -7,9 +7,11 @@ use flacx::{
 mod support;
 
 use support::{
-    application_block, corrupt_last_frame_crc, corrupt_magic, cue_chunk, cuesheet_block,
-    info_list_chunk, pcm_wav_bytes, replace_flac_optional_metadata, sample_fixture, truncate_bytes,
-    unique_temp_path, vorbis_comment_block, wav_cue_points, wav_info_entries, wav_with_chunks,
+    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
+    corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
+    cuesheet_block, info_list_chunk, parse_first_flac_frame_header, pcm_wav_bytes,
+    replace_flac_optional_metadata, sample_fixture, truncate_bytes, unique_temp_path,
+    vorbis_comment_block, wav_cue_points, wav_info_entries, wav_with_chunks,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -111,6 +113,45 @@ fn round_trips_partial_tail_block_exactly() {
     .unwrap();
 
     assert_round_trips_bytes_exactly(&wav, &flac);
+}
+
+#[test]
+fn decodes_variable_blocksize_sample_number_coded_fixture() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_352));
+    let flac = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(2)
+            .with_block_schedule(vec![576, 1_152, 576, 2_048]),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+    let header = parse_first_flac_frame_header(&flac);
+
+    assert_eq!(
+        header.blocking_strategy,
+        ParsedFlacBlockingStrategy::Variable
+    );
+    assert_eq!(
+        header.coded_number_kind,
+        ParsedFlacCodedNumberKind::SampleNumber
+    );
+    assert_eq!(header.coded_number_value, 0);
+    assert_round_trips_bytes_exactly(&wav, &flac);
+}
+
+#[test]
+fn rejects_variable_blocksize_fixture_with_wrong_sample_number() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_352));
+    let flac = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(2)
+            .with_block_schedule(vec![576, 1_152, 576, 2_048]),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+    let corrupt = corrupt_first_flac_frame_sample_number(&flac, 1);
+
+    assert_decode_error_stable(&corrupt);
 }
 
 #[test]

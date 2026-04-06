@@ -108,7 +108,22 @@ pub struct ParsedWavFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParsedFlacBlockingStrategy {
+    Fixed,
+    Variable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParsedFlacCodedNumberKind {
+    FrameNumber,
+    SampleNumber,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsedFlacFrameHeader {
+    pub blocking_strategy: ParsedFlacBlockingStrategy,
+    pub coded_number_kind: ParsedFlacCodedNumberKind,
+    pub coded_number_value: u64,
     pub channel_assignment_bits: u8,
     pub sample_size_bits: u8,
 }
@@ -175,16 +190,60 @@ pub fn parse_first_flac_frame_header(flac_bytes: &[u8]) -> ParsedFlacFrameHeader
     let mut bit_offset = frame_offset * 8;
     assert_eq!(read_bits(flac_bytes, &mut bit_offset, 14), 0x3FFE);
     let _first_flag = read_bits(flac_bytes, &mut bit_offset, 1);
-    let _second_flag = read_bits(flac_bytes, &mut bit_offset, 1);
+    let blocking_strategy = if read_bits(flac_bytes, &mut bit_offset, 1) == 0 {
+        ParsedFlacBlockingStrategy::Fixed
+    } else {
+        ParsedFlacBlockingStrategy::Variable
+    };
     let _block_size_bits = read_bits(flac_bytes, &mut bit_offset, 4);
     let _sample_rate_bits = read_bits(flac_bytes, &mut bit_offset, 4);
     let channel_assignment_bits = read_bits(flac_bytes, &mut bit_offset, 4) as u8;
     let sample_size_bits = read_bits(flac_bytes, &mut bit_offset, 3) as u8;
+    let _reserved = read_bits(flac_bytes, &mut bit_offset, 1);
+    bit_offset = (bit_offset + 7) & !7;
+    let coded_number_offset = bit_offset / 8;
+    let (coded_number_value, _) = decode_utf8_like_number(&flac_bytes[coded_number_offset..]);
 
     ParsedFlacFrameHeader {
+        blocking_strategy,
+        coded_number_kind: match blocking_strategy {
+            ParsedFlacBlockingStrategy::Fixed => ParsedFlacCodedNumberKind::FrameNumber,
+            ParsedFlacBlockingStrategy::Variable => ParsedFlacCodedNumberKind::SampleNumber,
+        },
+        coded_number_value,
         channel_assignment_bits,
         sample_size_bits,
     }
+}
+
+pub fn corrupt_first_flac_frame_sample_number(
+    flac_bytes: &[u8],
+    wrong_sample_number: u64,
+) -> Vec<u8> {
+    let mut bytes = flac_bytes.to_vec();
+    let frame_offset = first_flac_frame_offset(flac_bytes);
+    let mut bit_offset = frame_offset * 8;
+    assert_eq!(read_bits(flac_bytes, &mut bit_offset, 14), 0x3FFE);
+    let _first_flag = read_bits(flac_bytes, &mut bit_offset, 1);
+    let _blocking_strategy = read_bits(flac_bytes, &mut bit_offset, 1);
+    let _block_size_bits = read_bits(flac_bytes, &mut bit_offset, 4);
+    let _sample_rate_bits = read_bits(flac_bytes, &mut bit_offset, 4);
+    let _assignment = read_bits(flac_bytes, &mut bit_offset, 4);
+    let _sample_size_bits = read_bits(flac_bytes, &mut bit_offset, 3);
+    let _reserved = read_bits(flac_bytes, &mut bit_offset, 1);
+    bit_offset = (bit_offset + 7) & !7;
+
+    let coded_number_offset = bit_offset / 8;
+    let (_, coded_number_len) = decode_utf8_like_number(&flac_bytes[coded_number_offset..]);
+    let replacement = encode_utf8_like_number(wrong_sample_number);
+    assert_eq!(
+        replacement.len(),
+        coded_number_len,
+        "replacement coded number must preserve byte length"
+    );
+    bytes[coded_number_offset..coded_number_offset + coded_number_len]
+        .copy_from_slice(&replacement);
+    bytes
 }
 
 pub fn wav_with_chunks(mut wav: Vec<u8>, chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
@@ -609,6 +668,74 @@ fn read_bits(bytes: &[u8], bit_offset: &mut usize, width: usize) -> u64 {
         *bit_offset += 1;
     }
     value
+}
+
+fn decode_utf8_like_number(bytes: &[u8]) -> (u64, usize) {
+    let first = bytes[0];
+    let (length, mut value) = match first {
+        0x00..=0x7f => (1usize, u64::from(first)),
+        0xc0..=0xdf => (2, u64::from(first & 0x1f)),
+        0xe0..=0xef => (3, u64::from(first & 0x0f)),
+        0xf0..=0xf7 => (4, u64::from(first & 0x07)),
+        0xf8..=0xfb => (5, u64::from(first & 0x03)),
+        0xfc..=0xfd => (6, u64::from(first & 0x01)),
+        0xfe => (7, 0),
+        _ => panic!("invalid UTF-8-like FLAC coded number prefix"),
+    };
+    if length == 1 {
+        return (value, 1);
+    }
+    for &byte in &bytes[1..length] {
+        assert_eq!(byte & 0xc0, 0x80, "invalid UTF-8-like continuation byte");
+        value = (value << 6) | u64::from(byte & 0x3f);
+    }
+    (value, length)
+}
+
+fn encode_utf8_like_number(value: u64) -> Vec<u8> {
+    match value {
+        0x0000_0000_0000..=0x0000_0000_007f => vec![value as u8],
+        0x0000_0000_0080..=0x0000_0000_07ff => vec![
+            0b1100_0000 | ((value >> 6) as u8 & 0b0001_1111),
+            0b1000_0000 | (value as u8 & 0b0011_1111),
+        ],
+        0x0000_0000_0800..=0x0000_0000_ffff => vec![
+            0b1110_0000 | ((value >> 12) as u8 & 0b0000_1111),
+            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+            0b1000_0000 | (value as u8 & 0b0011_1111),
+        ],
+        0x0000_0001_0000..=0x0000_001f_ffff => vec![
+            0b1111_0000 | ((value >> 18) as u8 & 0b0000_0111),
+            0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+            0b1000_0000 | (value as u8 & 0b0011_1111),
+        ],
+        0x0000_0020_0000..=0x0000_03ff_ffff => vec![
+            0b1111_1000 | ((value >> 24) as u8 & 0b0000_0011),
+            0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+            0b1000_0000 | (value as u8 & 0b0011_1111),
+        ],
+        0x0000_0400_0000..=0x0000_7fff_ffff => vec![
+            0b1111_1100 | ((value >> 30) as u8 & 0b0000_0001),
+            0b1000_0000 | ((value >> 24) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+            0b1000_0000 | (value as u8 & 0b0011_1111),
+        ],
+        0x0000_8000_0000..=0x000f_ffff_ffff => vec![
+            0b1111_1110,
+            0b1000_0000 | ((value >> 30) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 24) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
+            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+            0b1000_0000 | (value as u8 & 0b0011_1111),
+        ],
+        _ => panic!("coded number exceeds FLAC limit"),
+    }
 }
 
 fn bytes_per_sample(bits_per_sample: u16) -> usize {

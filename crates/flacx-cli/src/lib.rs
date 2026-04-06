@@ -205,7 +205,7 @@ pub fn encode_command(
             ensure_output_parent_dirs(&item.output)?;
         }
         progress.begin_file(&item.display_name, item.input_bytes, item.total_samples);
-        let result = Encoder::new(command.config).encode_file_with_progress(
+        let result = Encoder::new(command.config.clone()).encode_file_with_progress(
             &item.input,
             &item.output,
             |update| {

@@ -32,8 +32,20 @@ const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 const FRAME_CHUNK_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameHeaderNumberKind {
+    FrameNumber,
+    SampleNumber,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameHeaderNumber {
+    kind: FrameHeaderNumberKind,
+    value: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FrameIndex {
-    frame_number: u64,
+    header_number: FrameHeaderNumber,
     offset: usize,
     bytes_consumed: usize,
     block_size: u16,
@@ -46,7 +58,7 @@ struct FrameResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParsedFrame {
-    frame_number: u64,
+    header_number: FrameHeaderNumber,
     block_size: u16,
     bits_per_sample: u8,
     assignment: ChannelAssignment,
@@ -192,9 +204,14 @@ fn index_frames(
     let mut frames = Vec::new();
 
     while processed_samples < stream_info.total_samples as usize {
-        let frame = scan_frame(&bytes[cursor..], stream_info, expected_frame_number)?;
+        let frame = scan_frame(
+            &bytes[cursor..],
+            stream_info,
+            expected_frame_number,
+            processed_samples as u64,
+        )?;
         frames.push(FrameIndex {
-            frame_number: frame.frame_number,
+            header_number: frame.header_number,
             offset: cursor,
             bytes_consumed: frame.bytes_consumed,
             block_size: frame.block_size,
@@ -252,7 +269,7 @@ where
                     for frame_index in chunk_start..chunk_end {
                         let frame = &frames[frame_index];
                         let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
-                        let result = decode_frame(frame_bytes, stream_info, frame.frame_number)
+                        let result = decode_frame(frame_bytes, stream_info, frame.header_number)
                             .map(|frame| frame.samples);
 
                         if sender
@@ -281,10 +298,12 @@ where
                     samples,
                     result,
                     frames[next_expected].block_size,
-                    processed_samples,
-                    stream_info.total_samples,
-                    next_expected + 1,
-                    frames.len(),
+                    ProgressSnapshot {
+                        processed_samples,
+                        total_samples: stream_info.total_samples,
+                        completed_frames: next_expected + 1,
+                        total_frames: frames.len(),
+                    },
                     progress,
                 )?;
                 next_expected += 1;
@@ -301,10 +320,12 @@ where
                     samples,
                     result,
                     frames[next_expected].block_size,
-                    processed_samples,
-                    stream_info.total_samples,
-                    next_expected + 1,
-                    frames.len(),
+                    ProgressSnapshot {
+                        processed_samples,
+                        total_samples: stream_info.total_samples,
+                        completed_frames: next_expected + 1,
+                        total_frames: frames.len(),
+                    },
                     progress,
                 )?;
                 next_expected += 1;
@@ -319,10 +340,7 @@ fn process_frame_result<P>(
     samples: &mut Vec<i32>,
     result: Result<Vec<i32>>,
     block_size: u16,
-    processed_samples: u64,
-    total_samples: u64,
-    completed_frames: usize,
-    total_frames: usize,
+    progress_snapshot: ProgressSnapshot,
     progress: &mut P,
 ) -> Result<u64>
 where
@@ -330,12 +348,10 @@ where
 {
     let frame_samples = result?;
     samples.extend(frame_samples);
-    let processed_samples = processed_samples + u64::from(block_size);
+    let processed_samples = progress_snapshot.processed_samples + u64::from(block_size);
     progress.on_frame(ProgressSnapshot {
         processed_samples,
-        total_samples,
-        completed_frames,
-        total_frames,
+        ..progress_snapshot
     })?;
     Ok(processed_samples)
 }
@@ -344,8 +360,15 @@ fn scan_frame(
     bytes: &[u8],
     stream_info: StreamInfo,
     expected_frame_number: u64,
+    expected_sample_number: u64,
 ) -> Result<ParsedFrame> {
-    let parsed = parse_frame(bytes, stream_info, expected_frame_number)?;
+    let parsed = parse_frame(
+        bytes,
+        stream_info,
+        expected_frame_number,
+        expected_sample_number,
+        None,
+    )?;
     let mut reader = BitReader::endian(Cursor::new(&bytes[parsed.bytes_consumed..]), BigEndian);
 
     for bits_per_channel in channel_bits_per_sample(parsed.assignment, parsed.bits_per_sample)
@@ -376,6 +399,8 @@ fn parse_frame(
     bytes: &[u8],
     stream_info: StreamInfo,
     expected_frame_number: u64,
+    expected_sample_number: u64,
+    expected_kind: Option<FrameHeaderNumberKind>,
 ) -> Result<ParsedFrame> {
     if bytes.len() < 2 {
         return Err(Error::InvalidFlac("unexpected EOF while reading frames"));
@@ -389,11 +414,7 @@ fn parse_frame(
     if reader.read_bit()? {
         return Err(Error::InvalidFlac("frame header reserved bit must be zero"));
     }
-    if reader.read_bit()? {
-        return Err(Error::UnsupportedFlac(
-            "variable-blocksize frames are out of scope".into(),
-        ));
-    }
+    let is_variable_blocksize = reader.read_bit()?;
 
     let block_size_bits: u8 = reader.read_unsigned_var(4)?;
     let sample_rate_bits: u8 = reader.read_unsigned_var(4)?;
@@ -404,10 +425,38 @@ fn parse_frame(
     }
 
     reader.byte_align();
-    let (frame_number, utf8_len) = decode_utf8_number(reader.aligned_reader())?;
-    if frame_number != expected_frame_number {
+    let (coded_number, utf8_len) = decode_utf8_number(reader.aligned_reader())?;
+    let header_number = if is_variable_blocksize {
+        FrameHeaderNumber {
+            kind: FrameHeaderNumberKind::SampleNumber,
+            value: coded_number,
+        }
+    } else {
+        FrameHeaderNumber {
+            kind: FrameHeaderNumberKind::FrameNumber,
+            value: coded_number,
+        }
+    };
+
+    if let Some(expected_kind) = expected_kind
+        && header_number.kind != expected_kind
+    {
         return Err(Error::Decode(format!(
-            "expected frame number {expected_frame_number}, found {frame_number}"
+            "expected {}-coded frame header, found {}-coded frame header",
+            expected_kind.label(),
+            header_number.kind.label()
+        )));
+    }
+
+    let expected_number = match header_number.kind {
+        FrameHeaderNumberKind::FrameNumber => expected_frame_number,
+        FrameHeaderNumberKind::SampleNumber => expected_sample_number,
+    };
+    if header_number.value != expected_number {
+        return Err(Error::Decode(format!(
+            "expected {} {expected_number}, found {}",
+            header_number.kind.label(),
+            header_number.value
         )));
     }
 
@@ -438,7 +487,7 @@ fn parse_frame(
     }
 
     Ok(ParsedFrame {
-        frame_number,
+        header_number,
         block_size,
         bits_per_sample,
         assignment,
@@ -453,9 +502,21 @@ struct DecodedFrame {
 fn decode_frame(
     bytes: &[u8],
     stream_info: StreamInfo,
-    expected_frame_number: u64,
+    expected_header_number: FrameHeaderNumber,
 ) -> Result<DecodedFrame> {
-    let parsed = parse_frame(bytes, stream_info, expected_frame_number)?;
+    let parsed = parse_frame(
+        bytes,
+        stream_info,
+        match expected_header_number.kind {
+            FrameHeaderNumberKind::FrameNumber => expected_header_number.value,
+            FrameHeaderNumberKind::SampleNumber => 0,
+        },
+        match expected_header_number.kind {
+            FrameHeaderNumberKind::FrameNumber => 0,
+            FrameHeaderNumberKind::SampleNumber => expected_header_number.value,
+        },
+        Some(expected_header_number.kind),
+    )?;
     let mut reader = BitReader::endian(Cursor::new(&bytes[parsed.bytes_consumed..]), BigEndian);
 
     let subframe_bps = channel_bits_per_sample(parsed.assignment, parsed.bits_per_sample);
@@ -485,6 +546,15 @@ fn decode_frame(
     Ok(DecodedFrame {
         samples: interleave_channels(parsed.assignment, &channels)?,
     })
+}
+
+impl FrameHeaderNumberKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::FrameNumber => "frame number",
+            Self::SampleNumber => "sample number",
+        }
+    }
 }
 
 fn decode_subframe<R: Read>(

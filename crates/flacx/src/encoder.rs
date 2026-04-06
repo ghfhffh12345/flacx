@@ -16,9 +16,9 @@ use crate::{
     error::{Error, Result},
     input::read_wav_for_encode,
     model::encode_frame,
-    plan::{EncodePlan, summary_from_stream_info},
+    plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
     progress::{NoProgress, ProgressSink, ProgressSnapshot},
-    write::{EncodedFrame, FlacWriter},
+    write::{EncodedFrame, FlacWriter, FrameHeaderNumber},
 };
 
 const FRAME_CHUNK_SIZE: usize = 32;
@@ -43,17 +43,9 @@ pub struct EncodeSummary {
 }
 
 /// Primary library façade for WAV-to-FLAC conversion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Encoder {
     config: EncoderConfig,
-}
-
-impl Default for Encoder {
-    fn default() -> Self {
-        Self {
-            config: EncoderConfig::default(),
-        }
-    }
 }
 
 impl Encoder {
@@ -69,7 +61,7 @@ impl Encoder {
 
     #[must_use]
     pub fn config(&self) -> EncoderConfig {
-        self.config
+        self.config.clone()
     }
 
     #[must_use]
@@ -158,7 +150,7 @@ impl Encoder {
         P: ProgressSink,
     {
         let crate::input::EncodeWavData { wav, metadata } = input;
-        let plan = EncodePlan::new(wav.spec, self.config)?;
+        let plan = EncodePlan::new(wav.spec, self.config.clone())?;
         let metadata_blocks = metadata.flac_blocks();
         let mut writer = FlacWriter::new(output, plan.stream_info(), &metadata_blocks)?;
 
@@ -167,10 +159,11 @@ impl Encoder {
             return Ok(summary_from_stream_info(stream_info, 0));
         }
 
+        let total_frames = plan.total_frames;
         self.encode_frames(plan, wav.samples, &mut writer, progress)?;
 
         let (_, stream_info) = writer.finalize()?;
-        Ok(summary_from_stream_info(stream_info, plan.total_frames))
+        Ok(summary_from_stream_info(stream_info, total_frames))
     }
 
     fn encode_frames<W, P>(
@@ -196,7 +189,7 @@ impl Encoder {
                 let next_frame = Arc::clone(&next_frame);
                 let samples = Arc::clone(&samples);
                 let channels_in_scope = channels;
-                let plan = plan;
+                let plan = plan.clone();
 
                 scope.spawn(move || {
                     loop {
@@ -208,19 +201,25 @@ impl Encoder {
                         let mut encoded_frames = Vec::with_capacity(chunk_end - chunk_start);
 
                         for frame_index in chunk_start..chunk_end {
-                            let start_sample = frame_index as u64 * u64::from(plan.block_size);
-                            let frame_samples = (plan.spec.total_samples - start_sample)
-                                .min(u64::from(plan.block_size))
-                                as usize;
-                            let sample_start =
-                                frame_index * usize::from(plan.block_size) * channels_in_scope;
+                            let frame_plan = plan.frame(frame_index);
+                            let frame_samples = usize::from(frame_plan.block_size);
+                            let sample_start = usize::try_from(frame_plan.sample_offset)
+                                .expect("sample offset fits in usize")
+                                * channels_in_scope;
                             let sample_end = sample_start + frame_samples * channels_in_scope;
                             let frame = encode_frame(
                                 &samples[sample_start..sample_end],
                                 plan.spec.channels,
                                 plan.spec.bits_per_sample,
                                 plan.spec.sample_rate,
-                                frame_index as u64,
+                                match frame_plan.coded_number_kind {
+                                    FrameCodedNumberKind::FrameNumber => {
+                                        FrameHeaderNumber::Frame(frame_plan.coded_number)
+                                    }
+                                    FrameCodedNumberKind::SampleNumber => {
+                                        FrameHeaderNumber::Sample(frame_plan.coded_number)
+                                    }
+                                },
                                 plan.profile,
                             );
                             match frame {
