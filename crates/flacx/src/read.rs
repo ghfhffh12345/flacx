@@ -27,7 +27,6 @@ const FLAC_MAGIC: &[u8; 4] = b"fLaC";
 const STREAMINFO_BLOCK_TYPE: u8 = 0;
 const VORBIS_COMMENT_BLOCK_TYPE: u8 = 4;
 const CUESHEET_BLOCK_TYPE: u8 = 5;
-const MAX_SUPPORTED_BLOCK_SIZE: u16 = 16_384;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 const FRAME_CHUNK_SIZE: usize = 32;
 
@@ -109,11 +108,6 @@ where
         return Err(Error::UnsupportedFlac(format!(
             "only FLAC-native 4..32-bit decode is supported, found {} bits/sample",
             stream_info.bits_per_sample
-        )));
-    }
-    if stream_info.max_block_size > MAX_SUPPORTED_BLOCK_SIZE {
-        return Err(Error::UnsupportedFlac(format!(
-            "block sizes above {MAX_SUPPORTED_BLOCK_SIZE} are out of scope"
         )));
     }
 

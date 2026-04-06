@@ -3,8 +3,7 @@ use crate::{
     error::{Error, Result},
     input::WavSpec,
     level::LevelProfile,
-    stream_info::StreamInfo,
-    write::sample_rate_is_representable,
+    stream_info::{MAX_STREAMINFO_SAMPLE_RATE, StreamInfo},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,22 +136,10 @@ fn validate_stream(spec: &WavSpec, block_size: u16) -> Result<()> {
         ));
     }
 
-    if block_size > 16_384 {
-        return Err(Error::UnsupportedFlac(
-            "streamable subset requires block sizes <= 16384".into(),
-        ));
-    }
-
-    if spec.sample_rate <= 48_000 && block_size > 4_608 {
-        return Err(Error::UnsupportedFlac(
-            "sample rates <= 48000 Hz require block sizes <= 4608 in the streamable subset".into(),
-        ));
-    }
-
-    if !sample_rate_is_representable(spec.sample_rate) {
+    if spec.sample_rate > MAX_STREAMINFO_SAMPLE_RATE {
         return Err(Error::UnsupportedFlac(format!(
-            "sample rate {} cannot be represented in a FLAC frame header without referring to STREAMINFO",
-            spec.sample_rate
+            "sample rate {} exceeds STREAMINFO's 20-bit limit of {}",
+            spec.sample_rate, MAX_STREAMINFO_SAMPLE_RATE
         )));
     }
 
@@ -219,6 +206,7 @@ mod tests {
         config::EncoderConfig,
         input::{WavSpec, ordinary_channel_mask},
         level::Level,
+        stream_info::MAX_STREAMINFO_SAMPLE_RATE,
     };
 
     #[test]
@@ -247,8 +235,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unrepresentable_sample_rates() {
-        let error = EncodePlan::new(
+    fn accepts_legal_streaminfo_fallback_sample_rates() {
+        let plan = EncodePlan::new(
             WavSpec {
                 sample_rate: 700_001,
                 channels: 2,
@@ -259,9 +247,48 @@ mod tests {
             },
             EncoderConfig::default(),
         )
+        .unwrap();
+
+        assert_eq!(plan.total_frames, 1);
+        assert_eq!(plan.frame(0).block_size, 100);
+        assert_eq!(plan.stream_info().sample_rate, 700_001);
+    }
+
+    #[test]
+    fn rejects_out_of_model_streaminfo_sample_rates() {
+        let error = EncodePlan::new(
+            WavSpec {
+                sample_rate: MAX_STREAMINFO_SAMPLE_RATE + 1,
+                channels: 2,
+                bits_per_sample: 16,
+                total_samples: 100,
+                bytes_per_sample: 2,
+                channel_mask: ordinary_channel_mask(2u16).unwrap(),
+            },
+            EncoderConfig::default(),
+        )
         .unwrap_err();
 
-        assert!(error.to_string().contains("cannot be represented"));
+        assert!(error.to_string().contains("exceeds STREAMINFO"));
+    }
+
+    #[test]
+    fn accepts_large_legal_block_sizes_within_current_u16_model() {
+        let plan = EncodePlan::new(
+            WavSpec {
+                sample_rate: 48_000,
+                channels: 1,
+                bits_per_sample: 16,
+                total_samples: 40_000,
+                bytes_per_sample: 2,
+                channel_mask: ordinary_channel_mask(1u16).unwrap(),
+            },
+            EncoderConfig::default().with_block_size(40_000),
+        )
+        .unwrap();
+
+        assert_eq!(plan.total_frames, 1);
+        assert_eq!(plan.frame(0).block_size, 40_000);
     }
 
     #[test]

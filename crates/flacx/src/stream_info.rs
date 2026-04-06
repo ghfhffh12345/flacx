@@ -1,3 +1,5 @@
+pub(crate) const MAX_STREAMINFO_SAMPLE_RATE: u32 = 0x0f_ffff;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamInfo {
     pub min_block_size: u16,
@@ -20,9 +22,9 @@ impl StreamInfo {
         total_samples: u64,
         md5: [u8; 16],
     ) -> Self {
-        assert!(channels >= 1 && channels <= 8);
-        assert!(bits_per_sample >= 4 && bits_per_sample <= 32);
-        assert!(sample_rate <= 0x0f_ffff);
+        assert!((1..=8).contains(&channels));
+        assert!((4..=32).contains(&bits_per_sample));
+        assert!(sample_rate <= MAX_STREAMINFO_SAMPLE_RATE);
         assert!(total_samples <= 0x0f_ff_ff_ff_ff);
 
         Self {
@@ -67,6 +69,7 @@ impl StreamInfo {
         }
     }
 
+    #[allow(clippy::wrong_self_convention)]
     #[inline]
     pub fn to_bytes(&self) -> [u8; 34] {
         let mut bytes = [0u8; 34];

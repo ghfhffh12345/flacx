@@ -9,7 +9,7 @@ use crate::{
     model::{
         AnalyzedSubframe, ChannelAssignment, FrameAnalysis, ResidualEncoding, ResidualPartition,
     },
-    stream_info::StreamInfo,
+    stream_info::{MAX_STREAMINFO_SAMPLE_RATE, StreamInfo},
 };
 
 const STREAMINFO_LENGTH: u32 = 34;
@@ -99,6 +99,7 @@ fn metadata_block_header(block_type: u8, is_last: bool, payload_len: u32) -> io:
     ])
 }
 
+#[cfg(test)]
 pub(crate) fn sample_rate_is_representable(sample_rate: u32) -> bool {
     sample_rate_code(sample_rate).is_some()
 }
@@ -166,11 +167,7 @@ fn encode_frame_header(
     writer.write_bit(false)?;
     writer.write_bit(matches!(header_number, FrameHeaderNumber::Sample(_)))?;
     let (block_size_bits, block_size_extra) = block_size_code(block_size);
-    let (sample_rate_bits, sample_rate_extra) = sample_rate_code(sample_rate).ok_or_else(|| {
-        Error::UnsupportedFlac(format!(
-            "sample rate {sample_rate} cannot be written in a FLAC frame header"
-        ))
-    })?;
+    let (sample_rate_bits, sample_rate_extra) = sample_rate_code_or_streaminfo(sample_rate)?;
     writer.write_unsigned_var(4, block_size_bits)?;
     writer.write_unsigned_var(4, sample_rate_bits)?;
     writer.write_unsigned_var(4, channel_assignment_bits(assignment))?;
@@ -237,6 +234,18 @@ fn block_size_code(block_size: u16) -> (u8, Vec<u8>) {
     }
 }
 
+#[inline]
+fn sample_rate_code_or_streaminfo(sample_rate: u32) -> Result<(u8, Vec<u8>)> {
+    match sample_rate_code(sample_rate) {
+        Some(encoding) => Ok(encoding),
+        None if sample_rate != 0 && sample_rate <= MAX_STREAMINFO_SAMPLE_RATE => {
+            Ok((0b0000, Vec::new()))
+        }
+        None => Err(streaminfo_sample_rate_limit_error(sample_rate)),
+    }
+}
+
+#[inline]
 fn sample_rate_code(sample_rate: u32) -> Option<(u8, Vec<u8>)> {
     match sample_rate {
         0 => None,
@@ -262,6 +271,13 @@ fn sample_rate_code(sample_rate: u32) -> Option<(u8, Vec<u8>)> {
         }
         _ => None,
     }
+}
+
+#[cold]
+fn streaminfo_sample_rate_limit_error(sample_rate: u32) -> Error {
+    Error::UnsupportedFlac(format!(
+        "sample rate {sample_rate} exceeds STREAMINFO's 20-bit limit of {MAX_STREAMINFO_SAMPLE_RATE}"
+    ))
 }
 
 fn encode_utf8_number(value: u64) -> Result<Vec<u8>> {
@@ -430,8 +446,9 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        FlacWriter, FrameHeaderNumber, bit_depth_bits, channel_assignment_bits, encode_utf8_number,
-        metadata_block_header, sample_rate_is_representable,
+        FlacWriter, FrameHeaderNumber, bit_depth_bits, channel_assignment_bits,
+        encode_frame_header, encode_utf8_number, metadata_block_header,
+        sample_rate_is_representable,
     };
     use crate::{
         level::LevelProfile,
@@ -448,6 +465,21 @@ mod tests {
         assert!(sample_rate_is_representable(65_000));
         assert!(sample_rate_is_representable(65_350));
         assert!(!sample_rate_is_representable(700_001));
+    }
+
+    #[test]
+    fn frame_header_falls_back_to_streaminfo_sample_rate_code_when_needed() {
+        let header = encode_frame_header(
+            4_096,
+            700_001,
+            ChannelAssignment::Independent(1),
+            16,
+            FrameHeaderNumber::Frame(0),
+        )
+        .unwrap();
+
+        let sample_rate_bits = header[2] & 0b1111;
+        assert_eq!(sample_rate_bits, 0b0000);
     }
 
     #[test]

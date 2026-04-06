@@ -404,9 +404,9 @@ fn decode_samples(data: &[u8], envelope: PcmEnvelope) -> Result<Vec<i32>> {
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
-        .ok_or_else(|| {
-            Error::InvalidWav("valid bits cannot exceed container bits for decoding".into())
-        })? as u32;
+        .ok_or(Error::InvalidWav(
+            "valid bits cannot exceed container bits for decoding",
+        ))? as u32;
 
     match envelope.container_bits_per_sample {
         8 => {
@@ -466,9 +466,9 @@ pub(crate) fn append_encoded_sample(
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
-        .ok_or_else(|| {
-            Error::InvalidWav("valid bits cannot exceed container bits for encoding".into())
-        })? as u32;
+        .ok_or(Error::InvalidWav(
+            "valid bits cannot exceed container bits for encoding",
+        ))? as u32;
 
     match envelope.container_bits_per_sample {
         8 => {
