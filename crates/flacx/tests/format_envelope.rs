@@ -5,7 +5,7 @@ mod support;
 use support::{
     extensible_pcm_wav_bytes, flac_metadata_blocks, ordinary_channel_mask,
     parse_first_flac_frame_header, parse_vorbis_comment_entries, parse_wav_format, pcm_wav_bytes,
-    sample_fixture, wav_data_bytes,
+    sample_fixture, wav_chunk_payloads, wav_data_bytes,
 };
 
 #[test]
@@ -152,8 +152,9 @@ fn round_trips_non_ordinary_channel_masks_via_rfc_vorbis_comment() {
         .find(|block| block.block_type == 4)
         .expect("vorbis comment block present for non-ordinary mask");
     let comments = parse_vorbis_comment_entries(&vorbis.payload);
+    let decoded_format = parse_wav_format(&decoded);
 
-    assert_eq!(decoded, wav);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
     assert!(comments.iter().any(|(key, value)| {
         key == "WAVEFORMATEXTENSIBLE_CHANNEL_MASK" && value == "0x00012104"
     }));
@@ -162,7 +163,8 @@ fn round_trips_non_ordinary_channel_masks_via_rfc_vorbis_comment() {
             .iter()
             .any(|(key, value)| { key == "FLACX_CHANNEL_LAYOUT_PROVENANCE" && value == "1" })
     );
-    assert_eq!(parse_wav_format(&decoded).channel_mask, Some(mask));
+    assert_eq!(decoded_format.channel_mask, Some(mask));
+    assert_eq!(wav_chunk_payloads(&decoded, *b"fxvc").len(), 1);
 }
 
 #[test]
@@ -178,8 +180,9 @@ fn round_trips_zero_channel_mask_via_rfc_vorbis_comment() {
         .find(|block| block.block_type == 4)
         .expect("vorbis comment block present for zero channel mask");
     let comments = parse_vorbis_comment_entries(&vorbis.payload);
+    let decoded_format = parse_wav_format(&decoded);
 
-    assert_eq!(decoded, wav);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
     assert!(comments.iter().any(|(key, value)| {
         key == "WAVEFORMATEXTENSIBLE_CHANNEL_MASK" && value == "0x00000000"
     }));
@@ -188,7 +191,7 @@ fn round_trips_zero_channel_mask_via_rfc_vorbis_comment() {
             .iter()
             .any(|(key, value)| { key == "FLACX_CHANNEL_LAYOUT_PROVENANCE" && value == "1" })
     );
-    let format = parse_wav_format(&decoded);
-    assert_eq!(format.format_tag, 0xFFFE);
-    assert_eq!(format.channel_mask, Some(0));
+    assert_eq!(decoded_format.format_tag, 0xFFFE);
+    assert_eq!(decoded_format.channel_mask, Some(0));
+    assert_eq!(wav_chunk_payloads(&decoded, *b"fxvc").len(), 1);
 }

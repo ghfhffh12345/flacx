@@ -286,6 +286,54 @@ pub fn cue_chunk(offsets: &[u32]) -> Vec<u8> {
     payload
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedFxvcChunk {
+    pub version: u32,
+    pub vendor: String,
+    pub entries: Vec<String>,
+}
+
+pub fn fxvc_chunk_payload(vendor: &str, entries: &[&str]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+    payload.extend_from_slice(vendor.as_bytes());
+    payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for entry in entries {
+        payload.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+        payload.extend_from_slice(entry.as_bytes());
+    }
+    payload
+}
+
+pub fn parse_fxvc_chunk_payload(payload: &[u8]) -> ParsedFxvcChunk {
+    assert!(payload.len() >= 12, "fxvc payload too short");
+    let mut offset = 0usize;
+    let version = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+    offset += 4;
+    let vendor_len = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
+    let vendor = String::from_utf8(payload[offset..offset + vendor_len].to_vec()).unwrap();
+    offset += vendor_len;
+    let comment_count =
+        u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
+    let mut entries = Vec::with_capacity(comment_count);
+    for _ in 0..comment_count {
+        let entry_len =
+            u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        entries.push(String::from_utf8(payload[offset..offset + entry_len].to_vec()).unwrap());
+        offset += entry_len;
+    }
+    assert_eq!(offset, payload.len(), "fxvc payload trailing bytes");
+    ParsedFxvcChunk {
+        version,
+        vendor,
+        entries,
+    }
+}
+
 pub fn flac_metadata_blocks(flac_bytes: &[u8]) -> Vec<ParsedMetadataBlock> {
     split_flac_stream(flac_bytes).0
 }
@@ -534,6 +582,24 @@ pub fn parse_vorbis_comment_entries(payload: &[u8]) -> Vec<(String, String)> {
         }
     }
     entries
+}
+
+pub fn parse_vorbis_comment_vendor(payload: &[u8]) -> String {
+    if payload.len() < 4 {
+        return String::new();
+    }
+    let vendor_len = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    if payload.len() < 4 + vendor_len {
+        return String::new();
+    }
+    String::from_utf8_lossy(&payload[4..4 + vendor_len]).into_owned()
+}
+
+pub fn wav_chunk_payloads(wav_bytes: &[u8], id: [u8; 4]) -> Vec<Vec<u8>> {
+    wav_chunks(wav_bytes)
+        .into_iter()
+        .filter_map(|(chunk_id, payload)| (chunk_id == id).then_some(payload))
+        .collect()
 }
 
 pub fn parse_seektable_entries(payload: &[u8]) -> Vec<(u64, u64, u16)> {

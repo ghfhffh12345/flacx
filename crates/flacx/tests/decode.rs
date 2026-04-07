@@ -9,11 +9,12 @@ mod support;
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
-    cuesheet_block, extensible_pcm_wav_bytes, flac_frames, info_list_chunk, ordinary_channel_mask,
-    parse_first_flac_frame_header, parse_wav_format, pcm_wav_bytes, raw_seektable_block,
-    replace_flac_optional_metadata, rewrite_streaminfo_md5, sample_fixture, seektable_block,
-    streaminfo_md5, truncate_bytes, unique_temp_path, vorbis_comment_block, wav_cue_points,
-    wav_info_entries, wav_with_chunks,
+    cuesheet_block, extensible_pcm_wav_bytes, flac_frames, flac_metadata_blocks, info_list_chunk,
+    ordinary_channel_mask, parse_first_flac_frame_header, parse_fxvc_chunk_payload,
+    parse_wav_format, pcm_wav_bytes, raw_seektable_block, replace_flac_optional_metadata,
+    rewrite_streaminfo_md5, sample_fixture, seektable_block, streaminfo_md5, truncate_bytes,
+    unique_temp_path, vorbis_comment_block, wav_chunk_payloads, wav_cue_points, wav_info_entries,
+    wav_with_chunks,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -442,6 +443,82 @@ fn decode_rejects_invalid_length_seektable_when_strict() {
 }
 
 #[test]
+fn restores_exact_vorbis_comments_into_fxvc_chunk_and_info_mirror() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[vorbis_comment_block(&[
+            ("artist", "Example Artist"),
+            ("UNMAPPED", "Opaque"),
+            ("TITLE", "Exact Title"),
+            ("TITLE", "Duplicate"),
+        ])],
+    );
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+    let fxvc_payloads = wav_chunk_payloads(&decoded, *b"fxvc");
+
+    assert_eq!(fxvc_payloads.len(), 1);
+    assert_eq!(
+        parse_fxvc_chunk_payload(&fxvc_payloads[0]),
+        support::ParsedFxvcChunk {
+            version: 1,
+            vendor: String::new(),
+            entries: vec![
+                "artist=Example Artist".to_string(),
+                "UNMAPPED=Opaque".to_string(),
+                "TITLE=Exact Title".to_string(),
+                "TITLE=Duplicate".to_string(),
+            ],
+        }
+    );
+    assert_eq!(
+        wav_info_entries(&decoded),
+        vec![
+            (*b"IART", "Example Artist".to_string()),
+            (*b"INAM", "Exact Title".to_string()),
+            (*b"INAM", "Duplicate".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn round_trips_exact_vorbis_comments_via_fxvc_chunk() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[vorbis_comment_block(&[
+            ("artist", "Example Artist"),
+            ("UNMAPPED", "Opaque"),
+            ("TITLE", "Exact Title"),
+            ("TITLE", "Duplicate"),
+        ])],
+    );
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+    let reencoded = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&decoded)
+        .unwrap();
+    let blocks = flac_metadata_blocks(&reencoded);
+    let vorbis = blocks
+        .iter()
+        .find(|block| block.block_type == 4)
+        .expect("vorbis comment block present");
+
+    assert_eq!(
+        support::vorbis_comments(&vorbis.payload),
+        vec![
+            "artist=Example Artist".to_string(),
+            "UNMAPPED=Opaque".to_string(),
+            "TITLE=Exact Title".to_string(),
+            "TITLE=Duplicate".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn decode_rejects_non_ascending_seektable_when_strict() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
@@ -629,8 +706,11 @@ fn strict_channel_mask_provenance_accepts_flacx_marked_non_ordinary_files() {
     let decoded = Decoder::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
         .decode_bytes(&flac)
         .unwrap();
+    let format = parse_wav_format(&decoded);
 
-    assert_eq!(decoded, wav);
+    assert_eq!(format.format_tag, 0xFFFE);
+    assert_eq!(format.channel_mask, Some(0x0001_2104));
+    assert_eq!(wav_chunk_payloads(&decoded, *b"fxvc").len(), 1);
 }
 
 #[test]

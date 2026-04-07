@@ -146,6 +146,9 @@ fn wav_metadata_bytes(metadata: &WavMetadata) -> Vec<u8> {
         return Vec::new();
     }
     let mut bytes = Vec::new();
+    if let Some(payload) = metadata.fxvc_chunk_payload() {
+        append_wav_chunk(&mut bytes, b"fxvc", &payload);
+    }
     if let Some(payload) = metadata.list_info_chunk_payload() {
         append_wav_chunk(&mut bytes, b"LIST", &payload);
     }
@@ -344,10 +347,10 @@ mod tests {
         let chunks = parse_chunk_layout(&wav);
         assert_eq!(
             chunks.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![*b"fmt ", *b"LIST", *b"cue ", *b"data"]
+            vec![*b"fmt ", *b"fxvc", *b"LIST", *b"cue ", *b"data"]
         );
 
-        let list_index = 12 + 8 + 16;
+        let list_index = 12 + 8 + 16 + 8 + 25 + 1;
         let list_size = u32::from_le_bytes(wav[list_index + 4..list_index + 8].try_into().unwrap());
         assert_eq!(list_size, 16);
         let padded_byte = wav[list_index + 8 + list_size as usize - 1];

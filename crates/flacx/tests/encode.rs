@@ -6,8 +6,9 @@ mod support;
 
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, decode_with_ffmpeg,
-    flac_metadata_blocks, info_list_chunk, parse_first_flac_frame_header, parse_wav_format,
-    pcm_wav_bytes, sample_fixture, vorbis_comments, wav_with_chunks,
+    flac_metadata_blocks, fxvc_chunk_payload, info_list_chunk, parse_first_flac_frame_header,
+    parse_vorbis_comment_vendor, parse_wav_format, pcm_wav_bytes, sample_fixture,
+    vorbis_comments, wav_with_chunks,
 };
 
 #[test]
@@ -278,6 +279,107 @@ fn preserves_metadata_deterministically_across_thread_counts() {
         .unwrap();
 
     assert_eq!(single_threaded, multi_threaded);
+}
+
+#[test]
+fn prefers_exact_fxvc_metadata_over_conflicting_list_info() {
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
+        &[
+            (
+                *b"LIST",
+                info_list_chunk(&[
+                    (*b"IART", b"Mirror Artist"),
+                    (*b"INAM", b"Mirror Title"),
+                ]),
+            ),
+            (
+                *b"fxvc",
+                fxvc_chunk_payload(
+                    "foreign vendor",
+                    &["artist=Exact Artist", "TITLE=Exact Title", "TITLE=Duplicate"],
+                ),
+            ),
+        ],
+    );
+
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav)
+        .unwrap();
+    let blocks = flac_metadata_blocks(&flac);
+    let vorbis = blocks
+        .iter()
+        .find(|block| block.block_type == 4)
+        .expect("vorbis comment block present");
+
+    assert_eq!(parse_vorbis_comment_vendor(&vorbis.payload), "foreign vendor");
+    assert_eq!(
+        vorbis_comments(&vorbis.payload),
+        vec![
+            "artist=Exact Artist".to_string(),
+            "TITLE=Exact Title".to_string(),
+            "TITLE=Duplicate".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn rejects_malformed_fxvc_chunk_even_when_list_info_fallback_exists() {
+    let mut malformed_fxvc = fxvc_chunk_payload("foreign vendor", &["TITLE=Exact Title"]);
+    malformed_fxvc.push(0);
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
+        &[
+            (*b"LIST", info_list_chunk(&[(*b"INAM", b"Mirror Title")])),
+            (*b"fxvc", malformed_fxvc),
+        ],
+    );
+
+    let error = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("fxvc payload has trailing bytes"));
+}
+
+#[test]
+fn valid_fxvc_still_wins_when_list_info_is_malformed() {
+    let mut malformed_list = b"INFO".to_vec();
+    malformed_list.extend_from_slice(b"INAM");
+    malformed_list.extend_from_slice(&99u32.to_le_bytes());
+    malformed_list.extend_from_slice(b"too-short");
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
+        &[
+            (*b"LIST", malformed_list),
+            (
+                *b"fxvc",
+                fxvc_chunk_payload(
+                    "foreign vendor",
+                    &["artist=Exact Artist", "TITLE=Exact Title", "TITLE=Duplicate"],
+                ),
+            ),
+        ],
+    );
+
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav)
+        .unwrap();
+    let blocks = flac_metadata_blocks(&flac);
+    let vorbis = blocks
+        .iter()
+        .find(|block| block.block_type == 4)
+        .expect("vorbis comment block present");
+
+    assert_eq!(parse_vorbis_comment_vendor(&vorbis.payload), "foreign vendor");
+    assert_eq!(
+        vorbis_comments(&vorbis.payload),
+        vec![
+            "artist=Exact Artist".to_string(),
+            "TITLE=Exact Title".to_string(),
+            "TITLE=Duplicate".to_string(),
+        ]
+    );
 }
 
 #[test]

@@ -4,7 +4,7 @@ use std::{
     thread,
 };
 
-use crate::metadata::{EncodeMetadata, MetadataDraft};
+use crate::metadata::{EncodeMetadata, FXVC_CHUNK_ID, MetadataDraft};
 use crate::{
     error::{Error, Result},
     md5::digest_bytes,
@@ -150,7 +150,8 @@ fn parse_wav_layout<R: Read + Seek>(
             u32::from_le_bytes(chunk_header[4..8].try_into().expect("fixed chunk header"));
         let chunk_start = reader.stream_position()?;
 
-        match &chunk_header[..4] {
+        let chunk_id: [u8; 4] = chunk_header[..4].try_into().expect("fixed chunk id");
+        match &chunk_id {
             b"fmt " => {
                 format = Some(read_format_chunk(reader, chunk_size)?);
             }
@@ -159,12 +160,9 @@ fn parse_wav_layout<R: Read + Seek>(
                 data_size = Some(chunk_size);
                 reader.seek(SeekFrom::Current(chunk_size as i64))?;
             }
-            b"LIST" | b"cue " if capture_metadata => {
+            id if capture_metadata && is_captured_metadata_chunk(*id) => {
                 let payload = read_chunk_payload(reader, chunk_size)?;
-                metadata_draft.ingest_chunk(
-                    chunk_header[..4].try_into().expect("fixed chunk id"),
-                    &payload,
-                );
+                metadata_draft.ingest_chunk(chunk_id, &payload)?;
             }
             _ => {
                 reader.seek(SeekFrom::Current(chunk_size as i64))?;
@@ -412,6 +410,10 @@ fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
 
 fn should_preserve_channel_mask(channels: u16, mask: u32) -> bool {
     ordinary_channel_mask(channels) != Some(mask)
+}
+
+fn is_captured_metadata_chunk(chunk_id: [u8; 4]) -> bool {
+    matches!(&chunk_id, b"LIST" | b"cue " | &FXVC_CHUNK_ID)
 }
 
 fn is_supported_channel_mask(channels: u16, mask: u32) -> bool {
