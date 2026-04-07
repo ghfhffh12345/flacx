@@ -1,28 +1,35 @@
 # Release automation
 
-This repository is set up for tag-driven release automation using `v*` tags.
-The workflow validates the tag against the effective `flacx` package version
-and then branches into one of two paths:
+This repository uses tag-driven release automation based on `v*` tags. The
+workflow checks the tag against the effective `flacx` package version from the
+Cargo manifests and then follows one of two paths:
 
-- **Final release tag**: publish the `flacx` library crate to crates.io and
-  create a GitHub release.
-- **Pre-release tag**: create a GitHub prerelease only and skip crates.io
-  publishing.
+- **Final release tag** — publish the `flacx` library crate to crates.io and
+  create a GitHub release
+- **Prerelease tag** — create a GitHub prerelease only and skip crates.io
+  publishing
 
-## Local release-prep order
+The release flow is intentionally fail-closed: a version mismatch should stop
+the process before any side effects.
+
+## Release prep order
 
 Before any tag is pushed, prepare the release in this order:
 
 1. Update the release-prep files from repo evidence.
-2. Refresh `Cargo.lock` automatically through cargo commands when the planned release-prep changes require it.
+2. Refresh `Cargo.lock` automatically through cargo commands when the planned
+   release-prep changes require it.
 3. Validate, build, and test locally.
-4. Stage the tracked release-prep files, including `Cargo.lock` when the planned refresh changed it.
+4. Stage the tracked release-prep files, including `Cargo.lock` when the planned
+   refresh changed it.
 5. Run the release-prep gate.
 6. Commit the release-prep changes, including any planned `Cargo.lock` delta.
 7. Push the branch, create the tag, and hand off to the release workflow.
 
 Do not edit `Cargo.lock` manually.
-Generated `.omx/logs/release-notes-v<version>.md` files stay local-only and are never staged or committed.
+
+Generated `.omx/logs/release-notes-v<version>.md` files stay local-only and are
+never staged or committed.
 
 ## Tag contract
 
@@ -30,7 +37,7 @@ Generated `.omx/logs/release-notes-v<version>.md` files stay local-only and are 
 - The workflow computes the effective `flacx` package version from the Cargo
   manifests before any publish or release step runs.
 - Final tags must match that effective `flacx` version exactly.
-- Pre-release tags must match the same core version and use semver prerelease
+- Prerelease tags must match the same core version and use semver prerelease
   identifiers such as `-rc1`.
 - Semver prerelease identifiers determine prerelease handling.
 
@@ -57,9 +64,12 @@ Examples:
 
 ## Manual recovery
 
-The release workflow is expected to complete GitHub release creation automatically after the approved fix. Manual recovery is no longer part of the normal path.
+The release workflow is expected to complete GitHub release creation
+automatically after the approved fix. Manual recovery is not part of the normal
+path.
 
-If the crates.io publish succeeds but GitHub release creation still fails because of an external workflow issue:
+If the crates.io publish succeeds but GitHub release creation still fails
+because of an external workflow issue:
 
 1. Do **not** republish the crate.
 2. Re-run or manually complete only the GitHub release creation step for the
@@ -68,7 +78,9 @@ If the crates.io publish succeeds but GitHub release creation still fails becaus
 
 ## Notes for maintainers
 
-- The release workflow is intentionally fail-closed: a version mismatch should
-  stop the process before any side effects.
 - The release docs describe the current workspace layout without implying that
   the CLI crate is published separately.
+- Local release notes are generated from repo evidence and kept out of the
+  release commit.
+- If the version encoded in the tag and the Cargo manifests diverge, the
+  workflow should stop before any publish or release side effects.

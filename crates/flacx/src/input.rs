@@ -80,6 +80,20 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
     Ok(read_wav_internal(&mut reader, false)?.wav)
 }
 
+/// Inspect a WAV stream and return its total sample count.
+///
+/// This helper reads only the container metadata needed for sample counts.
+/// It is useful for preflight checks and progress planning.
+///
+/// # Example
+///
+/// ```no_run
+/// use flacx::inspect_wav_total_samples;
+/// use std::fs::File;
+///
+/// let total_samples = inspect_wav_total_samples(File::open("input.wav").unwrap()).unwrap();
+/// assert!(total_samples > 0);
+/// ```
 pub fn inspect_wav_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64> {
     Ok(parse_wav_layout(&mut reader, false)?.total_samples)
 }

@@ -1,11 +1,36 @@
+//! Shared configuration types for the `flacx` encoder and decoder.
+//!
+//! The crate exposes two small configuration values:
+//! [`EncoderConfig`] for WAV-to-FLAC conversion and [`DecodeConfig`] for
+//! FLAC-to-WAV conversion. Both are cheap to clone and can be constructed
+//! directly or through their builders.
+//!
+//! Use [`EncoderConfig::builder`] / [`DecodeConfig::builder`] when you want a
+//! fluent configuration flow, and use the `with_*` methods when you want to
+//! start from [`Default::default`].
+
 use crate::level::Level;
 
 /// User-facing encoder configuration for WAV-to-FLAC conversion.
+///
+/// `EncoderConfig` backs both [`EncoderBuilder`] and [`crate::Encoder`]. The default
+/// encoder configuration uses the highest preset (`Level::Level8`), the host's
+/// available parallelism when it can be detected, and the block size suggested
+/// by the selected level profile.
+///
+/// `with_level` updates the preset and refreshes the block size to match that
+/// level's default. `with_block_size` replaces the fixed block size and clears
+/// any existing variable block schedule. `with_block_schedule` enables a custom
+/// block schedule instead of a single fixed block size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderConfig {
+    /// Compression level preset to use for encoding.
     pub level: Level,
+    /// Number of worker threads the encoder may use.
     pub threads: usize,
+    /// Fixed block size in samples when no custom block schedule is supplied.
     pub block_size: u16,
+    /// Optional sequence of block sizes to use instead of a single block size.
     pub block_schedule: Option<Vec<u16>>,
 }
 
@@ -25,11 +50,31 @@ impl Default for EncoderConfig {
 }
 
 impl EncoderConfig {
+    /// Create a fluent builder for [`EncoderConfig`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use flacx::{EncoderConfig, level::Level};
+    ///
+    /// let config = EncoderConfig::builder()
+    ///     .level(Level::Level8)
+    ///     .threads(4)
+    ///     .build();
+    ///
+    /// assert_eq!(config.level, Level::Level8);
+    /// assert_eq!(config.threads, 4);
+    /// ```
     #[must_use]
     pub fn builder() -> EncoderBuilder {
         EncoderBuilder::default()
     }
 
+    /// Set the compression level preset.
+    ///
+    /// This updates [`EncoderConfig::level`] and refreshes
+    /// [`EncoderConfig::block_size`] to the new level's default block size.
+    /// Any existing `block_schedule` is left unchanged.
     #[must_use]
     pub fn with_level(mut self, level: Level) -> Self {
         let profile = level.profile();
@@ -38,12 +83,17 @@ impl EncoderConfig {
         self
     }
 
+    /// Set the worker thread count.
+    ///
+    /// Values are clamped to at least `1` so the encoder always has a usable
+    /// thread count.
     #[must_use]
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
         self
     }
 
+    /// Set a fixed block size and clear any custom block schedule.
     #[must_use]
     pub fn with_block_size(mut self, block_size: u16) -> Self {
         self.block_size = block_size;
@@ -51,6 +101,10 @@ impl EncoderConfig {
         self
     }
 
+    /// Enable a custom block schedule.
+    ///
+    /// The schedule is stored verbatim and will be used by the encoder's plan
+    /// stage instead of a single fixed block size.
     #[must_use]
     pub fn with_block_schedule(mut self, block_schedule: Vec<u16>) -> Self {
         self.block_schedule = Some(block_schedule);
@@ -59,41 +113,50 @@ impl EncoderConfig {
 }
 
 /// Fluent builder for [`EncoderConfig`].
+///
+/// The builder starts from [`EncoderConfig::default`] and mirrors the same
+/// `with_*` customization surface.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EncoderBuilder {
     config: EncoderConfig,
 }
 
 impl EncoderBuilder {
+    /// Create a new builder starting from [`EncoderConfig::default`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the compression level preset used by the encoder.
     #[must_use]
     pub fn level(mut self, level: Level) -> Self {
         self.config = self.config.with_level(level);
         self
     }
 
+    /// Set the worker thread count.
     #[must_use]
     pub fn threads(mut self, threads: usize) -> Self {
         self.config = self.config.with_threads(threads);
         self
     }
 
+    /// Set a fixed block size.
     #[must_use]
     pub fn block_size(mut self, block_size: u16) -> Self {
         self.config = self.config.with_block_size(block_size);
         self
     }
 
+    /// Set a custom block schedule.
     #[must_use]
     pub fn block_schedule(mut self, block_schedule: Vec<u16>) -> Self {
         self.config = self.config.with_block_schedule(block_schedule);
         self
     }
 
+    /// Finish building the configuration.
     #[must_use]
     pub fn build(self) -> EncoderConfig {
         self.config
@@ -101,9 +164,15 @@ impl EncoderBuilder {
 }
 
 /// User-facing decode configuration for FLAC-to-WAV conversion.
+///
+/// `DecodeConfig` backs both [`DecodeBuilder`] and [`crate::Decoder`]. The default
+/// decode configuration uses the host's available parallelism when it can be
+/// detected and leaves channel-mask provenance checks disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeConfig {
+    /// Number of worker threads the decoder may use.
     pub threads: usize,
+    /// Require channel-layout provenance metadata before restoring a non-ordinary mask.
     pub strict_channel_mask_provenance: bool,
 }
 
@@ -119,17 +188,40 @@ impl Default for DecodeConfig {
 }
 
 impl DecodeConfig {
+    /// Create a fluent builder for [`DecodeConfig`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use flacx::DecodeConfig;
+    ///
+    /// let config = DecodeConfig::builder()
+    ///     .threads(4)
+    ///     .strict_channel_mask_provenance(true)
+    ///     .build();
+    ///
+    /// assert_eq!(config.threads, 4);
+    /// assert!(config.strict_channel_mask_provenance);
+    /// ```
     #[must_use]
     pub fn builder() -> DecodeBuilder {
         DecodeBuilder::default()
     }
 
+    /// Set the worker thread count.
+    ///
+    /// Values are clamped to at least `1` so the decoder always has a usable
+    /// thread count.
     #[must_use]
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
         self
     }
 
+    /// Enable or disable strict channel-mask provenance checks.
+    ///
+    /// When this is enabled, decoding fails unless the FLAC stream carries the
+    /// crate's channel-layout provenance marker for non-ordinary masks.
     #[must_use]
     pub fn with_strict_channel_mask_provenance(mut self, strict: bool) -> Self {
         self.strict_channel_mask_provenance = strict;
@@ -144,23 +236,27 @@ pub struct DecodeBuilder {
 }
 
 impl DecodeBuilder {
+    /// Create a new builder starting from [`DecodeConfig::default`].
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the worker thread count used by the decoder.
     #[must_use]
     pub fn threads(mut self, threads: usize) -> Self {
         self.config = self.config.with_threads(threads);
         self
     }
 
+    /// Enable or disable strict channel-mask provenance checks.
     #[must_use]
     pub fn strict_channel_mask_provenance(mut self, strict: bool) -> Self {
         self.config = self.config.with_strict_channel_mask_provenance(strict);
         self
     }
 
+    /// Finish building the configuration.
     #[must_use]
     pub fn build(self) -> DecodeConfig {
         self.config

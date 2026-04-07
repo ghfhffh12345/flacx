@@ -1,3 +1,9 @@
+//! FLAC-to-WAV decoding primitives used by the `flacx` crate.
+//!
+//! The main façade is [`Decoder`]. Pair it with [`DecodeConfig`] or
+//! [`Decoder::builder`] to choose worker-thread count and channel-mask
+//! provenance handling before decoding.
+
 use std::{
     fs::{self, File, OpenOptions},
     io::{Cursor, Read, Seek, Write},
@@ -21,20 +27,42 @@ use crate::progress::CallbackProgress;
 static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Summary of the WAV stream produced by a decode operation.
+///
+/// The values mirror the stream information recovered from the FLAC input.
 pub struct DecodeSummary {
+    /// Number of FLAC frames read from the input stream.
     pub frame_count: usize,
+    /// Total output samples reconstructed from the FLAC stream.
     pub total_samples: u64,
+    /// Maximum block size recorded in the input stream.
     pub block_size: u16,
+    /// Smallest decoded frame size in bytes.
     pub min_frame_size: u32,
+    /// Largest decoded frame size in bytes.
     pub max_frame_size: u32,
+    /// Smallest decoded block size in samples.
     pub min_block_size: u16,
+    /// Largest decoded block size in samples.
     pub max_block_size: u16,
+    /// Sample rate of the decoded stream.
     pub sample_rate: u32,
+    /// Number of channels in the decoded stream.
     pub channels: u8,
+    /// Bits per sample recorded in the decoded stream.
     pub bits_per_sample: u8,
 }
 
 /// Primary library façade for FLAC-to-WAV conversion.
+///
+/// Construct a decoder from [`DecodeConfig`] and call one of the decode
+/// methods depending on your input shape:
+///
+/// - [`Decoder::decode`] for generic `Read + Seek` sources
+/// - [`Decoder::decode_file`] for file paths
+/// - [`Decoder::decode_bytes`] for in-memory input
+///
+/// The decoder itself is cheap to copy and holds only its configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decoder {
     config: DecodeConfig,
@@ -47,26 +75,42 @@ impl Default for Decoder {
 }
 
 impl Decoder {
+    /// Create a builder initialized from [`DecodeConfig::builder`].
     #[must_use]
     pub fn builder() -> DecodeBuilder {
         DecodeConfig::builder()
     }
 
+    /// Construct a decoder from a configuration value.
     #[must_use]
     pub fn new(config: DecodeConfig) -> Self {
         Self { config }
     }
 
+    /// Return the configuration currently stored in the decoder.
     #[must_use]
     pub fn config(&self) -> DecodeConfig {
         self.config
     }
 
+    /// Return a new decoder with a different worker thread count.
     #[must_use]
     pub fn with_threads(self, threads: usize) -> Self {
         Self::new(self.config.with_threads(threads))
     }
 
+    /// Decode a FLAC reader into WAV output.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::io::Cursor;
+    /// use flacx::Decoder;
+    ///
+    /// let input = Cursor::new(std::fs::read("input.flac").unwrap());
+    /// let mut output = Cursor::new(Vec::new());
+    /// Decoder::default().decode(input, &mut output).unwrap();
+    /// ```
     pub fn decode<R, W>(&self, input: R, output: W) -> Result<DecodeSummary>
     where
         R: Read + Seek,
@@ -77,6 +121,27 @@ impl Decoder {
     }
 
     #[cfg(feature = "progress")]
+    /// Decode a FLAC reader into WAV output while reporting progress.
+    ///
+    /// The callback receives a [`crate::progress::ProgressSnapshot`] after
+    /// each decoded frame.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "progress")]
+    /// # {
+    /// use std::io::Cursor;
+    /// use flacx::{Decoder, ProgressSnapshot};
+    ///
+    /// let input = Cursor::new(std::fs::read("input.flac").unwrap());
+    /// let mut output = Cursor::new(Vec::new());
+    /// Decoder::default().decode_with_progress(input, &mut output, |snapshot: ProgressSnapshot| {
+    ///     println!("{} / {} samples", snapshot.processed_samples, snapshot.total_samples);
+    ///     Ok(())
+    /// }).unwrap();
+    /// # }
+    /// ```
     pub fn decode_with_progress<R, W, F>(
         &self,
         input: R,
@@ -92,6 +157,20 @@ impl Decoder {
         self.decode_into(input, output, &mut progress)
     }
 
+    /// Decode from one file path to another.
+    ///
+    /// The output is written through a temporary file and committed on success
+    /// so the destination is only updated when decoding completes.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use flacx::Decoder;
+    ///
+    /// Decoder::default()
+    ///     .decode_file("input.flac", "output.wav")
+    ///     .unwrap();
+    /// ```
     pub fn decode_file<P, Q>(&self, input_path: P, output_path: Q) -> Result<DecodeSummary>
     where
         P: AsRef<Path>,
@@ -102,6 +181,23 @@ impl Decoder {
     }
 
     #[cfg(feature = "progress")]
+    /// Decode from one file path to another while reporting progress.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "progress")]
+    /// # {
+    /// use flacx::{Decoder, ProgressSnapshot};
+    ///
+    /// Decoder::default()
+    ///     .decode_file_with_progress("input.flac", "output.wav", |snapshot: ProgressSnapshot| {
+    ///         println!("{} / {} frames", snapshot.completed_frames, snapshot.total_frames);
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    /// # }
+    /// ```
     pub fn decode_file_with_progress<P, Q, F>(
         &self,
         input_path: P,
@@ -117,6 +213,17 @@ impl Decoder {
         self.decode_file_with_sink(input_path, output_path, &mut progress)
     }
 
+    /// Decode an in-memory FLAC buffer and return the WAV bytes.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use flacx::Decoder;
+    ///
+    /// let flac_bytes = std::fs::read("input.flac").unwrap();
+    /// let wav_bytes = Decoder::default().decode_bytes(&flac_bytes).unwrap();
+    /// assert!(!wav_bytes.is_empty());
+    /// ```
     pub fn decode_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
         let mut output = Cursor::new(Vec::new());
         self.decode(Cursor::new(input), &mut output)?;
@@ -184,6 +291,15 @@ impl Decoder {
     }
 }
 
+/// Convenience wrapper around the default [`Decoder`] for file-path input.
+///
+/// # Example
+///
+/// ```no_run
+/// use flacx::decode_file;
+///
+/// decode_file("input.flac", "output.wav").unwrap();
+/// ```
 pub fn decode_file<P, Q>(input_path: P, output_path: Q) -> Result<DecodeSummary>
 where
     P: AsRef<Path>,
@@ -192,6 +308,17 @@ where
     Decoder::default().decode_file(input_path, output_path)
 }
 
+/// Convenience wrapper around the default [`Decoder`] for in-memory input.
+///
+/// # Example
+///
+/// ```no_run
+/// use flacx::decode_bytes;
+///
+/// let flac_bytes = std::fs::read("input.flac").unwrap();
+/// let wav_bytes = decode_bytes(&flac_bytes).unwrap();
+/// assert!(!wav_bytes.is_empty());
+/// ```
 pub fn decode_bytes(input: &[u8]) -> Result<Vec<u8>> {
     Decoder::default().decode_bytes(input)
 }

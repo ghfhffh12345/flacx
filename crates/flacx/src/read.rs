@@ -185,6 +185,21 @@ fn requires_channel_layout_provenance(_channels: u8, channel_mask: Option<u32>) 
     channel_mask.is_some()
 }
 
+/// Inspect a FLAC stream and return the total sample count stored in
+/// `STREAMINFO`.
+///
+/// This helper validates the FLAC marker and first metadata block, then
+/// extracts the total sample count without decoding audio frames.
+///
+/// # Example
+///
+/// ```no_run
+/// use flacx::inspect_flac_total_samples;
+/// use std::fs::File;
+///
+/// let total_samples = inspect_flac_total_samples(File::open("input.flac").unwrap()).unwrap();
+/// assert!(total_samples > 0);
+/// ```
 pub fn inspect_flac_total_samples<R: Read>(mut reader: R) -> Result<u64> {
     let mut magic = [0u8; 4];
     read_exact_or_invalid(&mut reader, &mut magic, "file is too short")?;

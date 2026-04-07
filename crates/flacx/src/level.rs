@@ -1,27 +1,64 @@
+//! Compression level presets and tuning profiles used by `flacx`.
+//!
+//! The `Level` enum exposes the user-facing 0-8 compression presets. Each
+//! preset maps to a [`crate::level::LevelProfile`] that drives encoder block
+//! sizing and the internal search limits used by the encoder planning stage.
+
+/// FLAC compression level presets from `0` to `8`.
+///
+/// Lower presets favor speed and smaller search spaces. Higher presets use more
+/// aggressive search settings and larger default block sizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
+    /// The least aggressive preset.
     Level0,
+    /// Slightly more aggressive than [`Level::Level0`].
     Level1,
+    /// A balanced low preset.
     Level2,
+    /// A balanced low preset with the same tuning profile as [`Level::Level2`].
     Level3,
+    /// Medium preset with larger blocks and deeper search.
     Level4,
+    /// Medium preset with a slightly higher residual partition order.
     Level5,
+    /// Higher preset with larger search windows.
     Level6,
+    /// High preset with exhaustive model search enabled.
     Level7,
+    /// The most aggressive preset exposed by this crate.
     Level8,
 }
 
+/// Encoder tuning parameters for a [`Level`] preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelProfile {
+    /// Default block size in samples for the level.
     pub block_size: u16,
+    /// Maximum fixed predictor order considered by the encoder.
     pub max_fixed_order: u8,
+    /// Maximum LPC order considered by the encoder.
     pub max_lpc_order: u8,
+    /// Maximum residual partition order considered by the encoder.
     pub max_residual_partition_order: u8,
+    /// Whether mid/side stereo may be used for the level.
     pub use_mid_side_stereo: bool,
+    /// Whether the encoder should perform exhaustive model search.
     pub exhaustive_model_search: bool,
 }
 
 impl Level {
+    /// Return the tuning profile associated with this level.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use flacx::level::Level;
+    ///
+    /// let profile = Level::Level8.profile();
+    /// assert!(profile.exhaustive_model_search);
+    /// assert_eq!(u8::from(Level::Level8), 8);
+    /// ```
     #[inline]
     pub const fn profile(self) -> LevelProfile {
         match self {
@@ -102,6 +139,7 @@ impl Level {
 }
 
 impl From<Level> for u8 {
+    /// Convert a [`Level`] into its numeric representation.
     #[inline]
     fn from(level: Level) -> Self {
         match level {
@@ -121,6 +159,7 @@ impl From<Level> for u8 {
 impl core::convert::TryFrom<u8> for Level {
     type Error = u8;
 
+    /// Convert a numeric preset value into a [`Level`].
     #[inline]
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
@@ -139,6 +178,10 @@ impl core::convert::TryFrom<u8> for Level {
 }
 
 impl LevelProfile {
+    /// Construct a custom tuning profile.
+    ///
+    /// This constructor performs no validation; it is a low-level helper for
+    /// callers that want to define their own presets.
     #[inline]
     pub const fn new(
         block_size: u16,
