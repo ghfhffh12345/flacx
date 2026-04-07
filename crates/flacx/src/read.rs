@@ -16,7 +16,7 @@ use crate::{
     crc::{crc8, crc16},
     error::{Error, Result},
     input::{WavData, WavSpec, ordinary_channel_mask},
-    metadata::WavMetadata,
+    metadata::{FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, WavMetadata},
     model::ChannelAssignment,
     progress::{NoProgress, ProgressSink, ProgressSnapshot},
     reconstruct::{interleave_channels, restore_fixed, restore_lpc, unfold_residual},
@@ -113,8 +113,11 @@ where
 
     let expected_frames = stream_info.total_samples as usize;
     let total_output_samples = expected_frames * usize::from(stream_info.channels);
-    let channel_mask = ordinary_channel_mask(u16::from(stream_info.channels))
-        .expect("ordinary channel mask must exist after validating 1..8 channels in STREAMINFO");
+    let channel_mask = resolve_channel_mask(
+        stream_info.channels,
+        &metadata,
+        config.strict_channel_mask_provenance,
+    )?;
     let wav_spec = WavSpec {
         sample_rate: stream_info.sample_rate,
         channels: stream_info.channels,
@@ -158,6 +161,28 @@ where
         stream_info,
         frame_count,
     })
+}
+
+fn resolve_channel_mask(
+    channels: u8,
+    metadata: &WavMetadata,
+    strict_channel_mask_provenance: bool,
+) -> Result<u32> {
+    let ordinary_mask = ordinary_channel_mask(u16::from(channels))
+        .expect("ordinary channel mask must exist after validating 1..8 channels in STREAMINFO");
+    if strict_channel_mask_provenance
+        && requires_channel_layout_provenance(channels, metadata.channel_mask())
+        && !metadata.has_channel_layout_provenance()
+    {
+        return Err(Error::UnsupportedFlac(format!(
+            "strict channel-layout provenance requires {FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY} for {channels}-channel decode"
+        )));
+    }
+    Ok(metadata.channel_mask().unwrap_or(ordinary_mask))
+}
+
+fn requires_channel_layout_provenance(_channels: u8, channel_mask: Option<u32>) -> bool {
+    channel_mask.is_some()
 }
 
 pub fn inspect_flac_total_samples<R: Read>(mut reader: R) -> Result<u64> {
@@ -985,7 +1010,10 @@ fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, WavMetadata, usize)> {
                 stream_info
                     .expect("streaminfo parsed before optional metadata")
                     .total_samples,
-            );
+                stream_info
+                    .expect("streaminfo parsed before optional metadata")
+                    .channels,
+            )?;
         }
 
         offset += block_len;
@@ -1017,7 +1045,10 @@ fn read_exact_or_invalid<R: Read>(
 
 #[cfg(test)]
 mod tests {
-    use super::{channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment};
+    use super::{
+        channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment,
+        requires_channel_layout_provenance,
+    };
     use crate::model::ChannelAssignment;
 
     #[test]
@@ -1069,5 +1100,12 @@ mod tests {
             channel_bits_per_sample(ChannelAssignment::MidSide, 16),
             vec![16, 17]
         );
+    }
+
+    #[test]
+    fn channel_layout_provenance_is_only_required_for_explicit_mask_restore() {
+        assert!(!requires_channel_layout_provenance(2, None));
+        assert!(requires_channel_layout_provenance(2, Some(0)));
+        assert!(requires_channel_layout_provenance(4, Some(0x0001_2104)));
     }
 }

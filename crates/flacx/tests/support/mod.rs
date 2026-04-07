@@ -57,7 +57,6 @@ pub fn extensible_pcm_wav_bytes(
     assert!(matches!(container_bits_per_sample, 8 | 16 | 24 | 32));
     assert!(valid_bits_per_sample >= 4);
     assert!(valid_bits_per_sample <= container_bits_per_sample);
-    assert!(channel_mask != 0);
 
     let bytes_per_sample = bytes_per_sample(container_bits_per_sample);
     let block_align = usize::from(channels) * bytes_per_sample;
@@ -481,6 +480,38 @@ pub struct ParsedMetadataBlock {
     pub is_last: bool,
     pub block_type: u8,
     pub payload: Vec<u8>,
+}
+
+pub fn parse_vorbis_comment_entries(payload: &[u8]) -> Vec<(String, String)> {
+    if payload.len() < 8 {
+        return Vec::new();
+    }
+    let vendor_len = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    if payload.len() < 4 + vendor_len + 4 {
+        return Vec::new();
+    }
+    let mut cursor = 4 + vendor_len;
+    let comment_count = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap());
+    cursor += 4;
+
+    let mut entries = Vec::new();
+    for _ in 0..comment_count {
+        if cursor + 4 > payload.len() {
+            return entries;
+        }
+        let entry_len =
+            u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        if cursor + entry_len > payload.len() {
+            return entries;
+        }
+        let entry = String::from_utf8_lossy(&payload[cursor..cursor + entry_len]).into_owned();
+        cursor += entry_len;
+        if let Some((key, value)) = entry.split_once('=') {
+            entries.push((key.to_owned(), value.to_owned()));
+        }
+    }
+    entries
 }
 
 pub fn unique_temp_path(extension: &str) -> PathBuf {

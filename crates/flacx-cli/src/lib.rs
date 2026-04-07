@@ -21,6 +21,7 @@
 //! - decode-only flags:
 //!   - `--output`
 //!   - `--threads`
+//!   - `--strict-channel-mask-provenance`
 //!   - `--depth` (directory input only)
 
 use std::{

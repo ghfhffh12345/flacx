@@ -3,8 +3,9 @@ use flacx::{Encoder, EncoderConfig, decode_bytes};
 mod support;
 
 use support::{
-    extensible_pcm_wav_bytes, ordinary_channel_mask, parse_first_flac_frame_header,
-    parse_wav_format, pcm_wav_bytes, sample_fixture, wav_data_bytes,
+    extensible_pcm_wav_bytes, flac_metadata_blocks, ordinary_channel_mask,
+    parse_first_flac_frame_header, parse_vorbis_comment_entries, parse_wav_format, pcm_wav_bytes,
+    sample_fixture, wav_data_bytes,
 };
 
 #[test]
@@ -134,4 +135,60 @@ fn round_trips_representative_multichannel_independent_only_envelopes() {
         assert_eq!(format.valid_bits_per_sample, Some(valid_bits));
         assert_eq!(format.channel_mask, ordinary_channel_mask(channels));
     }
+}
+
+#[test]
+fn round_trips_non_ordinary_channel_masks_via_rfc_vorbis_comment() {
+    let mask = 0x0001_2104u32;
+    let samples = sample_fixture(4, 1_024);
+    let wav = extensible_pcm_wav_bytes(16, 16, 4, 48_000, mask, &samples);
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav)
+        .unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+    let blocks = flac_metadata_blocks(&flac);
+    let vorbis = blocks
+        .iter()
+        .find(|block| block.block_type == 4)
+        .expect("vorbis comment block present for non-ordinary mask");
+    let comments = parse_vorbis_comment_entries(&vorbis.payload);
+
+    assert_eq!(decoded, wav);
+    assert!(comments.iter().any(|(key, value)| {
+        key == "WAVEFORMATEXTENSIBLE_CHANNEL_MASK" && value == "0x00012104"
+    }));
+    assert!(
+        comments
+            .iter()
+            .any(|(key, value)| { key == "FLACX_CHANNEL_LAYOUT_PROVENANCE" && value == "1" })
+    );
+    assert_eq!(parse_wav_format(&decoded).channel_mask, Some(mask));
+}
+
+#[test]
+fn round_trips_zero_channel_mask_via_rfc_vorbis_comment() {
+    let wav = extensible_pcm_wav_bytes(16, 16, 2, 44_100, 0, &[1, -1, 2, -2]);
+    let flac = Encoder::new(EncoderConfig::default().with_threads(1))
+        .encode_bytes(&wav)
+        .unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+    let blocks = flac_metadata_blocks(&flac);
+    let vorbis = blocks
+        .iter()
+        .find(|block| block.block_type == 4)
+        .expect("vorbis comment block present for zero channel mask");
+    let comments = parse_vorbis_comment_entries(&vorbis.payload);
+
+    assert_eq!(decoded, wav);
+    assert!(comments.iter().any(|(key, value)| {
+        key == "WAVEFORMATEXTENSIBLE_CHANNEL_MASK" && value == "0x00000000"
+    }));
+    assert!(
+        comments
+            .iter()
+            .any(|(key, value)| { key == "FLACX_CHANNEL_LAYOUT_PROVENANCE" && value == "1" })
+    );
+    let format = parse_wav_format(&decoded);
+    assert_eq!(format.format_tag, 0xFFFE);
+    assert_eq!(format.channel_mask, Some(0));
 }
