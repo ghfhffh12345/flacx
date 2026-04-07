@@ -24,6 +24,15 @@ Or invoke it through Cargo while you iterate:
 cargo run -p flacx-cli --release -- --help
 ```
 
+Common direct examples:
+
+```bash
+target/release/flacx encode input.wav -o output.flac --level 8 --threads 4
+target/release/flacx encode album-dir -o encoded-album --depth 0
+target/release/flacx decode input.flac -o output.wav --threads 4
+target/release/flacx decode encoded-album -o decoded-album --depth 0
+```
+
 ## Command model
 
 The CLI exposes two top-level commands:
