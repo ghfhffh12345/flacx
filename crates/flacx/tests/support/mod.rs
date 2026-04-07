@@ -401,6 +401,28 @@ pub fn cuesheet_block(track_offsets: &[u64], lead_out_offset: u64) -> ParsedMeta
     }
 }
 
+pub fn seektable_block(entries: &[(u64, u64, u16)]) -> ParsedMetadataBlock {
+    let mut payload = Vec::with_capacity(entries.len() * 18);
+    for &(sample_number, frame_offset, sample_count) in entries {
+        payload.extend_from_slice(&sample_number.to_be_bytes());
+        payload.extend_from_slice(&frame_offset.to_be_bytes());
+        payload.extend_from_slice(&sample_count.to_be_bytes());
+    }
+    ParsedMetadataBlock {
+        is_last: false,
+        block_type: 3,
+        payload,
+    }
+}
+
+pub fn raw_seektable_block(payload: &[u8]) -> ParsedMetadataBlock {
+    ParsedMetadataBlock {
+        is_last: false,
+        block_type: 3,
+        payload: payload.to_vec(),
+    }
+}
+
 pub fn application_block(payload: &[u8]) -> ParsedMetadataBlock {
     ParsedMetadataBlock {
         is_last: false,
@@ -512,6 +534,23 @@ pub fn parse_vorbis_comment_entries(payload: &[u8]) -> Vec<(String, String)> {
         }
     }
     entries
+}
+
+pub fn parse_seektable_entries(payload: &[u8]) -> Vec<(u64, u64, u16)> {
+    if !payload.len().is_multiple_of(18) {
+        return Vec::new();
+    }
+
+    payload
+        .chunks_exact(18)
+        .map(|chunk| {
+            (
+                u64::from_be_bytes(chunk[..8].try_into().unwrap()),
+                u64::from_be_bytes(chunk[8..16].try_into().unwrap()),
+                u16::from_be_bytes(chunk[16..18].try_into().unwrap()),
+            )
+        })
+        .collect()
 }
 
 pub fn unique_temp_path(extension: &str) -> PathBuf {

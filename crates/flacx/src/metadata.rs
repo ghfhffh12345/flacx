@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 
 use crate::input::ordinary_channel_mask;
 
+pub(crate) const SEEKTABLE_BLOCK_TYPE: u8 = 3;
+pub(crate) const SEEKTABLE_POINT_LEN: usize = 18;
+pub(crate) const SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER: u64 = u64::MAX;
 const VORBIS_COMMENT_BLOCK_TYPE: u8 = 4;
 const CUESHEET_BLOCK_TYPE: u8 = 5;
 const CUESHEET_LEADOUT_TRACK_NUMBER: u8 = 170;
@@ -232,6 +235,72 @@ impl WavMetadata {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SeekPoint {
+    pub(crate) sample_number: u64,
+    pub(crate) frame_offset: u64,
+    pub(crate) sample_count: u16,
+}
+
+impl SeekPoint {
+    pub(crate) fn payload(points: &[Self]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(points.len() * SEEKTABLE_POINT_LEN);
+        for point in points {
+            payload.extend_from_slice(&point.sample_number.to_be_bytes());
+            payload.extend_from_slice(&point.frame_offset.to_be_bytes());
+            payload.extend_from_slice(&point.sample_count.to_be_bytes());
+        }
+        payload
+    }
+}
+
+pub(crate) fn validate_seektable_payload(payload: &[u8]) -> crate::error::Result<()> {
+    if !payload.len().is_multiple_of(SEEKTABLE_POINT_LEN) {
+        return Err(crate::error::Error::InvalidFlac(
+            "seektable payload length must be a multiple of 18 bytes",
+        ));
+    }
+
+    let mut previous_sample_number = None;
+    let mut saw_placeholder = false;
+
+    for chunk in payload.chunks_exact(SEEKTABLE_POINT_LEN) {
+        let sample_number = u64::from_be_bytes(
+            chunk[..8]
+                .try_into()
+                .expect("seektable sample number slice length"),
+        );
+
+        if sample_number == SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER {
+            saw_placeholder = true;
+            continue;
+        }
+
+        if saw_placeholder {
+            return Err(crate::error::Error::InvalidFlac(
+                "seektable placeholder points must appear at the end of the table",
+            ));
+        }
+
+        if let Some(previous) = previous_sample_number {
+            if sample_number < previous {
+                return Err(crate::error::Error::InvalidFlac(
+                    "seektable sample numbers must be in ascending order",
+                ));
+            }
+            if sample_number == previous {
+                return Err(crate::error::Error::InvalidFlac(
+                    "seektable sample numbers must be unique",
+                ));
+            }
+        }
+
+        previous_sample_number = Some(sample_number);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,7 +629,8 @@ fn append_chunk_payload(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
 mod tests {
     use super::{
         FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FlacMetadataBlock, MetadataDraft,
-        WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY, WavMetadata,
+        SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, SeekPoint, WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
+        WavMetadata, validate_seektable_payload,
     };
 
     fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
@@ -628,6 +698,19 @@ mod tests {
         payload.extend_from_slice(&[0u8; 13]);
         payload.push(0);
         payload
+    }
+
+    fn seektable_payload(entries: &[(u64, u64, u16)]) -> Vec<u8> {
+        SeekPoint::payload(
+            &entries
+                .iter()
+                .map(|&(sample_number, frame_offset, sample_count)| SeekPoint {
+                    sample_number,
+                    frame_offset,
+                    sample_count,
+                })
+                .collect::<Vec<_>>(),
+        )
     }
 
     #[test]
@@ -774,6 +857,61 @@ mod tests {
             "{WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY}=0x00012104"
         )));
         assert!(rendered.contains(&format!("{FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY}=1")));
+    }
+
+    #[test]
+    fn accepts_valid_seektable_payload() {
+        validate_seektable_payload(&seektable_payload(&[(0, 0, 128), (128, 512, 128)])).unwrap();
+    }
+
+    #[test]
+    fn rejects_seektable_payloads_with_invalid_length() {
+        let error = validate_seektable_payload(&[0u8; 17]).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("seektable payload length must be a multiple of 18 bytes")
+        );
+    }
+
+    #[test]
+    fn rejects_non_ascending_seektable_points() {
+        let error = validate_seektable_payload(&seektable_payload(&[(128, 512, 128), (64, 0, 64)]))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("seektable sample numbers must be in ascending order")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_seektable_sample_numbers() {
+        let error = validate_seektable_payload(&seektable_payload(&[(64, 0, 64), (64, 64, 64)]))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("seektable sample numbers must be unique")
+        );
+    }
+
+    #[test]
+    fn rejects_seektable_placeholders_before_real_points() {
+        let error = validate_seektable_payload(&seektable_payload(&[
+            (SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, 0, 0),
+            (64, 64, 64),
+        ]))
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("seektable placeholder points must appear at the end of the table")
+        );
     }
 
     #[test]

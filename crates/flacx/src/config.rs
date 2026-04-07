@@ -167,13 +167,15 @@ impl EncoderBuilder {
 ///
 /// `DecodeConfig` backs both [`DecodeBuilder`] and [`crate::Decoder`]. The default
 /// decode configuration uses the host's available parallelism when it can be
-/// detected and leaves channel-mask provenance checks disabled.
+/// detected and leaves channel-mask provenance and seektable checks disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeConfig {
     /// Number of worker threads the decoder may use.
     pub threads: usize,
     /// Require channel-layout provenance metadata before restoring a non-ordinary mask.
     pub strict_channel_mask_provenance: bool,
+    /// Require RFC 9639 seektable validation instead of tolerating malformed tables.
+    pub strict_seektable_validation: bool,
 }
 
 impl Default for DecodeConfig {
@@ -183,6 +185,7 @@ impl Default for DecodeConfig {
                 .map(usize::from)
                 .unwrap_or(1),
             strict_channel_mask_provenance: false,
+            strict_seektable_validation: false,
         }
     }
 }
@@ -198,10 +201,12 @@ impl DecodeConfig {
     /// let config = DecodeConfig::builder()
     ///     .threads(4)
     ///     .strict_channel_mask_provenance(true)
+    ///     .strict_seektable_validation(true)
     ///     .build();
     ///
     /// assert_eq!(config.threads, 4);
     /// assert!(config.strict_channel_mask_provenance);
+    /// assert!(config.strict_seektable_validation);
     /// ```
     #[must_use]
     pub fn builder() -> DecodeBuilder {
@@ -225,6 +230,16 @@ impl DecodeConfig {
     #[must_use]
     pub fn with_strict_channel_mask_provenance(mut self, strict: bool) -> Self {
         self.strict_channel_mask_provenance = strict;
+        self
+    }
+
+    /// Enable or disable strict seektable validation.
+    ///
+    /// When this is enabled, malformed SEEKTABLE metadata causes decode to fail
+    /// instead of being ignored after validation.
+    #[must_use]
+    pub fn with_strict_seektable_validation(mut self, strict: bool) -> Self {
+        self.strict_seektable_validation = strict;
         self
     }
 }
@@ -253,6 +268,13 @@ impl DecodeBuilder {
     #[must_use]
     pub fn strict_channel_mask_provenance(mut self, strict: bool) -> Self {
         self.config = self.config.with_strict_channel_mask_provenance(strict);
+        self
+    }
+
+    /// Enable or disable strict seektable validation.
+    #[must_use]
+    pub fn strict_seektable_validation(mut self, strict: bool) -> Self {
+        self.config = self.config.with_strict_seektable_validation(strict);
         self
     }
 
@@ -344,6 +366,7 @@ mod tests {
         let built = DecodeConfig::builder()
             .threads(4)
             .strict_channel_mask_provenance(true)
+            .strict_seektable_validation(true)
             .build();
 
         assert_eq!(
@@ -351,6 +374,7 @@ mod tests {
             DecodeConfig::default()
                 .with_threads(4)
                 .with_strict_channel_mask_provenance(true)
+                .with_strict_seektable_validation(true)
         );
     }
 }

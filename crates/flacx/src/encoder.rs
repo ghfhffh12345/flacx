@@ -264,7 +264,7 @@ impl Encoder {
         let mut stream_info = plan.stream_info();
         stream_info.md5 = streaminfo_md5;
         let metadata_blocks = metadata.flac_blocks();
-        let mut writer = FlacWriter::new(output, stream_info, &metadata_blocks)?;
+        let mut writer = FlacWriter::new(output, stream_info, &metadata_blocks, plan.total_frames)?;
 
         if plan.total_frames == 0 {
             let (_, stream_info) = writer.finalize()?;
@@ -432,9 +432,9 @@ pub fn encode_bytes(input: &[u8]) -> Result<Vec<u8>> {
 fn write_encoded_frame<W, P>(
     writer: &mut FlacWriter<W>,
     frame: &EncodedFrame,
+    frame_index: usize,
     processed_samples: u64,
     total_samples: u64,
-    completed_frames: usize,
     total_frames: usize,
     progress: &mut P,
 ) -> Result<u64>
@@ -442,12 +442,17 @@ where
     W: Write + Seek,
     P: ProgressSink,
 {
-    writer.write_frame(&frame.bytes)?;
+    writer.write_frame(
+        frame_index,
+        processed_samples,
+        frame.sample_count,
+        &frame.bytes,
+    )?;
     let processed_samples = processed_samples + u64::from(frame.sample_count);
     progress.on_frame(ProgressSnapshot {
         processed_samples,
         total_samples,
-        completed_frames,
+        completed_frames: frame_index + 1,
         total_frames,
     })?;
     Ok(processed_samples)
@@ -470,9 +475,9 @@ where
         processed_samples = write_encoded_frame(
             writer,
             &frame,
+            *next_expected,
             processed_samples,
             total_samples,
-            *next_expected + 1,
             total_frames,
             progress,
         )?;

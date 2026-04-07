@@ -81,7 +81,7 @@ The command surface is:
 
 ```text
 flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <n>] [--depth <n>]
-flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--depth <n>] [--strict-channel-mask-provenance]
+flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--depth <n>] [--strict-channel-mask-provenance] [--strict-seektable-validation]
 ```
 
 Common behavior:

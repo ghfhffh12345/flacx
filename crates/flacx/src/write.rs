@@ -5,13 +5,15 @@ use bitstream_io::{BigEndian, BitWrite, BitWriter};
 use crate::{
     crc::{crc8, crc16},
     error::{Error, Result},
-    metadata::FlacMetadataBlock,
+    metadata::{FlacMetadataBlock, SEEKTABLE_BLOCK_TYPE, SEEKTABLE_POINT_LEN, SeekPoint},
     model::{
         AnalyzedSubframe, ChannelAssignment, FrameAnalysis, ResidualEncoding, ResidualPartition,
     },
     stream_info::{MAX_STREAMINFO_SAMPLE_RATE, StreamInfo},
 };
 
+const MAX_METADATA_PAYLOAD_LEN: usize = 0x00ff_ffff;
+const MAX_SEEKTABLE_POINTS: usize = MAX_METADATA_PAYLOAD_LEN / SEEKTABLE_POINT_LEN;
 const STREAMINFO_LENGTH: u32 = 34;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 
@@ -30,6 +32,7 @@ pub(crate) struct FlacWriter<W: Seek + Write> {
     writer: W,
     stream_info: StreamInfo,
     streaminfo_offset: u64,
+    seektable: Option<SeekTableReservation>,
 }
 
 impl<W: Seek + Write> FlacWriter<W> {
@@ -37,15 +40,28 @@ impl<W: Seek + Write> FlacWriter<W> {
         mut writer: W,
         stream_info: StreamInfo,
         metadata_blocks: &[FlacMetadataBlock],
+        total_frames: usize,
     ) -> io::Result<Self> {
+        let seektable_selection = SeekTableSelection::for_total_frames(total_frames);
         writer.write_all(b"fLaC")?;
         writer.write_all(&metadata_block_header(
             0,
-            metadata_blocks.is_empty(),
+            metadata_blocks.is_empty() && seektable_selection.is_none(),
             STREAMINFO_LENGTH,
         )?)?;
         let streaminfo_offset = writer.stream_position()?;
         writer.write_all(&stream_info.to_bytes())?;
+        let mut seektable_payload_offset = None;
+        if let Some(selection) = &seektable_selection {
+            writer.write_all(&metadata_block_header(
+                SEEKTABLE_BLOCK_TYPE,
+                metadata_blocks.is_empty(),
+                selection.payload_len,
+            )?)?;
+            let payload_offset = writer.stream_position()?;
+            writer.write_all(&vec![0u8; selection.payload_len as usize])?;
+            seektable_payload_offset = Some(payload_offset);
+        }
         for (index, block) in metadata_blocks.iter().enumerate() {
             let payload = block.payload();
             writer.write_all(&metadata_block_header(
@@ -55,21 +71,45 @@ impl<W: Seek + Write> FlacWriter<W> {
             )?)?;
             writer.write_all(&payload)?;
         }
+        let first_frame_header_offset = writer.stream_position()?;
 
         Ok(Self {
             writer,
             stream_info,
             streaminfo_offset,
+            seektable: seektable_selection.map(|selection| {
+                SeekTableReservation::new(
+                    selection.selected_frame_indices,
+                    seektable_payload_offset.expect("seektable payload offset exists"),
+                    first_frame_header_offset,
+                )
+            }),
         })
     }
 
-    pub(crate) fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+    pub(crate) fn write_frame(
+        &mut self,
+        frame_index: usize,
+        sample_offset: u64,
+        sample_count: u16,
+        frame: &[u8],
+    ) -> io::Result<()> {
+        if let Some(seektable) = &mut self.seektable {
+            let frame_offset = self.writer.stream_position()?;
+            seektable.record_frame(frame_index, sample_offset, frame_offset, sample_count);
+        }
         self.stream_info.update_frame_size(frame.len() as u32);
         self.writer.write_all(frame)
     }
 
     pub(crate) fn finalize(mut self) -> io::Result<(W, StreamInfo)> {
         let end_position = self.writer.stream_position()?;
+        if let Some(seektable) = &self.seektable {
+            self.writer
+                .seek(SeekFrom::Start(seektable.payload_offset))?;
+            self.writer.write_all(&seektable.payload()?)?;
+            self.writer.seek(SeekFrom::Start(end_position))?;
+        }
         self.writer.seek(SeekFrom::Start(self.streaminfo_offset))?;
         self.writer.write_all(&self.stream_info.to_bytes())?;
         self.writer.seek(SeekFrom::Start(end_position))?;
@@ -79,7 +119,7 @@ impl<W: Seek + Write> FlacWriter<W> {
 }
 
 fn metadata_block_header(block_type: u8, is_last: bool, payload_len: u32) -> io::Result<[u8; 4]> {
-    if payload_len > 0x00ff_ffff {
+    if payload_len > MAX_METADATA_PAYLOAD_LEN as u32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "metadata block payload exceeds FLAC u24 length limit",
@@ -97,6 +137,106 @@ fn metadata_block_header(block_type: u8, is_last: bool, payload_len: u32) -> io:
         b2,
         b3,
     ])
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeekTableSelection {
+    selected_frame_indices: Vec<usize>,
+    payload_len: u32,
+}
+
+impl SeekTableSelection {
+    fn for_total_frames(total_frames: usize) -> Option<Self> {
+        if total_frames == 0 {
+            return None;
+        }
+
+        let selected_frame_indices = selected_seektable_frame_indices(total_frames);
+        Some(Self {
+            payload_len: (selected_frame_indices.len() * SEEKTABLE_POINT_LEN) as u32,
+            selected_frame_indices,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeekTableReservation {
+    selected_frame_indices: Vec<usize>,
+    next_selected_frame: usize,
+    payload_offset: u64,
+    first_frame_header_offset: u64,
+    points: Vec<SeekPoint>,
+}
+
+impl SeekTableReservation {
+    fn new(
+        selected_frame_indices: Vec<usize>,
+        payload_offset: u64,
+        first_frame_header_offset: u64,
+    ) -> Self {
+        Self {
+            points: Vec::with_capacity(selected_frame_indices.len()),
+            selected_frame_indices,
+            next_selected_frame: 0,
+            payload_offset,
+            first_frame_header_offset,
+        }
+    }
+
+    fn record_frame(
+        &mut self,
+        frame_index: usize,
+        sample_number: u64,
+        absolute_frame_offset: u64,
+        sample_count: u16,
+    ) {
+        if self
+            .selected_frame_indices
+            .get(self.next_selected_frame)
+            .copied()
+            != Some(frame_index)
+        {
+            return;
+        }
+
+        self.points.push(SeekPoint {
+            sample_number,
+            frame_offset: absolute_frame_offset - self.first_frame_header_offset,
+            sample_count,
+        });
+        self.next_selected_frame += 1;
+    }
+
+    fn payload(&self) -> io::Result<Vec<u8>> {
+        if self.points.len() != self.selected_frame_indices.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "seektable reservation did not capture every selected frame",
+            ));
+        }
+        Ok(SeekPoint::payload(&self.points))
+    }
+}
+
+fn selected_seektable_frame_indices(total_frames: usize) -> Vec<usize> {
+    if total_frames == 0 {
+        return Vec::new();
+    }
+
+    let selected_count = total_frames.min(MAX_SEEKTABLE_POINTS);
+    if selected_count == total_frames {
+        return (0..total_frames).collect();
+    }
+
+    if selected_count == 1 {
+        return vec![0];
+    }
+
+    (0..selected_count)
+        .map(|slot| {
+            ((slot as u128 * (total_frames - 1) as u128) / (selected_count - 1) as u128) as usize
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -446,9 +586,9 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        FlacWriter, FrameHeaderNumber, bit_depth_bits, channel_assignment_bits,
-        encode_frame_header, encode_utf8_number, metadata_block_header,
-        sample_rate_is_representable,
+        FlacWriter, FrameHeaderNumber, MAX_SEEKTABLE_POINTS, SEEKTABLE_BLOCK_TYPE, bit_depth_bits,
+        channel_assignment_bits, encode_frame_header, encode_utf8_number, metadata_block_header,
+        sample_rate_is_representable, selected_seektable_frame_indices,
     };
     use crate::{
         level::LevelProfile,
@@ -599,6 +739,19 @@ mod tests {
         }
     }
 
+    fn parse_seektable_entries(payload: &[u8]) -> Vec<(u64, u64, u16)> {
+        payload
+            .chunks_exact(18)
+            .map(|chunk| {
+                (
+                    u64::from_be_bytes(chunk[..8].try_into().unwrap()),
+                    u64::from_be_bytes(chunk[8..16].try_into().unwrap()),
+                    u16::from_be_bytes(chunk[16..18].try_into().unwrap()),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn metadata_header_uses_flac_u24_layout() {
         assert_eq!(
@@ -615,7 +768,7 @@ mod tests {
     fn writer_marks_streaminfo_as_last_when_no_optional_metadata_exists() {
         let stream_info = StreamInfo::new(44_100, 2, 16, 128, [0u8; 16]);
         let writer = Cursor::new(Vec::new());
-        let (writer, _) = FlacWriter::new(writer, stream_info, &[])
+        let (writer, _) = FlacWriter::new(writer, stream_info, &[], 0)
             .unwrap()
             .finalize()
             .unwrap();
@@ -651,19 +804,18 @@ mod tests {
         let metadata_blocks = draft.finish(64).flac_blocks();
         let stream_info = StreamInfo::new(44_100, 2, 16, 64, [0u8; 16]);
         let writer = Cursor::new(Vec::new());
-        let (writer, _) = FlacWriter::new(writer, stream_info, &metadata_blocks)
-            .unwrap()
-            .finalize()
-            .unwrap();
+        let mut writer = FlacWriter::new(writer, stream_info, &metadata_blocks, 1).unwrap();
+        writer.write_frame(0, 0, 64, &[0xAA]).unwrap();
+        let (writer, _) = writer.finalize().unwrap();
         let blocks = parse_metadata_blocks(&writer.into_inner());
 
         assert_eq!(
             blocks.iter().map(|block| block.1).collect::<Vec<_>>(),
-            vec![0, 4, 5]
+            vec![0, SEEKTABLE_BLOCK_TYPE, 4, 5]
         );
         assert_eq!(
             blocks.iter().map(|block| block.0).collect::<Vec<_>>(),
-            vec![false, false, true]
+            vec![false, false, false, true]
         );
     }
 
@@ -680,5 +832,37 @@ mod tests {
         let blocks = draft.finish(32).flac_blocks();
 
         assert!(matches!(&blocks[..], [FlacMetadataBlock::VorbisComment(_)]));
+    }
+
+    #[test]
+    fn writer_backpatches_seektable_entries_from_written_frame_layout() {
+        let stream_info = StreamInfo::new(44_100, 1, 16, 48, [0u8; 16]);
+        let writer = Cursor::new(Vec::new());
+        let mut writer = FlacWriter::new(writer, stream_info, &[], 3).unwrap();
+
+        writer.write_frame(0, 0, 16, &[0xAA; 4]).unwrap();
+        writer.write_frame(1, 16, 24, &[0xBB; 7]).unwrap();
+        writer.write_frame(2, 40, 8, &[0xCC; 2]).unwrap();
+
+        let (writer, _) = writer.finalize().unwrap();
+        let blocks = parse_metadata_blocks(&writer.into_inner());
+        let seektable = blocks
+            .iter()
+            .find(|(_, block_type, _)| *block_type == SEEKTABLE_BLOCK_TYPE)
+            .expect("seektable block present");
+
+        assert_eq!(
+            parse_seektable_entries(&seektable.2),
+            vec![(0, 0, 16), (16, 4, 24), (40, 11, 8)]
+        );
+    }
+
+    #[test]
+    fn seektable_subsampling_keeps_first_and_last_frame_indices_when_oversized() {
+        let indices = selected_seektable_frame_indices(MAX_SEEKTABLE_POINTS + 17);
+
+        assert_eq!(indices.len(), MAX_SEEKTABLE_POINTS);
+        assert_eq!(indices.first().copied(), Some(0));
+        assert_eq!(indices.last().copied(), Some(MAX_SEEKTABLE_POINTS + 16));
     }
 }
