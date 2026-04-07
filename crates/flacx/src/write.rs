@@ -260,13 +260,13 @@ fn sample_rate_code(sample_rate: u32) -> Option<(u8, Vec<u8>)> {
         44_100 => Some((0b1001, Vec::new())),
         48_000 => Some((0b1010, Vec::new())),
         96_000 => Some((0b1011, Vec::new())),
-        _ if sample_rate % 1000 == 0 && sample_rate / 1000 <= u32::from(u8::MAX) => {
+        _ if sample_rate.is_multiple_of(1000) && sample_rate / 1000 <= u32::from(u8::MAX) => {
             Some((0b1100, vec![(sample_rate / 1000) as u8]))
         }
         _ if sample_rate <= u32::from(u16::MAX) => {
             Some((0b1101, (sample_rate as u16).to_be_bytes().to_vec()))
         }
-        _ if sample_rate % 10 == 0 && sample_rate / 10 <= u32::from(u16::MAX) => {
+        _ if sample_rate.is_multiple_of(10) && sample_rate / 10 <= u32::from(u16::MAX) => {
             Some((0b1110, ((sample_rate / 10) as u16).to_be_bytes().to_vec()))
         }
         _ => None,

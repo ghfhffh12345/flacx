@@ -678,7 +678,7 @@ mod tests {
         bytes.extend_from_slice(id);
         bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         bytes.extend_from_slice(payload);
-        if payload.len() % 2 != 0 {
+        if !payload.len().is_multiple_of(2) {
             bytes.push(0);
         }
     }

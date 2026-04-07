@@ -130,7 +130,7 @@ fn analyze_frame(
     }
 
     let channel_count = usize::from(channels);
-    if interleaved_samples.len() % channel_count != 0 {
+    if !interleaved_samples.len().is_multiple_of(channel_count) {
         return Err(Error::Encode(
             "frame samples are not aligned to channel count".into(),
         ));
@@ -659,7 +659,7 @@ fn partition_order_candidates(
     let capped_partition_order = max_partition_order.min(MAX_RICE_PARTITION_ORDER);
     let highest_valid = (0..=capped_partition_order).rev().find(|&partition_order| {
         let partition_count = 1usize << partition_order;
-        if block_size % partition_count != 0 {
+        if !block_size.is_multiple_of(partition_count) {
             return false;
         }
         let partition_len = block_size >> partition_order;
