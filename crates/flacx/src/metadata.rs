@@ -11,6 +11,8 @@ const CUESHEET_LEADOUT_TRACK_NUMBER: u8 = 170;
 const CUESHEET_HEADER_LEN: usize = 396;
 const CUESHEET_TRACK_HEADER_LEN: usize = 36;
 const CUESHEET_INDEX_LEN: usize = 12;
+pub(crate) const FXVC_CHUNK_ID: [u8; 4] = *b"fxvc";
+const FXVC_VERSION: u32 = 1;
 const WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY: &str = "WAVEFORMATEXTENSIBLE_CHANNEL_MASK";
 pub(crate) const FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY: &str = "FLACX_CHANNEL_LAYOUT_PROVENANCE";
 const FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE: &str = "1";
@@ -18,7 +20,8 @@ const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct EncodeMetadata {
-    comments: Vec<VorbisComment>,
+    vorbis_comment: Option<VorbisCommentBlock>,
+    authoritative_vorbis_comment: bool,
     cuesheet: Option<CueSheet>,
     channel_mask: Option<u32>,
     channel_layout_provenance: bool,
@@ -26,6 +29,9 @@ pub(crate) struct EncodeMetadata {
 
 impl EncodeMetadata {
     pub(crate) fn set_channel_mask(&mut self, channels: u16, mask: u32) {
+        if self.authoritative_vorbis_comment {
+            return;
+        }
         if ordinary_channel_mask(channels).is_some_and(|ordinary| ordinary == mask) {
             return;
         }
@@ -35,24 +41,43 @@ impl EncodeMetadata {
 
     pub(crate) fn flac_blocks(&self) -> Vec<FlacMetadataBlock> {
         let mut blocks = Vec::new();
-        let mut comments = self.comments.clone();
-        if let Some(channel_mask) = self.channel_mask {
-            comments.push(VorbisComment {
-                key: WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY.to_owned(),
-                value: format_channel_mask(channel_mask),
-            });
+        let mut vorbis_comment = self.vorbis_comment.clone();
+        if !self.authoritative_vorbis_comment {
+            if let Some(channel_mask) = self.channel_mask {
+                if let Some(block) = &mut vorbis_comment {
+                    block.push_entry(raw_vorbis_comment_entry(
+                        WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
+                        &format_channel_mask(channel_mask),
+                    ));
+                } else {
+                    vorbis_comment = Some(VorbisCommentBlock::new(
+                        format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                        vec![raw_vorbis_comment_entry(
+                            WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
+                            &format_channel_mask(channel_mask),
+                        )],
+                    ));
+                }
+            }
+            if self.channel_layout_provenance {
+                if let Some(block) = &mut vorbis_comment {
+                    block.push_entry(raw_vorbis_comment_entry(
+                        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY,
+                        FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE,
+                    ));
+                } else {
+                    vorbis_comment = Some(VorbisCommentBlock::new(
+                        format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                        vec![raw_vorbis_comment_entry(
+                            FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY,
+                            FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE,
+                        )],
+                    ));
+                }
+            }
         }
-        if self.channel_layout_provenance {
-            comments.push(VorbisComment {
-                key: FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY.to_owned(),
-                value: FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE.to_owned(),
-            });
-        }
-        if !comments.is_empty() {
-            blocks.push(FlacMetadataBlock::VorbisComment(VorbisCommentBlock {
-                vendor: format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-                comments,
-            }));
+        if let Some(block) = vorbis_comment {
+            blocks.push(FlacMetadataBlock::VorbisComment(block));
         }
         if let Some(cuesheet) = &self.cuesheet {
             blocks.push(FlacMetadataBlock::CueSheet(cuesheet.clone()));
@@ -63,6 +88,7 @@ impl EncodeMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct WavMetadata {
+    vorbis_comment: Option<VorbisCommentBlock>,
     info_entries: Vec<WavInfoEntry>,
     cue_points: Vec<u32>,
     channel_mask: Option<u32>,
@@ -71,7 +97,7 @@ pub(crate) struct WavMetadata {
 
 impl WavMetadata {
     pub(crate) fn is_empty(&self) -> bool {
-        self.info_entries.is_empty() && self.cue_points.is_empty()
+        self.vorbis_comment.is_none() && self.info_entries.is_empty() && self.cue_points.is_empty()
     }
 
     pub(crate) fn channel_mask(&self) -> Option<u32> {
@@ -109,6 +135,12 @@ impl WavMetadata {
         Some(payload)
     }
 
+    pub(crate) fn fxvc_chunk_payload(&self) -> Option<Vec<u8>> {
+        self.vorbis_comment
+            .as_ref()
+            .map(VorbisCommentBlock::fxvc_payload)
+    }
+
     pub(crate) fn cue_chunk_payload(&self) -> Option<Vec<u8>> {
         if self.cue_points.is_empty() {
             return None;
@@ -132,34 +164,13 @@ impl WavMetadata {
         payload: &[u8],
         channels: u8,
     ) -> crate::error::Result<()> {
-        let mut cursor = 0usize;
-        let Some(vendor_len) = read_u32_le(payload, &mut cursor) else {
+        let Some(block) = VorbisCommentBlock::from_flac_payload(payload) else {
             return Ok(());
         };
-        let vendor_len = vendor_len as usize;
-        if cursor + vendor_len > payload.len() {
-            return Ok(());
-        }
-        cursor += vendor_len;
-
-        let Some(comment_count) = read_u32_le(payload, &mut cursor) else {
-            return Ok(());
-        };
-        for _ in 0..comment_count {
-            let Some(comment_len) = read_u32_le(payload, &mut cursor) else {
-                return Ok(());
-            };
-            let comment_len = comment_len as usize;
-            if cursor + comment_len > payload.len() {
-                return Ok(());
-            }
-            let entry = &payload[cursor..cursor + comment_len];
-            cursor += comment_len;
-
-            let Some(comment) = String::from_utf8(entry.to_vec()).ok() else {
-                continue;
-            };
-            let Some((key, value)) = comment.split_once('=') else {
+        self.info_entries.clear();
+        self.vorbis_comment = Some(block.clone());
+        for entry in block.entries() {
+            let Some((key, value)) = split_vorbis_comment_entry(entry) else {
                 continue;
             };
             if key.eq_ignore_ascii_case(WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY) {
@@ -328,28 +339,110 @@ impl FlacMetadataBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VorbisCommentBlock {
     vendor: String,
-    comments: Vec<VorbisComment>,
+    entries: Vec<String>,
 }
 
 impl VorbisCommentBlock {
+    fn new(vendor: String, entries: Vec<String>) -> Self {
+        Self { vendor, entries }
+    }
+
+    fn from_flac_payload(payload: &[u8]) -> Option<Self> {
+        let mut cursor = 0usize;
+        let vendor_len = read_u32_le(payload, &mut cursor)? as usize;
+        let vendor = read_utf8_entry(payload, &mut cursor, vendor_len)?;
+        let comment_count = read_u32_le(payload, &mut cursor)? as usize;
+        let mut entries = Vec::with_capacity(comment_count);
+        for _ in 0..comment_count {
+            let entry_len = read_u32_le(payload, &mut cursor)? as usize;
+            let entry = read_utf8_entry(payload, &mut cursor, entry_len)?;
+            entries.push(entry);
+        }
+        if cursor != payload.len() {
+            return None;
+        }
+        Some(Self { vendor, entries })
+    }
+
+    pub(crate) fn from_fxvc_payload(payload: &[u8]) -> crate::error::Result<Self> {
+        if payload.is_empty() {
+            return Err(crate::error::Error::InvalidWav("fxvc payload is empty"));
+        }
+
+        let mut cursor = 0usize;
+        let version = read_u32_le_strict(payload, &mut cursor, "fxvc payload header is truncated")?;
+        if version != FXVC_VERSION {
+            return Err(crate::error::Error::InvalidWav(
+                "fxvc payload version is unsupported",
+            ));
+        }
+        let vendor_len =
+            read_u32_le_strict(payload, &mut cursor, "fxvc vendor length is truncated")? as usize;
+        let vendor = read_utf8_entry_strict(
+            payload,
+            &mut cursor,
+            vendor_len,
+            "fxvc vendor bytes are truncated",
+            "fxvc vendor is not valid UTF-8",
+        )?;
+        let comment_count =
+            read_u32_le_strict(payload, &mut cursor, "fxvc comment count is truncated")? as usize;
+        let mut entries = Vec::with_capacity(comment_count);
+        for _ in 0..comment_count {
+            let entry_len = read_u32_le_strict(
+                payload,
+                &mut cursor,
+                "fxvc comment length is truncated",
+            )? as usize;
+            let entry = read_utf8_entry_strict(
+                payload,
+                &mut cursor,
+                entry_len,
+                "fxvc comment bytes are truncated",
+                "fxvc comment is not valid UTF-8",
+            )?;
+            entries.push(entry);
+        }
+        if cursor != payload.len() {
+            return Err(crate::error::Error::InvalidWav(
+                "fxvc payload has trailing bytes",
+            ));
+        }
+        Ok(Self { vendor, entries })
+    }
+
     fn payload(&self) -> Vec<u8> {
         let mut payload = Vec::new();
         append_u32_le(&mut payload, self.vendor.len() as u32);
         payload.extend_from_slice(self.vendor.as_bytes());
-        append_u32_le(&mut payload, self.comments.len() as u32);
-        for comment in &self.comments {
-            let entry = format!("{}={}", comment.key, comment.value);
+        append_u32_le(&mut payload, self.entries.len() as u32);
+        for entry in &self.entries {
             append_u32_le(&mut payload, entry.len() as u32);
             payload.extend_from_slice(entry.as_bytes());
         }
         payload
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VorbisComment {
-    key: String,
-    value: String,
+    fn fxvc_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::new();
+        append_u32_le(&mut payload, FXVC_VERSION);
+        append_u32_le(&mut payload, self.vendor.len() as u32);
+        payload.extend_from_slice(self.vendor.as_bytes());
+        append_u32_le(&mut payload, self.entries.len() as u32);
+        for entry in &self.entries {
+            append_u32_le(&mut payload, entry.len() as u32);
+            payload.extend_from_slice(entry.as_bytes());
+        }
+        payload
+    }
+
+    fn push_entry(&mut self, entry: String) {
+        self.entries.push(entry);
+    }
+
+    fn entries(&self) -> &[String] {
+        &self.entries
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,31 +490,44 @@ fn write_leadout_track(payload: &mut Vec<u8>, offset: u64) {
 #[derive(Debug, Default)]
 pub(crate) struct MetadataDraft {
     comments_by_key: BTreeMap<String, Vec<String>>,
+    authoritative_vorbis_comment: Option<VorbisCommentBlock>,
     cue_points: Vec<u64>,
 }
 
 impl MetadataDraft {
-    pub(crate) fn ingest_chunk(&mut self, chunk_id: [u8; 4], payload: &[u8]) {
+    pub(crate) fn ingest_chunk(
+        &mut self,
+        chunk_id: [u8; 4],
+        payload: &[u8],
+    ) -> crate::error::Result<()> {
         match &chunk_id {
             b"LIST" => self.ingest_list_chunk(payload),
             b"cue " => self.ingest_cue_chunk(payload),
+            &FXVC_CHUNK_ID => self.ingest_fxvc_chunk(payload)?,
             _ => {}
         }
+        Ok(())
     }
 
     pub(crate) fn finish(self, total_samples: u64) -> EncodeMetadata {
-        let mut comments = Vec::new();
-        for (key, values) in self.comments_by_key {
-            for value in values {
-                comments.push(VorbisComment {
-                    key: key.clone(),
-                    value,
-                });
+        let mut vorbis_comment = self.authoritative_vorbis_comment;
+        let authoritative_vorbis_comment = vorbis_comment.is_some();
+        if vorbis_comment.is_none() && !self.comments_by_key.is_empty() {
+            let mut entries = Vec::new();
+            for (key, values) in self.comments_by_key {
+                for value in values {
+                    entries.push(raw_vorbis_comment_entry(&key, &value));
+                }
             }
+            vorbis_comment = Some(VorbisCommentBlock::new(
+                format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                entries,
+            ));
         }
 
         EncodeMetadata {
-            comments,
+            vorbis_comment,
+            authoritative_vorbis_comment,
             cuesheet: normalize_cuesheet(self.cue_points, total_samples),
             channel_mask: None,
             channel_layout_provenance: false,
@@ -489,6 +595,16 @@ impl MetadataDraft {
             offset += 24;
         }
     }
+
+    fn ingest_fxvc_chunk(&mut self, payload: &[u8]) -> crate::error::Result<()> {
+        if self.authoritative_vorbis_comment.is_some() {
+            return Err(crate::error::Error::InvalidWav(
+                "duplicate fxvc chunk is not allowed",
+            ));
+        }
+        self.authoritative_vorbis_comment = Some(VorbisCommentBlock::from_fxvc_payload(payload)?);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -513,6 +629,19 @@ fn normalize_info_entry(chunk_id: [u8; 4], payload: &[u8]) -> Option<(String, St
 
     let value = decode_text_payload(payload)?;
     Some((key.to_owned(), value))
+}
+
+fn raw_vorbis_comment_entry(key: &str, value: &str) -> String {
+    format!("{key}={value}")
+}
+
+fn split_vorbis_comment_entry(entry: &str) -> Option<(&str, &str)> {
+    let (key, value) = entry.split_once('=')?;
+    if key.is_empty() {
+        None
+    } else {
+        Some((key, value))
+    }
 }
 
 fn decode_text_payload(payload: &[u8]) -> Option<String> {
@@ -612,6 +741,43 @@ fn read_u32_le(bytes: &[u8], cursor: &mut usize) -> Option<u32> {
     Some(value)
 }
 
+fn read_u32_le_strict(
+    bytes: &[u8],
+    cursor: &mut usize,
+    truncated_message: &'static str,
+) -> crate::error::Result<u32> {
+    read_u32_le(bytes, cursor).ok_or(crate::error::Error::InvalidWav(truncated_message))
+}
+
+fn read_utf8_entry(bytes: &[u8], cursor: &mut usize, len: usize) -> Option<String> {
+    let end = cursor.checked_add(len)?;
+    if end > bytes.len() {
+        return None;
+    }
+    let entry = String::from_utf8(bytes[*cursor..end].to_vec()).ok()?;
+    *cursor = end;
+    Some(entry)
+}
+
+fn read_utf8_entry_strict(
+    bytes: &[u8],
+    cursor: &mut usize,
+    len: usize,
+    truncated_message: &'static str,
+    utf8_message: &'static str,
+) -> crate::error::Result<String> {
+    let end = cursor
+        .checked_add(len)
+        .ok_or(crate::error::Error::InvalidWav(truncated_message))?;
+    if end > bytes.len() {
+        return Err(crate::error::Error::InvalidWav(truncated_message));
+    }
+    let entry = String::from_utf8(bytes[*cursor..end].to_vec())
+        .map_err(|_| crate::error::Error::InvalidWav(utf8_message))?;
+    *cursor = end;
+    Ok(entry)
+}
+
 fn append_u32_le(buffer: &mut Vec<u8>, value: u32) {
     buffer.extend_from_slice(&value.to_le_bytes());
 }
@@ -628,9 +794,9 @@ fn append_chunk_payload(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FlacMetadataBlock, MetadataDraft,
+        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FXVC_CHUNK_ID, FlacMetadataBlock, MetadataDraft,
         SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, SeekPoint, WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
-        WavMetadata, validate_seektable_payload,
+        VorbisCommentBlock, WavMetadata, validate_seektable_payload,
     };
 
     fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
@@ -700,6 +866,19 @@ mod tests {
         payload
     }
 
+    fn fxvc_payload(vendor: &str, entries: &[&str]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+        payload.extend_from_slice(vendor.as_bytes());
+        payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for entry in entries {
+            payload.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+            payload.extend_from_slice(entry.as_bytes());
+        }
+        payload
+    }
+
     fn seektable_payload(entries: &[(u64, u64, u16)]) -> Vec<u8> {
         SeekPoint::payload(
             &entries
@@ -724,18 +903,15 @@ mod tests {
                 (*b"IZZZ", b"ignored"),
                 (*b"IART", b"Guest Artist"),
             ]),
-        );
+        )
+        .unwrap();
 
         let blocks = draft.finish(8_000).flac_blocks();
         let FlacMetadataBlock::VorbisComment(block) = &blocks[0] else {
             panic!("expected vorbis comments");
         };
 
-        let rendered: Vec<String> = block
-            .comments
-            .iter()
-            .map(|comment| format!("{}={}", comment.key, comment.value))
-            .collect();
+        let rendered = block.entries.clone();
         assert_eq!(
             rendered,
             vec![
@@ -752,7 +928,8 @@ mod tests {
         draft.ingest_chunk(
             *b"LIST",
             &info_list_chunk(&[(*b"IART", &[0xff, 0xfe, 0xfd])]),
-        );
+        )
+        .unwrap();
 
         assert!(draft.finish(8_000).flac_blocks().is_empty());
     }
@@ -760,7 +937,8 @@ mod tests {
     #[test]
     fn normalizes_representable_cue_points_into_cuesheet_tracks() {
         let mut draft = MetadataDraft::default();
-        draft.ingest_chunk(*b"cue ", &cue_chunk(&[4_000, 1_000, 4_000]));
+        draft.ingest_chunk(*b"cue ", &cue_chunk(&[4_000, 1_000, 4_000]))
+            .unwrap();
 
         let blocks = draft.finish(6_000).flac_blocks();
         let FlacMetadataBlock::CueSheet(cuesheet) = &blocks[0] else {
@@ -773,7 +951,7 @@ mod tests {
     #[test]
     fn drops_cue_points_that_cannot_be_represented() {
         let mut draft = MetadataDraft::default();
-        draft.ingest_chunk(*b"cue ", &cue_chunk(&[4_000]));
+        draft.ingest_chunk(*b"cue ", &cue_chunk(&[4_000])).unwrap();
 
         assert!(draft.finish(4_000).flac_blocks().is_empty());
     }
@@ -800,6 +978,85 @@ mod tests {
         assert!(payload.windows(4).any(|window| window == b"IART"));
         assert!(payload.windows(4).any(|window| window == b"INAM"));
         assert!(!payload.windows(4).any(|window| window == b"ICMT"));
+    }
+
+    #[test]
+    fn emits_exact_vorbis_comment_block_from_authoritative_fxvc_chunk() {
+        let mut draft = MetadataDraft::default();
+        draft
+            .ingest_chunk(
+                FXVC_CHUNK_ID,
+                &fxvc_payload(
+                    "foreign encoder",
+                    &["ARTIST=Exact Artist", "TITLE=First", "TITLE=Second"],
+                ),
+            )
+            .unwrap();
+        draft
+            .ingest_chunk(*b"LIST", &info_list_chunk(&[(*b"INAM", b"ignored")]))
+            .unwrap();
+
+        let blocks = draft.finish(8_000).flac_blocks();
+        let FlacMetadataBlock::VorbisComment(block) = &blocks[0] else {
+            panic!("expected vorbis comments");
+        };
+
+        assert_eq!(block.vendor, "foreign encoder");
+        assert_eq!(
+            block.entries,
+            vec![
+                "ARTIST=Exact Artist".to_string(),
+                "TITLE=First".to_string(),
+                "TITLE=Second".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_fxvc_chunks() {
+        let mut draft = MetadataDraft::default();
+        draft
+            .ingest_chunk(FXVC_CHUNK_ID, &fxvc_payload("encoder", &["TITLE=One"]))
+            .unwrap();
+        let error = draft
+            .ingest_chunk(FXVC_CHUNK_ID, &fxvc_payload("encoder", &["TITLE=Two"]))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("duplicate fxvc chunk"));
+    }
+
+    #[test]
+    fn rejects_fxvc_payload_with_trailing_bytes() {
+        let mut payload = fxvc_payload("encoder", &["TITLE=One"]);
+        payload.push(0);
+        let error = VorbisCommentBlock::from_fxvc_payload(&payload).unwrap_err();
+
+        assert!(error.to_string().contains("fxvc payload has trailing bytes"));
+    }
+
+    #[test]
+    fn restores_fxvc_chunk_payload_for_exact_round_trip() {
+        let mut metadata = WavMetadata::default();
+        metadata
+            .ingest_flac_metadata_block(
+                4,
+                &vorbis_comment_payload(&[("artist", "Example Artist"), ("TITLE", "Exact Title")]),
+                8_000,
+                1,
+            )
+            .unwrap();
+
+        let payload = metadata.fxvc_chunk_payload().unwrap();
+        let restored = VorbisCommentBlock::from_fxvc_payload(&payload).unwrap();
+
+        assert_eq!(restored.vendor, "");
+        assert_eq!(
+            restored.entries,
+            vec![
+                "artist=Example Artist".to_string(),
+                "TITLE=Exact Title".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -838,7 +1095,9 @@ mod tests {
     #[test]
     fn emits_channel_mask_comment_for_non_ordinary_layouts() {
         let mut draft = MetadataDraft::default();
-        draft.ingest_chunk(*b"LIST", &info_list_chunk(&[(*b"INAM", b"Example Title")]));
+        draft
+            .ingest_chunk(*b"LIST", &info_list_chunk(&[(*b"INAM", b"Example Title")]))
+            .unwrap();
         let mut metadata = draft.finish(4_096);
         metadata.set_channel_mask(4, 0x0001_2104);
 
@@ -847,11 +1106,7 @@ mod tests {
             panic!("expected vorbis comments");
         };
 
-        let rendered: Vec<String> = block
-            .comments
-            .iter()
-            .map(|comment| format!("{}={}", comment.key, comment.value))
-            .collect();
+        let rendered = block.entries.clone();
         assert!(rendered.contains(&"TITLE=Example Title".to_string()));
         assert!(rendered.contains(&format!(
             "{WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY}=0x00012104"

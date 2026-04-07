@@ -789,8 +789,9 @@ mod tests {
             chunk.extend_from_slice(b"Artist");
             chunk
         };
-        draft.ingest_chunk(*b"LIST", &info_chunk);
-        draft.ingest_chunk(
+        draft.ingest_chunk(*b"LIST", &info_chunk).unwrap();
+        draft
+            .ingest_chunk(
             *b"cue ",
             &[
                 1, 0, 0, 0, // cue count
@@ -800,7 +801,8 @@ mod tests {
                 0, 0, 0, 0, // block start
                 16, 0, 0, 0, // sample offset
             ],
-        );
+        )
+        .unwrap();
         let metadata_blocks = draft.finish(64).flac_blocks();
         let stream_info = StreamInfo::new(44_100, 2, 16, 64, [0u8; 16]);
         let writer = Cursor::new(Vec::new());
@@ -822,13 +824,15 @@ mod tests {
     #[test]
     fn writer_uses_only_native_metadata_block_types_for_preserved_wav_metadata() {
         let mut draft = MetadataDraft::default();
-        draft.ingest_chunk(
+        draft
+            .ingest_chunk(
             *b"LIST",
             &[
                 b'I', b'N', b'F', b'O', b'I', b'N', b'A', b'M', 5, 0, 0, 0, b'T', b'i', b't', b'l',
                 b'e', 0,
             ],
-        );
+        )
+        .unwrap();
         let blocks = draft.finish(32).flac_blocks();
 
         assert!(matches!(&blocks[..], [FlacMetadataBlock::VorbisComment(_)]));
