@@ -1,12 +1,10 @@
 # flacx-cli
 
-Command-line WAV/FLAC conversion powered by the `flacx` library crate.
+`flacx-cli` is the workspace command-line interface for WAV/FLAC conversion.
+It uses the same encode/decode pipeline as the `flacx` library crate and is
+kept separate from the publishable library package.
 
-`flacx-cli` is the CLI crate in this workspace. It is a thin adapter over the
-same encode/decode pipeline exposed by the library crate and stays separate from the
-publishable library package.
-
-## Run locally
+## Run it locally
 
 Build the release binary from the workspace root:
 
@@ -14,59 +12,121 @@ Build the release binary from the workspace root:
 cargo build --release
 ```
 
-Then run `flacx` directly from `target/release/` (or after adding that directory to your `PATH`):
+Then run the binary directly from `target/release/`:
 
 ```bash
-flacx encode input.wav -o output.flac --level 8 --threads 4
-flacx encode album-dir -o encoded-album --depth 0
-flacx decode input.flac -o output.wav --threads 4
-flacx decode encoded-album -o decoded-album --depth 0
+target/release/flacx --help
 ```
 
-## Command shape
+Or invoke it through Cargo while you iterate:
 
-- `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
-- `flacx decode <input> [-o <output-or-dir>] [--depth <depth>]`
-- encode-only flags:
-  - `--output` / `-o`
-  - `--level`
-  - `--threads`
-  - `--block-size`
-  - `--depth`
-- decode-only flags:
-  - `--output` / `-o`
-  - `--threads`
-  - `--depth`
+```bash
+cargo run -p flacx-cli --release -- --help
+```
 
-Encode output behavior:
+## Command model
 
-- single-file input with no `-o` writes a sibling `.flac` next to the source WAV
-- single-file input with `-o <path>` writes exactly to that file path
-- folder input with no `-o` writes `.flac` siblings next to each discovered WAV
-- folder input with `-o <dir>` writes under the destination root while preserving relative subpaths
-- `--depth` defaults to `1`, affects only folder input, and uses `0` for unlimited traversal
-- encode `--threads` defaults to `8`
+The CLI exposes two top-level commands:
 
-Decode output behavior:
+- `flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <samples>] [--depth <n>]`
+- `flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--strict-channel-mask-provenance] [--depth <n>]`
 
-- single-file input with no `-o` writes a sibling `.wav` next to the source FLAC
-- single-file input with `-o <path>` writes exactly to that file path
-- folder input with no `-o` writes `.wav` siblings next to each discovered FLAC
-- folder input with `-o <dir>` writes under the destination root while preserving relative subpaths
-- `--depth` defaults to `1`, affects only folder input, and uses `0` for unlimited traversal
+The input can be either a single file or a directory tree.
+Directory traversal is controlled by `--depth`.
+
+## Encode
+
+### Flags
+
+- `-o, --output <path>`
+- `--level <0-8>`
+- `--threads <n>`
+- `--block-size <samples>`
+- `--depth <n>`
+
+### Defaults and behavior
+
+- `--level` defaults to `8`.
+- `--threads` defaults to `8`.
+- `--block-size` is optional; when omitted, the block size comes from the selected compression level.
+- `--depth` defaults to `1`.
+- `--depth` only affects directory input.
+- Use `--depth 0` for unlimited recursive traversal.
+- Single-file input with no `-o` writes a sibling `.flac` next to the source WAV.
+- Single-file input with `-o <path>` writes to that exact file path.
+- Directory input with no `-o` writes `.flac` siblings next to each discovered WAV.
+- Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
+- For single-file input, `-o` must be a file path.
+- For directory input, `-o` must be a directory path.
+
+### Examples
+
+```bash
+flacx encode input.wav
+flacx encode input.wav -o output.flac --level 8 --threads 4
+flacx encode album-dir -o encoded-album --depth 0
+```
+
+## Decode
+
+### Flags
+
+- `-o, --output <path>`
+- `--threads <n>`
+- `--strict-channel-mask-provenance`
+- `--depth <n>`
+
+### Defaults and behavior
+
+- `--threads` is optional.
+- When omitted, the decode path uses the library default thread count.
+- `--strict-channel-mask-provenance` is off by default.
+- `--depth` defaults to `1`.
+- `--depth` only affects directory input.
+- Use `--depth 0` for unlimited recursive traversal.
+- Single-file input with no `-o` writes a sibling `.wav` next to the source FLAC.
+- Single-file input with `-o <path>` writes to that exact file path.
+- Directory input with no `-o` writes `.wav` siblings next to each discovered FLAC.
+- Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
+- `--strict-channel-mask-provenance` asks decode to require FLACX provenance before restoring non-ordinary channel masks.
+- For single-file input, `-o` must be a file path.
+- For directory input, `-o` must be a directory path.
+
+### Examples
+
+```bash
+flacx decode input.flac
+flacx decode input.flac -o output.wav --threads 4
+flacx decode encoded-album -o decoded-album --depth 0
+flacx decode input.flac --strict-channel-mask-provenance
+```
+
+## Output layout summary
+
+| Input shape | `-o` omitted | `-o <file>` | `-o <dir>` |
+| --- | --- | --- | --- |
+| Single file | sibling output next to the source file | exact file path | rejected |
+| Directory | sibling outputs next to each discovered file | rejected | preserve relative subpaths under the destination root |
 
 ## Progress display
 
-- interactive terminals show a live progress line during encode and decode
-- redirected or non-interactive runs do not emit progress UI
-- progress comes from the library progress hooks, while the CLI owns rendering
-- single-file runs show filename, percent, elapsed time, ETA, and rate
-- folder runs show overall batch progress and per-file progress on separate live lines
-- batch progress totals use exact samples processed across the full planned worklist
-- ETA and Rate stay in a short warm-up state until two advancing updates and at least 250 ms of elapsed progress time have been observed
+The CLI renders progress only when standard error is attached to an interactive
+terminal.
 
-## Workspace relationship
+- interactive terminals show live encode/decode progress lines
+- redirected or non-interactive runs suppress the progress UI
+- progress data comes from the library progress hooks; the CLI only renders it
+- single-file runs show the current filename, percent, elapsed time, ETA, and rate
+- directory runs show overall batch progress and per-file progress on separate live lines
+- batch progress totals use exact sample counts across the full planned worklist
+- ETA and rate remain in a short warm-up state until two advancing updates and at least 250 ms of elapsed progress time have been observed
 
-- `crates/flacx` provides the reusable Rust API
-- `crates/flacx-cli` provides the end-user CLI
-- both use the same narrow encode/decode product surface and follow the same workspace version
+## Relationship to the library crate
+
+- `crates/flacx` provides the reusable Rust API.
+- `crates/flacx-cli` provides the end-user CLI.
+- both crates share the same workspace version and the same encode/decode pipeline
+- the CLI is a thin adapter over the library, not a separate publishing target
+
+For the library API guide, see `crates/flacx/README.md`.
+For workspace-level context, see the repository root `README.md`.

@@ -1,3 +1,9 @@
+//! WAV-to-FLAC encoding primitives used by the `flacx` crate.
+//!
+//! The main façade is [`Encoder`]. Pair it with [`EncoderConfig`] or
+//! [`Encoder::builder`] to choose the compression level, thread count, and
+//! optional block sizing strategy before encoding.
+
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -29,56 +35,96 @@ struct EncodedChunk {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Summary of the FLAC stream produced by an encode operation.
+///
+/// The values mirror the stream information written into the output file.
 pub struct EncodeSummary {
+    /// Number of FLAC frames written to the output stream.
     pub frame_count: usize,
+    /// Total input samples consumed by the encoder.
     pub total_samples: u64,
+    /// Maximum block size recorded in the output stream.
     pub block_size: u16,
+    /// Smallest encoded frame size in bytes.
     pub min_frame_size: u32,
+    /// Largest encoded frame size in bytes.
     pub max_frame_size: u32,
+    /// Smallest encoded block size in samples.
     pub min_block_size: u16,
+    /// Largest encoded block size in samples.
     pub max_block_size: u16,
+    /// Sample rate of the encoded stream.
     pub sample_rate: u32,
+    /// Number of channels in the encoded stream.
     pub channels: u8,
+    /// Bits per sample recorded in the encoded stream.
     pub bits_per_sample: u8,
 }
 
 /// Primary library façade for WAV-to-FLAC conversion.
+///
+/// Construct an encoder from [`EncoderConfig`] and call one of the encode
+/// methods depending on your input shape:
+///
+/// - [`Encoder::encode`] for generic `Read + Seek` sources
+/// - [`Encoder::encode_file`] for file paths
+/// - [`Encoder::encode_bytes`] for in-memory input
+///
+/// The encoder itself is cheap to clone and holds only its configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Encoder {
     config: EncoderConfig,
 }
 
 impl Encoder {
+    /// Create a builder initialized from [`EncoderConfig::builder`].
     #[must_use]
     pub fn builder() -> EncoderBuilder {
         EncoderConfig::builder()
     }
 
+    /// Construct an encoder from a configuration value.
     #[must_use]
     pub fn new(config: EncoderConfig) -> Self {
         Self { config }
     }
 
+    /// Return a clone of the configuration currently stored in the encoder.
     #[must_use]
     pub fn config(&self) -> EncoderConfig {
         self.config.clone()
     }
 
+    /// Return a new encoder with a different compression level preset.
     #[must_use]
     pub fn with_level(self, level: crate::level::Level) -> Self {
         Self::new(self.config.with_level(level))
     }
 
+    /// Return a new encoder with a different worker thread count.
     #[must_use]
     pub fn with_threads(self, threads: usize) -> Self {
         Self::new(self.config.with_threads(threads))
     }
 
+    /// Return a new encoder with a different fixed block size.
     #[must_use]
     pub fn with_block_size(self, block_size: u16) -> Self {
         Self::new(self.config.with_block_size(block_size))
     }
 
+    /// Encode a WAV reader into FLAC output.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::io::Cursor;
+    /// use flacx::Encoder;
+    ///
+    /// let input = Cursor::new(std::fs::read("input.wav").unwrap());
+    /// let mut output = Cursor::new(Vec::new());
+    /// Encoder::default().encode(input, &mut output).unwrap();
+    /// ```
     pub fn encode<R, W>(&self, input: R, output: W) -> Result<EncodeSummary>
     where
         R: Read + Seek,
@@ -90,6 +136,27 @@ impl Encoder {
     }
 
     #[cfg(feature = "progress")]
+    /// Encode a WAV reader into FLAC output while reporting progress.
+    ///
+    /// The callback receives a [`ProgressSnapshot`] after each frame is
+    /// written.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "progress")]
+    /// # {
+    /// use std::io::Cursor;
+    /// use flacx::{Encoder, ProgressSnapshot};
+    ///
+    /// let input = Cursor::new(std::fs::read("input.wav").unwrap());
+    /// let mut output = Cursor::new(Vec::new());
+    /// Encoder::default().encode_with_progress(input, &mut output, |snapshot: ProgressSnapshot| {
+    ///     println!("{} / {}", snapshot.processed_samples, snapshot.total_samples);
+    ///     Ok(())
+    /// }).unwrap();
+    /// # }
+    /// ```
     pub fn encode_with_progress<R, W, F>(
         &self,
         input: R,
@@ -106,6 +173,17 @@ impl Encoder {
         self.encode_wav_data(input, output, &mut progress)
     }
 
+    /// Encode from one file path to another.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use flacx::Encoder;
+    ///
+    /// Encoder::default()
+    ///     .encode_file("input.wav", "output.flac")
+    ///     .unwrap();
+    /// ```
     pub fn encode_file<P, Q>(&self, input_path: P, output_path: Q) -> Result<EncodeSummary>
     where
         P: AsRef<Path>,
@@ -115,6 +193,23 @@ impl Encoder {
     }
 
     #[cfg(feature = "progress")]
+    /// Encode from one file path to another while reporting progress.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "progress")]
+    /// # {
+    /// use flacx::{Encoder, ProgressSnapshot};
+    ///
+    /// Encoder::default()
+    ///     .encode_file_with_progress("input.wav", "output.flac", |snapshot: ProgressSnapshot| {
+    ///         println!("{} / {} frames", snapshot.completed_frames, snapshot.total_frames);
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    /// # }
+    /// ```
     pub fn encode_file_with_progress<P, Q, F>(
         &self,
         input_path: P,
@@ -133,6 +228,17 @@ impl Encoder {
         )
     }
 
+    /// Encode an in-memory WAV buffer and return the FLAC bytes.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use flacx::Encoder;
+    ///
+    /// let wav_bytes = std::fs::read("input.wav").unwrap();
+    /// let flac_bytes = Encoder::default().encode_bytes(&wav_bytes).unwrap();
+    /// assert!(!flac_bytes.is_empty());
+    /// ```
     pub fn encode_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
         let mut output = Cursor::new(Vec::new());
         self.encode(Cursor::new(input), &mut output)?;
@@ -291,6 +397,15 @@ impl Encoder {
     }
 }
 
+/// Convenience wrapper around the default [`Encoder`] for file-path input.
+///
+/// # Example
+///
+/// ```no_run
+/// use flacx::encode_file;
+///
+/// encode_file("input.wav", "output.flac").unwrap();
+/// ```
 pub fn encode_file<P, Q>(input_path: P, output_path: Q) -> Result<EncodeSummary>
 where
     P: AsRef<Path>,
@@ -299,6 +414,17 @@ where
     Encoder::default().encode_file(input_path, output_path)
 }
 
+/// Convenience wrapper around the default [`Encoder`] for in-memory input.
+///
+/// # Example
+///
+/// ```no_run
+/// use flacx::encode_bytes;
+///
+/// let wav_bytes = std::fs::read("input.wav").unwrap();
+/// let flac_bytes = encode_bytes(&wav_bytes).unwrap();
+/// assert!(!flac_bytes.is_empty());
+/// ```
 pub fn encode_bytes(input: &[u8]) -> Result<Vec<u8>> {
     Encoder::default().encode_bytes(input)
 }

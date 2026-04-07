@@ -2,23 +2,29 @@
 
 High-performance WAV/FLAC conversion in Rust.
 
-The repository is now a Cargo workspace with a publishable **library crate**
-and a separate **CLI crate** built on the same encode/decode pipeline.
+This repository is a Cargo workspace with two user-facing crates:
+
+- `crates/flacx` — the publishable library crate
+- `crates/flacx-cli` — the CLI crate built on the same pipeline, but not published
+
+The workspace also includes maintainer docs and local development aids. Public
+documentation stays focused on the supported library and CLI workflows rather
+than ignored local benchmark fixtures.
 
 ## Workspace layout
 
 ```text
 .
 ├─ crates/
-│  ├─ flacx/      # publishable library crate
-│  └─ flacx-cli/  # non-published CLI crate
-├─ test-wavs/
-└─ benchmarks/
+│  ├─ flacx/       # publishable library crate
+│  └─ flacx-cli/   # workspace CLI crate
+├─ docs/           # maintainer documentation
+└─ benchmarks/     # ignored local benchmark tooling
 ```
 
 ## Quick start
 
-### Library
+### Library crate
 
 Add the library crate to your project:
 
@@ -27,7 +33,7 @@ Add the library crate to your project:
 flacx = "0.6.0"
 ```
 
-Then encode WAV to FLAC from Rust:
+Encode WAV to FLAC from Rust:
 
 ```rust
 use flacx::{Encoder, EncoderConfig, level::Level};
@@ -42,7 +48,7 @@ Encoder::new(config)
     .unwrap();
 ```
 
-And decode FLAC back to WAV:
+Decode FLAC back to WAV:
 
 ```rust
 use flacx::Decoder;
@@ -52,9 +58,10 @@ Decoder::default()
     .unwrap();
 ```
 
-See [`crates/flacx/README.md`](crates/flacx/README.md) for the crate-focused usage guide.
+For the complete library user guide, see
+[`crates/flacx/README.md`](crates/flacx/README.md).
 
-### CLI
+### CLI crate
 
 Build the release binary from the workspace root:
 
@@ -62,7 +69,8 @@ Build the release binary from the workspace root:
 cargo build --release
 ```
 
-Then run `flacx` directly from `target/release/` (or after adding that directory to your `PATH`):
+Run `flacx` from `target/release/` or after adding that directory to your
+`PATH`:
 
 ```bash
 flacx encode input.wav -o output.flac --level 8 --threads 4
@@ -71,72 +79,63 @@ flacx decode input.flac -o output.wav --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
 ```
 
-Supported CLI shape:
+The command surface is:
 
-- `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
-- `flacx decode <input> [-o <output-or-dir>] [--depth <depth>]`
-- encode-only flags:
-  - `--output`
-  - `--level`
-  - `--threads`
-  - `--block-size`
-  - `--depth`
-- decode-only flags:
-  - `--output`
-  - `--threads`
-  - `--depth`
+```text
+flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <n>] [--depth <n>]
+flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--depth <n>] [--strict-channel-mask-provenance]
+```
 
-Encode/decode defaults and folder behavior:
+Common behavior:
 
-- single-file input with no `-o` writes a sibling `.flac` next to the source WAV
-- folder input with no `-o` writes `.flac` siblings next to each discovered WAV
-- folder input with `-o <dir>` preserves relative subpaths under the destination root
-- decode single-file input with no `-o` writes a sibling `.wav` next to the source FLAC
-- decode folder input with no `-o` writes `.wav` siblings next to each discovered FLAC
-- decode folder input with `-o <dir>` preserves relative subpaths under the destination root
-- `--depth` defaults to `1`, affects directory input only, and uses `0` for unlimited traversal
-- encode `--threads` defaults to `8`
+- single-file input with no `-o` writes a sibling output file next to the
+  source file
+- directory input with no `-o` writes sibling outputs next to each discovered
+  file
+- directory input with `-o <dir>` preserves relative subpaths under the
+  destination root
+- `--depth` applies only to directory input and uses `0` for unlimited
+  traversal
+- encode defaults to `--threads 8`
+- decode defaults to the library's decode configuration when `--threads` is
+  omitted
+- interactive terminals show live progress for both encode and decode
 
-Progress display:
-
-- interactive terminals show a live progress line during encode and decode
-- redirected or non-interactive runs do not emit progress UI
-- single-file runs show the current filename, elapsed time, ETA, and rate
-- folder runs show overall batch progress and per-file progress on separate live lines
-- batch progress uses exact samples processed across the full planned worklist
-
-See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for CLI usage details.
+See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for the full CLI
+guide and flag behavior.
 
 ## Workspace commands
 
 ```bash
 cargo build --workspace
 cargo test --workspace
-flacx --help
-cargo run -p flacx --release --example benchmark
+cargo doc --workspace --no-deps
+cargo run -p flacx-cli -- --help
 ```
 
 ## Performance note
 
-The library and CLI still use the same tuned encode engine, and now add a
-matching narrow decode path. The `test-wavs/` benchmark contract remains the
-regression baseline for throughput and encoded size on the encode side.
+The library and CLI share the same tuned encode/decode pipeline. Local benchmark
+inputs and other ignored development fixtures live outside the published
+documentation surface, so normal users do not need them to build or use the
+workspace.
 
 ## Releases
 
 Tagged releases use `v*` tags:
 
-- final tags publish the `flacx` library crate to crates.io and create a
-  GitHub release
+- final tags publish the `flacx` library crate to crates.io and create a GitHub
+  release
 - prerelease tags such as `v1.2.3-rc1` create a GitHub prerelease only
-- GitHub release pages rely on GitHub's built-in tagged source archive, so no
-  binaries or extra source bundles are attached
+- GitHub release pages rely on the built-in tagged source archive; no binaries,
+  installers, or separate CLI bundles are attached
 
 See [`docs/releasing.md`](docs/releasing.md) for the release workflow details,
-required crates.io secret setup, and manual recovery notes.
+required secret setup, and manual recovery notes.
 
-## Documentation
+## Documentation map
 
-- [`crates/flacx/README.md`](crates/flacx/README.md) — library crate usage
-- [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) — CLI crate usage
-- [`docs/releasing.md`](docs/releasing.md) — tag-driven release automation
+- [`crates/flacx/README.md`](crates/flacx/README.md) — library user guide and
+  API overview
+- [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) — CLI user guide
+- [`docs/releasing.md`](docs/releasing.md) — maintainer release workflow
