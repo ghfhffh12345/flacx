@@ -387,7 +387,7 @@ impl MetadataDraft {
             }
 
             offset += chunk_size;
-            if chunk_size % 2 != 0 {
+            if !chunk_size.is_multiple_of(2) {
                 if offset == payload.len() {
                     return;
                 }
@@ -551,7 +551,7 @@ fn append_chunk_payload(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
     buffer.extend_from_slice(id);
     append_u32_le(buffer, payload.len() as u32);
     buffer.extend_from_slice(payload);
-    if payload.len() % 2 != 0 {
+    if !payload.len().is_multiple_of(2) {
         buffer.push(0);
     }
 }

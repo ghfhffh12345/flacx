@@ -13,6 +13,13 @@ clap.workspace = true
 flacx = { path = "../flacx", features = ["progress"] }
 walkdir.workspace = true
 
+[[bench]]
+name = "directory_parity"
+harness = false
+
+[dev-dependencies]
+criterion.workspace = true
+
 [[bin]]
 name = "flacx"
 path = "src/main.rs"

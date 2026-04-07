@@ -431,7 +431,7 @@ pub fn wav_info_entries(wav_bytes: &[u8]) -> Vec<([u8; 4], String)> {
                 let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
                 entries.push((info_id, String::from_utf8_lossy(&raw[..end]).into_owned()));
                 offset += size;
-                if size % 2 != 0 {
+                if !size.is_multiple_of(2) {
                     offset += 1;
                 }
             }
@@ -665,7 +665,7 @@ fn append_chunk(bytes: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
     bytes.extend_from_slice(id);
     bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     bytes.extend_from_slice(payload);
-    if payload.len() % 2 != 0 {
+    if !payload.len().is_multiple_of(2) {
         bytes.push(0);
     }
 }
@@ -701,7 +701,7 @@ fn wav_chunks(wav_bytes: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
         offset += 8;
         chunks.push((id, wav_bytes[offset..offset + size].to_vec()));
         offset += size;
-        if size % 2 != 0 {
+        if !size.is_multiple_of(2) {
             offset += 1;
         }
     }

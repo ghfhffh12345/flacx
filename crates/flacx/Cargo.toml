@@ -16,3 +16,10 @@ progress = []
 
 [dependencies]
 bitstream-io.workspace = true
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[dev-dependencies]
+criterion.workspace = true

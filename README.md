@@ -8,8 +8,7 @@ This repository is a Cargo workspace with two user-facing crates:
 - `crates/flacx-cli` — the CLI crate built on the same pipeline, but not published
 
 The workspace also includes maintainer docs and local development aids. Public
-documentation stays focused on the supported library and CLI workflows rather
-than ignored local benchmark fixtures.
+documentation stays focused on the supported library and CLI workflows.
 
 ## Workspace layout
 
@@ -18,8 +17,7 @@ than ignored local benchmark fixtures.
 ├─ crates/
 │  ├─ flacx/       # publishable library crate
 │  └─ flacx-cli/   # workspace CLI crate
-├─ docs/           # maintainer documentation
-└─ benchmarks/     # ignored local benchmark tooling
+└─ docs/           # maintainer documentation
 ```
 
 ## Quick start
@@ -115,10 +113,9 @@ cargo run -p flacx-cli -- --help
 
 ## Performance note
 
-The library and CLI share the same tuned encode/decode pipeline. Local benchmark
-inputs and other ignored development fixtures live outside the published
-documentation surface, so normal users do not need them to build or use the
-workspace.
+The library and CLI share the same tuned encode/decode pipeline. Benchmarks live
+under each crate's `benches/` directory and run with `cargo bench`; normal users
+do not need that workflow to build or use the workspace.
 
 ## Releases
 

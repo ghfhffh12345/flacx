@@ -57,7 +57,7 @@ pub(crate) fn write_wav_with_metadata_and_md5<W: Write>(
             spec.bits_per_sample
         )));
     }
-    if samples.len() % usize::from(spec.channels) != 0 {
+    if !samples.len().is_multiple_of(usize::from(spec.channels)) {
         return Err(Error::Decode(
             "decoded samples are not aligned to the channel count".into(),
         ));
@@ -159,7 +159,7 @@ fn append_wav_chunk(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
     buffer.extend_from_slice(id);
     buffer.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     buffer.extend_from_slice(payload);
-    if payload.len() % 2 != 0 {
+    if !payload.len().is_multiple_of(2) {
         buffer.push(0);
     }
 }
