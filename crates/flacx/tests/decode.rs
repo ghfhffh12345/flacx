@@ -9,10 +9,10 @@ mod support;
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
-    cuesheet_block, flac_frames, info_list_chunk, parse_first_flac_frame_header, parse_wav_format,
-    pcm_wav_bytes, replace_flac_optional_metadata, rewrite_streaminfo_md5, sample_fixture,
-    streaminfo_md5, truncate_bytes, unique_temp_path, vorbis_comment_block, wav_cue_points,
-    wav_info_entries, wav_with_chunks,
+    cuesheet_block, extensible_pcm_wav_bytes, flac_frames, info_list_chunk, ordinary_channel_mask,
+    parse_first_flac_frame_header, parse_wav_format, pcm_wav_bytes, replace_flac_optional_metadata,
+    rewrite_streaminfo_md5, sample_fixture, streaminfo_md5, truncate_bytes, unique_temp_path,
+    vorbis_comment_block, wav_cue_points, wav_info_entries, wav_with_chunks,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -446,4 +446,139 @@ fn restored_metadata_output_is_stable_across_thread_counts() {
     let multi_threaded = decode_bytes_with_threads(&flac, 4);
 
     assert_eq!(single_threaded, multi_threaded);
+}
+
+#[test]
+fn restores_non_ordinary_channel_mask_from_case_insensitive_padded_hex_comment() {
+    let wav = extensible_pcm_wav_bytes(
+        16,
+        16,
+        4,
+        48_000,
+        ordinary_channel_mask(4).unwrap(),
+        &sample_fixture(4, 2_048),
+    );
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[vorbis_comment_block(&[(
+            "waveformatextensible_channel_mask",
+            "0X00012104",
+        )])],
+    );
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+
+    assert_eq!(parse_wav_format(&decoded).channel_mask, Some(0x0001_2104));
+}
+
+#[test]
+fn restores_zero_channel_mask_from_rfc_comment() {
+    let wav = extensible_pcm_wav_bytes(
+        16,
+        16,
+        2,
+        44_100,
+        ordinary_channel_mask(2).unwrap(),
+        &sample_fixture(2, 2_048),
+    );
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[vorbis_comment_block(&[(
+            "WAVEFORMATEXTENSIBLE_CHANNEL_MASK",
+            "0x0",
+        )])],
+    );
+
+    let decoded = decode_bytes_with_threads(&flac, 1);
+    let format = parse_wav_format(&decoded);
+
+    assert_eq!(format.format_tag, 0xFFFE);
+    assert_eq!(format.channel_mask, Some(0));
+}
+
+#[test]
+fn rejects_invalid_waveformatextensible_channel_mask_comment() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[vorbis_comment_block(&[(
+            "WAVEFORMATEXTENSIBLE_CHANNEL_MASK",
+            "not-hex",
+        )])],
+    );
+
+    for threads in decode_thread_variants() {
+        let error = decoder_for_threads(threads)
+            .decode_bytes(&flac)
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("WAVEFORMATEXTENSIBLE_CHANNEL_MASK"),
+            "unexpected decode error for threads={threads}: {message}"
+        );
+    }
+}
+
+#[test]
+fn strict_channel_mask_provenance_accepts_flacx_marked_non_ordinary_files() {
+    let wav = extensible_pcm_wav_bytes(16, 16, 4, 48_000, 0x0001_2104, &sample_fixture(4, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let decoded = Decoder::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
+        .decode_bytes(&flac)
+        .unwrap();
+
+    assert_eq!(decoded, wav);
+}
+
+#[test]
+fn strict_channel_mask_provenance_keeps_ordinary_multichannel_fallbacks_compatible() {
+    let wav = extensible_pcm_wav_bytes(
+        16,
+        16,
+        4,
+        48_000,
+        ordinary_channel_mask(4).unwrap(),
+        &sample_fixture(4, 2_048),
+    );
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let decoded = Decoder::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
+        .decode_bytes(&flac)
+        .unwrap();
+    assert_eq!(
+        parse_wav_format(&decoded).channel_mask,
+        ordinary_channel_mask(4)
+    );
+}
+
+#[test]
+fn strict_channel_mask_provenance_rejects_unmarked_non_ordinary_masks() {
+    let wav = extensible_pcm_wav_bytes(
+        16,
+        16,
+        4,
+        48_000,
+        ordinary_channel_mask(4).unwrap(),
+        &sample_fixture(4, 2_048),
+    );
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[vorbis_comment_block(&[(
+            "WAVEFORMATEXTENSIBLE_CHANNEL_MASK",
+            "0x00012104",
+        )])],
+    );
+
+    let error = Decoder::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
+        .decode_bytes(&flac)
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("FLACX_CHANNEL_LAYOUT_PROVENANCE")
+    );
 }

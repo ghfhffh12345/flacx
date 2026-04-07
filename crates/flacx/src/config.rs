@@ -104,6 +104,7 @@ impl EncoderBuilder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeConfig {
     pub threads: usize,
+    pub strict_channel_mask_provenance: bool,
 }
 
 impl Default for DecodeConfig {
@@ -112,6 +113,7 @@ impl Default for DecodeConfig {
             threads: std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1),
+            strict_channel_mask_provenance: false,
         }
     }
 }
@@ -125,6 +127,12 @@ impl DecodeConfig {
     #[must_use]
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_strict_channel_mask_provenance(mut self, strict: bool) -> Self {
+        self.strict_channel_mask_provenance = strict;
         self
     }
 }
@@ -144,6 +152,12 @@ impl DecodeBuilder {
     #[must_use]
     pub fn threads(mut self, threads: usize) -> Self {
         self.config = self.config.with_threads(threads);
+        self
+    }
+
+    #[must_use]
+    pub fn strict_channel_mask_provenance(mut self, strict: bool) -> Self {
+        self.config = self.config.with_strict_channel_mask_provenance(strict);
         self
     }
 
@@ -231,8 +245,16 @@ mod tests {
 
     #[test]
     fn decode_builder_matches_fluent_config() {
-        let built = DecodeConfig::builder().threads(4).build();
+        let built = DecodeConfig::builder()
+            .threads(4)
+            .strict_channel_mask_provenance(true)
+            .build();
 
-        assert_eq!(built, DecodeConfig::default().with_threads(4));
+        assert_eq!(
+            built,
+            DecodeConfig::default()
+                .with_threads(4)
+                .with_strict_channel_mask_provenance(true)
+        );
     }
 }

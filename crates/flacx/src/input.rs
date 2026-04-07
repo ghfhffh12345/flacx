@@ -16,6 +16,7 @@ const PCM_SUBFORMAT_GUID: [u8; 16] = [
     0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, // GUID data4
 ];
 const EXTENSIBLE_FMT_CHUNK_SIZE: u32 = 40;
+const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WavSpec {
@@ -228,10 +229,14 @@ fn read_wav_internal<R: Read + Seek>(
         },
         samples,
     };
+    let mut metadata = layout.metadata;
+    if should_preserve_channel_mask(layout.format.channels, layout.envelope.channel_mask) {
+        metadata.set_channel_mask(layout.format.channels, layout.envelope.channel_mask);
+    }
 
     Ok(EncodeWavData {
         wav,
-        metadata: layout.metadata,
+        metadata,
         streaminfo_md5,
     })
 }
@@ -343,7 +348,7 @@ fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
     } else if format.format_tag == 0xFFFE {
         if !(1..=8).contains(&format.channels) {
             return Err(Error::UnsupportedWav(format!(
-                "WAVEFORMATEXTENSIBLE input only supports ordinary 1..8 channel layouts, found {} channels",
+                "WAVEFORMATEXTENSIBLE input only supports 1..8 channel layouts, found {} channels",
                 format.channels
             )));
         }
@@ -360,27 +365,18 @@ fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
             )));
         }
 
-        let ordinary_mask = ordinary_channel_mask(format.channels).ok_or_else(|| {
-            Error::UnsupportedWav(format!(
-                "no ordinary mask exists for {} channels",
-                format.channels
-            ))
-        })?;
-        let channel_mask = match format.channel_mask {
-            0 => ordinary_mask,
-            mask if mask == ordinary_mask => mask,
-            mask => {
-                return Err(Error::UnsupportedWav(format!(
-                    "non-ordinary channel mask {mask:#010x} is not supported in this pass"
-                )));
-            }
-        };
+        if !is_supported_channel_mask(format.channels, format.channel_mask) {
+            return Err(Error::UnsupportedWav(format!(
+                "channel mask {:#010x} is not supported for {} channels",
+                format.channel_mask, format.channels
+            )));
+        }
 
         PcmEnvelope {
             channels: format.channels,
             valid_bits_per_sample: format.valid_bits_per_sample,
             container_bits_per_sample,
-            channel_mask,
+            channel_mask: format.channel_mask,
         }
     } else {
         return Err(Error::UnsupportedWav(format!(
@@ -398,6 +394,17 @@ fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
     }
 
     Ok(envelope)
+}
+
+fn should_preserve_channel_mask(channels: u16, mask: u32) -> bool {
+    ordinary_channel_mask(channels) != Some(mask)
+}
+
+fn is_supported_channel_mask(channels: u16, mask: u32) -> bool {
+    if mask & !MAX_RFC9639_CHANNEL_MASK != 0 {
+        return false;
+    }
+    mask.count_ones() <= u32::from(channels)
 }
 
 fn decode_samples(data: &[u8], envelope: PcmEnvelope) -> Result<Vec<i32>> {
@@ -597,6 +604,62 @@ mod tests {
         bytes
     }
 
+    fn extensible_pcm_wav_bytes(
+        valid_bits_per_sample: u16,
+        container_bits_per_sample: u16,
+        channels: u16,
+        sample_rate: u32,
+        channel_mask: u32,
+        samples: &[i32],
+    ) -> Vec<u8> {
+        let bytes_per_sample = usize::from(container_bits_per_sample / 8);
+        let block_align = usize::from(channels) * bytes_per_sample;
+        let data_bytes = samples.len() * bytes_per_sample;
+        let riff_size = 4 + (8 + super::EXTENSIBLE_FMT_CHUNK_SIZE as usize) + (8 + data_bytes);
+
+        let mut bytes =
+            Vec::with_capacity(12 + 8 + super::EXTENSIBLE_FMT_CHUNK_SIZE as usize + 8 + data_bytes);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(riff_size as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&super::EXTENSIBLE_FMT_CHUNK_SIZE.to_le_bytes());
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * block_align as u32).to_le_bytes());
+        bytes.extend_from_slice(&(block_align as u16).to_le_bytes());
+        bytes.extend_from_slice(&container_bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(&22u16.to_le_bytes());
+        bytes.extend_from_slice(&valid_bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(&channel_mask.to_le_bytes());
+        bytes.extend_from_slice(&super::PCM_SUBFORMAT_GUID);
+
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+        match container_bits_per_sample {
+            16 => {
+                for &sample in samples {
+                    bytes.extend_from_slice(&(sample as i16).to_le_bytes());
+                }
+            }
+            24 => {
+                for &sample in samples {
+                    let value = sample as u32;
+                    bytes.extend_from_slice(&[
+                        (value & 0xff) as u8,
+                        ((value >> 8) & 0xff) as u8,
+                        ((value >> 16) & 0xff) as u8,
+                    ]);
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        bytes
+    }
+
     fn append_chunk(bytes: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
         bytes.extend_from_slice(id);
         bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -688,6 +751,53 @@ mod tests {
     fn rejects_non_extensible_multichannel_pcm_tag1_input() {
         let error = read_wav(Cursor::new(pcm_wav_bytes(16, 3, 44_100, &[0; 9]))).unwrap_err();
         assert!(error.to_string().contains("exact mono/stereo"));
+    }
+
+    #[test]
+    fn accepts_non_ordinary_extensible_channel_masks() {
+        let wav = read_wav(Cursor::new(extensible_pcm_wav_bytes(
+            16,
+            16,
+            4,
+            48_000,
+            0x0001_2104,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+        )))
+        .unwrap();
+
+        assert_eq!(wav.spec.channel_mask, 0x0001_2104);
+        assert_eq!(wav.spec.channels, 4);
+    }
+
+    #[test]
+    fn accepts_zero_extensible_channel_mask() {
+        let wav = read_wav(Cursor::new(extensible_pcm_wav_bytes(
+            16,
+            16,
+            2,
+            44_100,
+            0,
+            &[1, -1, 2, -2],
+        )))
+        .unwrap();
+
+        assert_eq!(wav.spec.channel_mask, 0);
+        assert_eq!(wav.spec.channels, 2);
+    }
+
+    #[test]
+    fn rejects_extensible_channel_masks_with_unsupported_speaker_bits() {
+        let error = read_wav(Cursor::new(extensible_pcm_wav_bytes(
+            16,
+            16,
+            4,
+            48_000,
+            0x0004_0000,
+            &[0; 8],
+        )))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("channel mask"));
     }
 
     #[test]

@@ -110,3 +110,18 @@ fn decode_api_accepts_seekable_readers_and_returns_summary() {
     );
     assert_eq!(output.into_inner(), wav);
 }
+
+#[test]
+fn decode_builder_supports_strict_channel_mask_provenance() {
+    let config = flacx::DecodeConfig::builder()
+        .threads(2)
+        .strict_channel_mask_provenance(true)
+        .build();
+
+    assert_eq!(
+        config,
+        flacx::DecodeConfig::default()
+            .with_threads(2)
+            .with_strict_channel_mask_provenance(true)
+    );
+}

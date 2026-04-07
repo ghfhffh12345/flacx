@@ -1,25 +1,54 @@
 use std::collections::BTreeMap;
 
+use crate::input::ordinary_channel_mask;
+
 const VORBIS_COMMENT_BLOCK_TYPE: u8 = 4;
 const CUESHEET_BLOCK_TYPE: u8 = 5;
 const CUESHEET_LEADOUT_TRACK_NUMBER: u8 = 170;
 const CUESHEET_HEADER_LEN: usize = 396;
 const CUESHEET_TRACK_HEADER_LEN: usize = 36;
 const CUESHEET_INDEX_LEN: usize = 12;
+const WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY: &str = "WAVEFORMATEXTENSIBLE_CHANNEL_MASK";
+pub(crate) const FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY: &str = "FLACX_CHANNEL_LAYOUT_PROVENANCE";
+const FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE: &str = "1";
+const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct EncodeMetadata {
     comments: Vec<VorbisComment>,
     cuesheet: Option<CueSheet>,
+    channel_mask: Option<u32>,
+    channel_layout_provenance: bool,
 }
 
 impl EncodeMetadata {
+    pub(crate) fn set_channel_mask(&mut self, channels: u16, mask: u32) {
+        if ordinary_channel_mask(channels).is_some_and(|ordinary| ordinary == mask) {
+            return;
+        }
+        self.channel_mask = Some(mask);
+        self.channel_layout_provenance = true;
+    }
+
     pub(crate) fn flac_blocks(&self) -> Vec<FlacMetadataBlock> {
         let mut blocks = Vec::new();
-        if !self.comments.is_empty() {
+        let mut comments = self.comments.clone();
+        if let Some(channel_mask) = self.channel_mask {
+            comments.push(VorbisComment {
+                key: WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY.to_owned(),
+                value: format_channel_mask(channel_mask),
+            });
+        }
+        if self.channel_layout_provenance {
+            comments.push(VorbisComment {
+                key: FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY.to_owned(),
+                value: FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE.to_owned(),
+            });
+        }
+        if !comments.is_empty() {
             blocks.push(FlacMetadataBlock::VorbisComment(VorbisCommentBlock {
                 vendor: format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-                comments: self.comments.clone(),
+                comments,
             }));
         }
         if let Some(cuesheet) = &self.cuesheet {
@@ -33,6 +62,8 @@ impl EncodeMetadata {
 pub(crate) struct WavMetadata {
     info_entries: Vec<WavInfoEntry>,
     cue_points: Vec<u32>,
+    channel_mask: Option<u32>,
+    channel_layout_provenance: bool,
 }
 
 impl WavMetadata {
@@ -40,17 +71,27 @@ impl WavMetadata {
         self.info_entries.is_empty() && self.cue_points.is_empty()
     }
 
+    pub(crate) fn channel_mask(&self) -> Option<u32> {
+        self.channel_mask
+    }
+
+    pub(crate) fn has_channel_layout_provenance(&self) -> bool {
+        self.channel_layout_provenance
+    }
+
     pub(crate) fn ingest_flac_metadata_block(
         &mut self,
         block_type: u8,
         payload: &[u8],
         total_samples: u64,
-    ) {
+        channels: u8,
+    ) -> crate::error::Result<()> {
         match block_type {
-            VORBIS_COMMENT_BLOCK_TYPE => self.ingest_vorbis_comment_payload(payload),
+            VORBIS_COMMENT_BLOCK_TYPE => self.ingest_vorbis_comment_payload(payload, channels)?,
             CUESHEET_BLOCK_TYPE => self.ingest_cuesheet_payload(payload, total_samples),
             _ => {}
         }
+        Ok(())
     }
 
     pub(crate) fn list_info_chunk_payload(&self) -> Option<Vec<u8>> {
@@ -83,27 +124,31 @@ impl WavMetadata {
         Some(payload)
     }
 
-    fn ingest_vorbis_comment_payload(&mut self, payload: &[u8]) {
+    fn ingest_vorbis_comment_payload(
+        &mut self,
+        payload: &[u8],
+        channels: u8,
+    ) -> crate::error::Result<()> {
         let mut cursor = 0usize;
         let Some(vendor_len) = read_u32_le(payload, &mut cursor) else {
-            return;
+            return Ok(());
         };
         let vendor_len = vendor_len as usize;
         if cursor + vendor_len > payload.len() {
-            return;
+            return Ok(());
         }
         cursor += vendor_len;
 
         let Some(comment_count) = read_u32_le(payload, &mut cursor) else {
-            return;
+            return Ok(());
         };
         for _ in 0..comment_count {
             let Some(comment_len) = read_u32_le(payload, &mut cursor) else {
-                return;
+                return Ok(());
             };
             let comment_len = comment_len as usize;
             if cursor + comment_len > payload.len() {
-                return;
+                return Ok(());
             }
             let entry = &payload[cursor..cursor + comment_len];
             cursor += comment_len;
@@ -114,6 +159,14 @@ impl WavMetadata {
             let Some((key, value)) = comment.split_once('=') else {
                 continue;
             };
+            if key.eq_ignore_ascii_case(WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY) {
+                self.channel_mask = Some(parse_channel_mask_comment(value, channels)?);
+                continue;
+            }
+            if key.eq_ignore_ascii_case(FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY) {
+                self.channel_layout_provenance = parse_channel_layout_provenance_comment(value)?;
+                continue;
+            }
             let Some(chunk_id) = wav_info_chunk_id_for_vorbis_key(key) else {
                 continue;
             };
@@ -125,6 +178,7 @@ impl WavMetadata {
                 value: value.to_owned(),
             });
         }
+        Ok(())
     }
 
     fn ingest_cuesheet_payload(&mut self, payload: &[u8], total_samples: u64) {
@@ -300,6 +354,8 @@ impl MetadataDraft {
         EncodeMetadata {
             comments,
             cuesheet: normalize_cuesheet(self.cue_points, total_samples),
+            channel_mask: None,
+            channel_layout_provenance: false,
         }
     }
 
@@ -435,6 +491,49 @@ fn normalize_cue_offset(offset: u64, total_samples: u64) -> Option<u32> {
     Some(offset as u32)
 }
 
+fn format_channel_mask(mask: u32) -> String {
+    format!("0x{mask:08x}")
+}
+
+fn parse_channel_mask_comment(value: &str, channels: u8) -> crate::error::Result<u32> {
+    let value = value.trim();
+    let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    else {
+        return Err(crate::error::Error::UnsupportedFlac(format!(
+            "invalid {WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY} value `{value}`"
+        )));
+    };
+
+    let mask = u32::from_str_radix(hex, 16).map_err(|_| {
+        crate::error::Error::UnsupportedFlac(format!(
+            "invalid {WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY} value `{value}`"
+        ))
+    })?;
+    if mask & !MAX_RFC9639_CHANNEL_MASK != 0 {
+        return Err(crate::error::Error::UnsupportedFlac(format!(
+            "{WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY} {mask:#010x} uses unsupported speaker bits"
+        )));
+    }
+    if mask.count_ones() > u32::from(channels) {
+        return Err(crate::error::Error::UnsupportedFlac(format!(
+            "{WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY} {mask:#010x} names more speakers than the stream has channels"
+        )));
+    }
+    Ok(mask)
+}
+
+fn parse_channel_layout_provenance_comment(value: &str) -> crate::error::Result<bool> {
+    if value.trim() == FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE {
+        Ok(true)
+    } else {
+        Err(crate::error::Error::UnsupportedFlac(format!(
+            "invalid {FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY} value `{value}`"
+        )))
+    }
+}
+
 fn read_u32_le(bytes: &[u8], cursor: &mut usize) -> Option<u32> {
     if *cursor + 4 > bytes.len() {
         return None;
@@ -459,7 +558,10 @@ fn append_chunk_payload(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlacMetadataBlock, MetadataDraft, WavMetadata};
+    use super::{
+        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FlacMetadataBlock, MetadataDraft,
+        WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY, WavMetadata,
+    };
 
     fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
         let mut payload = b"INFO".to_vec();
@@ -596,16 +698,19 @@ mod tests {
     #[test]
     fn restores_vorbis_comments_into_supported_wav_info_entries() {
         let mut metadata = WavMetadata::default();
-        metadata.ingest_flac_metadata_block(
-            4,
-            &vorbis_comment_payload(&[
-                ("artist", "Example Artist"),
-                ("TITLE", "Example Title"),
-                ("UNKNOWN", "ignored"),
-                ("COMMENT", ""),
-            ]),
-            8_000,
-        );
+        metadata
+            .ingest_flac_metadata_block(
+                4,
+                &vorbis_comment_payload(&[
+                    ("artist", "Example Artist"),
+                    ("TITLE", "Example Title"),
+                    ("UNKNOWN", "ignored"),
+                    ("COMMENT", ""),
+                ]),
+                8_000,
+                1,
+            )
+            .unwrap();
 
         let payload = metadata.list_info_chunk_payload().unwrap();
         assert!(payload.starts_with(b"INFO"));
@@ -617,11 +722,14 @@ mod tests {
     #[test]
     fn restores_cuesheet_tracks_preferring_index_01_offsets() {
         let mut metadata = WavMetadata::default();
-        metadata.ingest_flac_metadata_block(
-            5,
-            &cuesheet_payload(&[(&[(10, 0), (20, 1)], 1_000), (&[], 4_000)], 8_000),
-            8_000,
-        );
+        metadata
+            .ingest_flac_metadata_block(
+                5,
+                &cuesheet_payload(&[(&[(10, 0), (20, 1)], 1_000), (&[], 4_000)], 8_000),
+                8_000,
+                1,
+            )
+            .unwrap();
 
         assert_eq!(metadata.cue_points, vec![1_020, 4_000]);
     }
@@ -629,15 +737,129 @@ mod tests {
     #[test]
     fn drops_out_of_range_or_duplicate_cuesheet_points() {
         let mut metadata = WavMetadata::default();
-        metadata.ingest_flac_metadata_block(
-            5,
-            &cuesheet_payload(
-                &[(&[(0, 1)], 7_999), (&[(0, 1)], 7_999), (&[(0, 1)], 8_000)],
-                8_100,
-            ),
-            8_000,
-        );
+        metadata
+            .ingest_flac_metadata_block(
+                5,
+                &cuesheet_payload(
+                    &[(&[(0, 1)], 7_999), (&[(0, 1)], 7_999), (&[(0, 1)], 8_000)],
+                    8_100,
+                ),
+                8_000,
+                1,
+            )
+            .unwrap();
 
         assert_eq!(metadata.cue_points, vec![7_999]);
+    }
+
+    #[test]
+    fn emits_channel_mask_comment_for_non_ordinary_layouts() {
+        let mut draft = MetadataDraft::default();
+        draft.ingest_chunk(*b"LIST", &info_list_chunk(&[(*b"INAM", b"Example Title")]));
+        let mut metadata = draft.finish(4_096);
+        metadata.set_channel_mask(4, 0x0001_2104);
+
+        let blocks = metadata.flac_blocks();
+        let FlacMetadataBlock::VorbisComment(block) = &blocks[0] else {
+            panic!("expected vorbis comments");
+        };
+
+        let rendered: Vec<String> = block
+            .comments
+            .iter()
+            .map(|comment| format!("{}={}", comment.key, comment.value))
+            .collect();
+        assert!(rendered.contains(&"TITLE=Example Title".to_string()));
+        assert!(rendered.contains(&format!(
+            "{WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY}=0x00012104"
+        )));
+        assert!(rendered.contains(&format!("{FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY}=1")));
+    }
+
+    #[test]
+    fn skips_channel_mask_comment_for_ordinary_layouts() {
+        let mut metadata = MetadataDraft::default().finish(4_096);
+        metadata.set_channel_mask(4, 0x0033);
+
+        assert!(metadata.flac_blocks().is_empty());
+    }
+
+    #[test]
+    fn parses_channel_mask_comment_case_insensitively_with_padded_hex() {
+        let mut metadata = WavMetadata::default();
+        metadata
+            .ingest_flac_metadata_block(
+                4,
+                &vorbis_comment_payload(&[("waveformatextensible_channel_mask", "0X00012104")]),
+                8_000,
+                4,
+            )
+            .unwrap();
+
+        assert_eq!(metadata.channel_mask(), Some(0x0001_2104));
+    }
+
+    #[test]
+    fn parses_zero_channel_mask_value() {
+        let mut metadata = WavMetadata::default();
+        metadata
+            .ingest_flac_metadata_block(
+                4,
+                &vorbis_comment_payload(&[(WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY, "0x0")]),
+                8_000,
+                2,
+            )
+            .unwrap();
+
+        assert_eq!(metadata.channel_mask(), Some(0));
+    }
+
+    #[test]
+    fn parses_private_layout_provenance_marker() {
+        let mut metadata = WavMetadata::default();
+        metadata
+            .ingest_flac_metadata_block(
+                4,
+                &vorbis_comment_payload(&[(FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, "1")]),
+                8_000,
+                4,
+            )
+            .unwrap();
+
+        assert!(metadata.has_channel_layout_provenance());
+    }
+
+    #[test]
+    fn rejects_channel_mask_comment_with_unsupported_speaker_bits() {
+        let mut metadata = WavMetadata::default();
+        let error = metadata
+            .ingest_flac_metadata_block(
+                4,
+                &vorbis_comment_payload(&[(WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY, "0x40000")]),
+                8_000,
+                4,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported speaker bits"));
+    }
+
+    #[test]
+    fn rejects_invalid_private_layout_provenance_marker() {
+        let mut metadata = WavMetadata::default();
+        let error = metadata
+            .ingest_flac_metadata_block(
+                4,
+                &vorbis_comment_payload(&[(FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, "v2")]),
+                8_000,
+                4,
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains(FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY)
+        );
     }
 }

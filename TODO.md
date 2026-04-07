@@ -1,4 +1,3 @@
-1. Add non-ordinary multichannel layout interop via `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` / `WAVEFORMATEXTENSIBLE` channel-mask signaling (RFC 9639 Sections 7, 8.6.2, 9.1.3, Appendix C.7).
 2. Add `SEEKTABLE` / seek-point read-write support (RFC 9639 Sections 8.5, 8.5.1).
 3. Broaden `VORBIS_COMMENT` support beyond the current narrow mapped subset (RFC 9639 Sections 8.6, 8.6.1).
 4. Broaden `CUESHEET` support beyond basic cue-point offsets (RFC 9639 Sections 8.7, 8.7.1).

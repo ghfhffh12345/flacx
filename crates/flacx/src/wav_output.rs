@@ -17,6 +17,7 @@ const PCM_SUBFORMAT_GUID: [u8; 16] = [
     0x00, 0x00, 0x10, 0x00, // GUID data2/data3
     0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71, // GUID data4
 ];
+const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 
 #[allow(dead_code)]
 pub(crate) fn write_wav<W: Write>(writer: &mut W, spec: WavSpec, samples: &[i32]) -> Result<()> {
@@ -76,23 +77,22 @@ pub(crate) fn write_wav_with_metadata_and_md5<W: Write>(
             spec.channels
         ))
     })?;
-    let channel_mask = match spec.channel_mask {
-        0 => ordinary_mask,
-        mask if mask == ordinary_mask => mask,
-        mask => {
-            return Err(Error::UnsupportedWav(format!(
-                "non-ordinary channel mask {mask:#010x} is not supported on output"
-            )));
-        }
-    };
+    let channel_mask = spec.channel_mask;
+    if !is_supported_channel_mask(u16::from(spec.channels), channel_mask) {
+        return Err(Error::UnsupportedWav(format!(
+            "channel mask {channel_mask:#010x} is not supported on output for {} channels",
+            spec.channels
+        )));
+    }
     let envelope = PcmEnvelope {
         channels: u16::from(spec.channels),
         valid_bits_per_sample: u16::from(spec.bits_per_sample),
         container_bits_per_sample,
         channel_mask,
     };
-    let use_canonical_pcm =
-        spec.channels <= 2 && envelope.valid_bits_per_sample == envelope.container_bits_per_sample;
+    let use_canonical_pcm = spec.channels <= 2
+        && envelope.valid_bits_per_sample == envelope.container_bits_per_sample
+        && channel_mask == ordinary_mask;
     let fmt_chunk_size = if use_canonical_pcm {
         PCM_FMT_CHUNK_SIZE
     } else {
@@ -132,6 +132,13 @@ pub(crate) fn write_wav_with_metadata_and_md5<W: Write>(
     let streaminfo_md5 = write_sample_bytes(writer, samples, envelope)?;
 
     Ok(streaminfo_md5)
+}
+
+fn is_supported_channel_mask(channels: u16, mask: u32) -> bool {
+    if mask & !MAX_RFC9639_CHANNEL_MASK != 0 {
+        return false;
+    }
+    mask.count_ones() <= u32::from(channels)
 }
 
 fn wav_metadata_bytes(metadata: &WavMetadata) -> Vec<u8> {
@@ -314,17 +321,22 @@ mod tests {
         };
         let samples = [1, -2];
         let mut metadata = WavMetadata::default();
-        metadata.ingest_flac_metadata_block(
-            4,
-            &[
-                0, 0, 0, 0, // vendor len
-                1, 0, 0, 0, // comments
-                9, 0, 0, 0, // len
-                b'T', b'I', b'T', b'L', b'E', b'=', b'O', b'd', b'd',
-            ],
-            2,
-        );
-        metadata.ingest_flac_metadata_block(5, &synthetic_cuesheet_payload(&[0], 2), 2);
+        metadata
+            .ingest_flac_metadata_block(
+                4,
+                &[
+                    0, 0, 0, 0, // vendor len
+                    1, 0, 0, 0, // comments
+                    9, 0, 0, 0, // len
+                    b'T', b'I', b'T', b'L', b'E', b'=', b'O', b'd', b'd',
+                ],
+                2,
+                1,
+            )
+            .unwrap();
+        metadata
+            .ingest_flac_metadata_block(5, &synthetic_cuesheet_payload(&[0], 2), 2, 1)
+            .unwrap();
 
         let mut wav = Vec::new();
         write_wav_with_metadata(&mut wav, spec, &samples, &metadata).unwrap();
@@ -340,5 +352,53 @@ mod tests {
         assert_eq!(list_size, 16);
         let padded_byte = wav[list_index + 8 + list_size as usize - 1];
         assert_eq!(padded_byte, 0);
+    }
+
+    #[test]
+    fn writes_non_ordinary_channel_masks_in_extensible_fmt() {
+        let spec = WavSpec {
+            sample_rate: 48_000,
+            channels: 4,
+            bits_per_sample: 16,
+            total_samples: 2,
+            bytes_per_sample: 2,
+            channel_mask: 0x0001_2104,
+        };
+        let samples = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut wav = Vec::new();
+
+        write_wav(&mut wav, spec, &samples).unwrap();
+
+        assert_eq!(
+            parse_chunk_layout(&wav),
+            vec![(*b"fmt ", 40), (*b"data", 16)]
+        );
+        assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 0xFFFE);
+        assert_eq!(
+            u32::from_le_bytes(wav[40..44].try_into().unwrap()),
+            0x0001_2104
+        );
+    }
+
+    #[test]
+    fn writes_zero_channel_mask_in_extensible_fmt() {
+        let spec = WavSpec {
+            sample_rate: 44_100,
+            channels: 2,
+            bits_per_sample: 16,
+            total_samples: 1,
+            bytes_per_sample: 2,
+            channel_mask: 0,
+        };
+        let samples = [1, -1];
+        let mut wav = Vec::new();
+
+        write_wav(&mut wav, spec, &samples).unwrap();
+
+        assert_eq!(
+            parse_chunk_layout(&wav),
+            vec![(*b"fmt ", 40), (*b"data", 4)]
+        );
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 0);
     }
 }

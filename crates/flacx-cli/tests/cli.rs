@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 use flacx::{DecodeConfig, Encoder, EncoderConfig, level::Level};
@@ -10,7 +10,10 @@ use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 #[path = "../../flacx/tests/support/mod.rs"]
 mod support;
 
-use support::{pcm_wav_bytes, sample_fixture, unique_temp_path};
+use support::{
+    extensible_pcm_wav_bytes, pcm_wav_bytes, replace_flac_optional_metadata, sample_fixture,
+    unique_temp_path, vorbis_comment_block,
+};
 
 fn flacx_bin() -> &'static str {
     env!("CARGO_BIN_EXE_flacx")
@@ -52,6 +55,18 @@ fn final_progress_frame_lines(stderr: &str) -> Vec<&str> {
         .collect()
 }
 
+fn decode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
+    let mut command_args = vec!["decode"];
+    command_args.extend_from_slice(args);
+    command_args.push(input_path.to_str().unwrap());
+    command_args.push("-o");
+    command_args.push(output_path.to_str().unwrap());
+    Command::new(flacx_bin())
+        .args(command_args)
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn help_lists_encode_and_decode_commands() {
     let output = Command::new(flacx_bin()).arg("--help").output().unwrap();
@@ -90,6 +105,7 @@ fn decode_help_lists_output_depth_and_threads() {
     assert!(stdout.contains("-o, --output <OUTPUT>"));
     assert!(stdout.contains("--depth <DEPTH>"));
     assert!(stdout.contains("--threads <THREADS>"));
+    assert!(stdout.contains("--strict-channel-mask-provenance"));
 }
 
 #[test]
@@ -568,19 +584,7 @@ fn decode_command_accepts_threads_and_round_trips_exact_wav_bytes() {
         fs::write(&input_path, &flac).unwrap();
 
         let threads_arg = threads.to_string();
-        let input_arg = input_path.to_str().unwrap().to_owned();
-        let output_arg = output_path.to_str().unwrap().to_owned();
-        let output = Command::new(flacx_bin())
-            .args([
-                "decode",
-                "--threads",
-                threads_arg.as_str(),
-                input_arg.as_str(),
-                "-o",
-                output_arg.as_str(),
-            ])
-            .output()
-            .unwrap();
+        let output = decode_cli_output(&input_path, &output_path, &["--threads", &threads_arg]);
 
         assert!(
             output.status.success(),
@@ -596,6 +600,89 @@ fn decode_command_accepts_threads_and_round_trips_exact_wav_bytes() {
         let _ = fs::remove_file(input_path);
         let _ = fs::remove_file(output_path);
     }
+}
+
+#[test]
+fn decode_command_keeps_ordinary_files_green_with_strict_mode() {
+    let samples = sample_fixture(2, 4_096);
+    let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav)
+        .unwrap();
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("wav");
+    fs::write(&input_path, &flac).unwrap();
+
+    let output = decode_cli_output(
+        &input_path,
+        &output_path,
+        &["--strict-channel-mask-provenance"],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(&output_path).unwrap(), wav);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn decode_command_function_passes_strict_channel_mask_provenance_into_config() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("wav");
+    fs::write(&input_path, &flac).unwrap();
+
+    let command = DecodeCommand {
+        input: input_path.clone(),
+        output: Some(output_path.clone()),
+        depth: 1,
+        config: DecodeConfig::default().with_strict_channel_mask_provenance(true),
+    };
+    let mut stderr = Vec::new();
+
+    decode_command(&command, false, &mut stderr).unwrap();
+
+    assert!(stderr.is_empty());
+    assert_eq!(fs::read(&output_path).unwrap(), wav);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn decode_command_fails_on_missing_provenance_marker_for_non_ordinary_layout() {
+    let wav = extensible_pcm_wav_bytes(16, 16, 4, 48_000, 0x0001_2104, &sample_fixture(4, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[vorbis_comment_block(&[(
+            "WAVEFORMATEXTENSIBLE_CHANNEL_MASK",
+            "0x00012104",
+        )])],
+    );
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("wav");
+    fs::write(&input_path, &flac).unwrap();
+
+    let output = decode_cli_output(
+        &input_path,
+        &output_path,
+        &["--strict-channel-mask-provenance"],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("FLACX_CHANNEL_LAYOUT_PROVENANCE"));
+    assert!(!output_path.exists());
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
 }
 
 #[test]
