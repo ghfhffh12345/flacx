@@ -98,6 +98,8 @@ the current machine’s available parallelism.
 - `threads` sets the worker count
 - `strict_channel_mask_provenance` requires explicit provenance before the
   decoder restores non-ordinary channel masks
+- `strict_seektable_validation` turns malformed `SEEKTABLE` metadata from a
+  tolerated parse-time warning into a decode error
 
 The config types also expose fluent `with_*` methods if you prefer direct
 mutation over the builders.
@@ -112,7 +114,8 @@ let encoder_config = EncoderConfig::default()
 
 let decoder_config = DecodeConfig::default()
     .with_threads(4)
-    .with_strict_channel_mask_provenance(true);
+    .with_strict_channel_mask_provenance(true)
+    .with_strict_seektable_validation(true);
 
 assert_eq!(encoder_config.level, Level::Level4);
 assert_eq!(decoder_config.threads, 4);

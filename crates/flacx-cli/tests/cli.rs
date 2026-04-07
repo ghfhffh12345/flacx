@@ -11,8 +11,8 @@ use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 mod support;
 
 use support::{
-    extensible_pcm_wav_bytes, pcm_wav_bytes, replace_flac_optional_metadata, sample_fixture,
-    unique_temp_path, vorbis_comment_block,
+    extensible_pcm_wav_bytes, pcm_wav_bytes, raw_seektable_block, replace_flac_optional_metadata,
+    sample_fixture, unique_temp_path, vorbis_comment_block,
 };
 
 fn flacx_bin() -> &'static str {
@@ -106,6 +106,7 @@ fn decode_help_lists_output_depth_and_threads() {
     assert!(stdout.contains("--depth <DEPTH>"));
     assert!(stdout.contains("--threads <THREADS>"));
     assert!(stdout.contains("--strict-channel-mask-provenance"));
+    assert!(stdout.contains("--strict-seektable-validation"));
 }
 
 #[test]
@@ -656,6 +657,37 @@ fn decode_command_function_passes_strict_channel_mask_provenance_into_config() {
 }
 
 #[test]
+fn decode_command_function_passes_strict_seektable_validation_into_config() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(&flac, &[raw_seektable_block(&[0u8; 17])]);
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("wav");
+    fs::write(&input_path, &flac).unwrap();
+
+    let command = DecodeCommand {
+        input: input_path.clone(),
+        output: Some(output_path.clone()),
+        depth: 1,
+        config: DecodeConfig::default().with_strict_seektable_validation(true),
+    };
+    let mut stderr = Vec::new();
+
+    let error = decode_command(&command, false, &mut stderr).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("seektable payload length must be a multiple of 18 bytes")
+    );
+    assert!(stderr.is_empty());
+    assert!(!output_path.exists());
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn decode_command_fails_on_missing_provenance_marker_for_non_ordinary_layout() {
     let wav = extensible_pcm_wav_bytes(16, 16, 4, 48_000, 0x0001_2104, &sample_fixture(4, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
@@ -679,6 +711,30 @@ fn decode_command_fails_on_missing_provenance_marker_for_non_ordinary_layout() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("FLACX_CHANNEL_LAYOUT_PROVENANCE"));
+    assert!(!output_path.exists());
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn decode_command_fails_on_invalid_seektable_when_strict_validation_is_enabled() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(&flac, &[raw_seektable_block(&[0u8; 17])]);
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("wav");
+    fs::write(&input_path, &flac).unwrap();
+
+    let output = decode_cli_output(
+        &input_path,
+        &output_path,
+        &["--strict-seektable-validation"],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("seektable payload length must be a multiple of 18 bytes"));
     assert!(!output_path.exists());
 
     let _ = fs::remove_file(input_path);

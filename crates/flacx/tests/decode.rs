@@ -10,9 +10,10 @@ use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
     cuesheet_block, extensible_pcm_wav_bytes, flac_frames, info_list_chunk, ordinary_channel_mask,
-    parse_first_flac_frame_header, parse_wav_format, pcm_wav_bytes, replace_flac_optional_metadata,
-    rewrite_streaminfo_md5, sample_fixture, streaminfo_md5, truncate_bytes, unique_temp_path,
-    vorbis_comment_block, wav_cue_points, wav_info_entries, wav_with_chunks,
+    parse_first_flac_frame_header, parse_wav_format, pcm_wav_bytes, raw_seektable_block,
+    replace_flac_optional_metadata, rewrite_streaminfo_md5, sample_fixture, seektable_block,
+    streaminfo_md5, truncate_bytes, unique_temp_path, vorbis_comment_block, wav_cue_points,
+    wav_info_entries, wav_with_chunks,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -397,6 +398,105 @@ fn drops_unsupported_flac_metadata_blocks_during_decode() {
         vec![(*b"INAM", "Kept".to_string())]
     );
     assert!(wav_cue_points(&decoded).is_empty());
+}
+
+#[test]
+fn decode_accepts_valid_seektable_block() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(&flac, &[seektable_block(&[(0, 0, 2_048)])]);
+
+    let decoded = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+        .decode_bytes(&flac)
+        .unwrap();
+
+    assert_eq!(decoded, wav);
+}
+
+#[test]
+fn decode_tolerates_malformed_seektable_by_default() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(&flac, &[raw_seektable_block(&[0u8; 17])]);
+
+    let decoded = decode_bytes(&flac).unwrap();
+
+    assert_eq!(decoded, wav);
+}
+
+#[test]
+fn decode_rejects_invalid_length_seektable_when_strict() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(&flac, &[raw_seektable_block(&[0u8; 17])]);
+
+    let error = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+        .decode_bytes(&flac)
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("seektable payload length must be a multiple of 18 bytes")
+    );
+}
+
+#[test]
+fn decode_rejects_non_ascending_seektable_when_strict() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[seektable_block(&[(1_024, 128, 1_024), (0, 0, 1_024)])],
+    );
+
+    let error = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+        .decode_bytes(&flac)
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("seektable sample numbers must be in ascending order")
+    );
+}
+
+#[test]
+fn decode_rejects_duplicate_seektable_sample_numbers_when_strict() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac =
+        replace_flac_optional_metadata(&flac, &[seektable_block(&[(0, 0, 1_024), (0, 64, 1_024)])]);
+
+    let error = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+        .decode_bytes(&flac)
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("seektable sample numbers must be unique")
+    );
+}
+
+#[test]
+fn decode_rejects_seektable_placeholders_not_at_end_when_strict() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[seektable_block(&[(u64::MAX, 0, 0), (0, 0, 2_048)])],
+    );
+
+    let error = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+        .decode_bytes(&flac)
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("seektable placeholder points must appear at the end of the table")
+    );
 }
 
 #[test]

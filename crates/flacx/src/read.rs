@@ -16,7 +16,10 @@ use crate::{
     crc::{crc8, crc16},
     error::{Error, Result},
     input::{WavData, WavSpec, ordinary_channel_mask},
-    metadata::{FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, WavMetadata},
+    metadata::{
+        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, SEEKTABLE_BLOCK_TYPE, WavMetadata,
+        validate_seektable_payload,
+    },
     model::ChannelAssignment,
     progress::{NoProgress, ProgressSink, ProgressSnapshot},
     reconstruct::{interleave_channels, restore_fixed, restore_lpc, unfold_residual},
@@ -96,7 +99,8 @@ where
 {
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
-    let (stream_info, metadata, frame_offset) = parse_metadata(&bytes)?;
+    let (stream_info, metadata, frame_offset) =
+        parse_metadata(&bytes, config.strict_seektable_validation)?;
 
     if !(1..=8).contains(&stream_info.channels) {
         return Err(Error::UnsupportedFlac(format!(
@@ -981,7 +985,10 @@ fn decode_utf8_number<R: Read>(reader: &mut R) -> Result<(u64, usize)> {
     Ok((value, additional + 1))
 }
 
-fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, WavMetadata, usize)> {
+fn parse_metadata(
+    bytes: &[u8],
+    strict_seektable_validation: bool,
+) -> Result<(StreamInfo, WavMetadata, usize)> {
     if bytes.len() < 8 {
         return Err(Error::InvalidFlac("file is too short"));
     }
@@ -993,6 +1000,7 @@ fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, WavMetadata, usize)> {
     let mut saw_streaminfo = false;
     let mut stream_info = None;
     let mut metadata = WavMetadata::default();
+    let mut saw_seektable = false;
     loop {
         if offset + 4 > bytes.len() {
             return Err(Error::InvalidFlac("metadata block header is truncated"));
@@ -1018,6 +1026,17 @@ fn parse_metadata(bytes: &[u8]) -> Result<(StreamInfo, WavMetadata, usize)> {
             raw.copy_from_slice(&bytes[offset..offset + 34]);
             stream_info = Some(StreamInfo::from_bytes(raw));
             saw_streaminfo = true;
+        } else if block_type == SEEKTABLE_BLOCK_TYPE {
+            let seektable_result = validate_seektable_payload(&bytes[offset..offset + block_len]);
+            if strict_seektable_validation {
+                seektable_result?;
+                if saw_seektable {
+                    return Err(Error::InvalidFlac(
+                        "stream must not contain more than one seektable metadata block",
+                    ));
+                }
+            }
+            saw_seektable = true;
         } else if matches!(block_type, VORBIS_COMMENT_BLOCK_TYPE | CUESHEET_BLOCK_TYPE) {
             metadata.ingest_flac_metadata_block(
                 block_type,

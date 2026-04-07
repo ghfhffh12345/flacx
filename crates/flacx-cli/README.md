@@ -38,7 +38,7 @@ target/release/flacx decode encoded-album -o decoded-album --depth 0
 The CLI exposes two top-level commands:
 
 - `flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <samples>] [--depth <n>]`
-- `flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--strict-channel-mask-provenance] [--depth <n>]`
+- `flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--strict-channel-mask-provenance] [--strict-seektable-validation] [--depth <n>]`
 
 The input can be either a single file or a directory tree.
 Directory traversal is controlled by `--depth`.
@@ -83,6 +83,7 @@ flacx encode album-dir -o encoded-album --depth 0
 - `-o, --output <path>`
 - `--threads <n>`
 - `--strict-channel-mask-provenance`
+- `--strict-seektable-validation`
 - `--depth <n>`
 
 ### Defaults and behavior
@@ -90,6 +91,7 @@ flacx encode album-dir -o encoded-album --depth 0
 - `--threads` is optional.
 - When omitted, the decode path uses the library default thread count.
 - `--strict-channel-mask-provenance` is off by default.
+- `--strict-seektable-validation` is off by default.
 - `--depth` defaults to `1`.
 - `--depth` only affects directory input.
 - Use `--depth 0` for unlimited recursive traversal.
@@ -98,6 +100,7 @@ flacx encode album-dir -o encoded-album --depth 0
 - Directory input with no `-o` writes `.wav` siblings next to each discovered FLAC.
 - Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
 - `--strict-channel-mask-provenance` asks decode to require FLACX provenance before restoring non-ordinary channel masks.
+- `--strict-seektable-validation` asks decode to reject malformed FLAC `SEEKTABLE` metadata instead of validating and discarding it.
 - For single-file input, `-o` must be a file path.
 - For directory input, `-o` must be a directory path.
 
@@ -108,6 +111,7 @@ flacx decode input.flac
 flacx decode input.flac -o output.wav --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
 flacx decode input.flac --strict-channel-mask-provenance
+flacx decode input.flac --strict-seektable-validation
 ```
 
 ## Output layout summary

@@ -69,6 +69,9 @@ struct DecodeArgs {
     /// Require FLACX provenance for preserved non-ordinary channel-mask restoration.
     #[arg(long)]
     strict_channel_mask_provenance: bool,
+    /// Require RFC 9639 SEEKTABLE validation during decode.
+    #[arg(long)]
+    strict_seektable_validation: bool,
     /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
     #[arg(long, default_value_t = 1usize)]
     depth: usize,
@@ -115,7 +118,8 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = DecodeConfig::default()
-        .with_strict_channel_mask_provenance(args.strict_channel_mask_provenance);
+        .with_strict_channel_mask_provenance(args.strict_channel_mask_provenance)
+        .with_strict_seektable_validation(args.strict_seektable_validation);
     if let Some(threads) = args.threads {
         config = config.with_threads(threads);
     }
@@ -215,12 +219,14 @@ mod tests {
             "--threads",
             "4",
             "--strict-channel-mask-provenance",
+            "--strict-seektable-validation",
         ]);
 
         match cli.command {
             Commands::Decode(args) => {
                 assert_eq!(args.threads, Some(4));
                 assert!(args.strict_channel_mask_provenance);
+                assert!(args.strict_seektable_validation);
                 assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
                 assert_eq!(args.output, Some(std::path::PathBuf::from("out-dir")));
                 assert_eq!(args.depth, 0);
@@ -238,6 +244,7 @@ mod tests {
                 assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
                 assert_eq!(args.output, None);
                 assert!(!args.strict_channel_mask_provenance);
+                assert!(!args.strict_seektable_validation);
                 assert_eq!(args.depth, 1);
             }
             _ => panic!("expected decode command"),

@@ -22,6 +22,7 @@
 //!   - `--output`
 //!   - `--threads`
 //!   - `--strict-channel-mask-provenance`
+//!   - `--strict-seektable-validation`
 //!   - `--depth` (directory input only)
 
 use std::{

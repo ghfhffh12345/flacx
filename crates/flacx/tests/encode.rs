@@ -16,9 +16,10 @@ fn patches_streaminfo_after_encoding() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
     let encoder = Encoder::new(EncoderConfig::default().with_threads(2));
     let flac = encoder.encode_bytes(&wav).unwrap();
+    let blocks = flac_metadata_blocks(&flac);
 
     assert_eq!(&flac[..4], b"fLaC");
-    assert_eq!(&flac[4..8], &[0x80, 0x00, 0x00, 0x22]);
+    assert_eq!(&flac[4..8], &[0x00, 0x00, 0x00, 0x22]);
     let min_block = u16::from_be_bytes([flac[8], flac[9]]);
     let max_block = u16::from_be_bytes([flac[10], flac[11]]);
     let min_frame = u32::from_be_bytes([0, flac[12], flac[13], flac[14]]);
@@ -29,6 +30,7 @@ fn patches_streaminfo_after_encoding() {
     assert_eq!(max_block, expected_block_size);
     assert!(min_frame > 0);
     assert!(max_frame >= min_frame);
+    assert_eq!(blocks[1].block_type, 3);
 }
 
 #[test]
@@ -187,10 +189,10 @@ fn preserves_list_info_text_metadata_as_vorbis_comments() {
             .iter()
             .map(|block| block.block_type)
             .collect::<Vec<_>>(),
-        vec![0, 4]
+        vec![0, 3, 4]
     );
     assert_eq!(
-        vorbis_comments(&blocks[1].payload),
+        vorbis_comments(&blocks[2].payload),
         vec![
             "ARTIST=Example Artist".to_string(),
             "TITLE=Metadata Song".to_string(),
@@ -215,10 +217,10 @@ fn preserves_representable_cue_points_as_cuesheet_tracks() {
             .iter()
             .map(|block| block.block_type)
             .collect::<Vec<_>>(),
-        vec![0, 5]
+        vec![0, 3, 5]
     );
     assert_eq!(
-        blocks[1].payload[395], 3,
+        blocks[2].payload[395], 3,
         "two cue-derived tracks plus lead-out"
     );
 }
@@ -244,10 +246,10 @@ fn drops_unmappable_metadata_chunks_in_output() {
             .iter()
             .map(|block| block.block_type)
             .collect::<Vec<_>>(),
-        vec![0, 4]
+        vec![0, 3, 4]
     );
     assert_eq!(
-        vorbis_comments(&blocks[1].payload),
+        vorbis_comments(&blocks[2].payload),
         vec!["TITLE=Kept Title".to_string()]
     );
 }
