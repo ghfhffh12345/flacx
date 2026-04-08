@@ -7,7 +7,7 @@ use crate::{
         ordinary_channel_mask,
     },
     md5::Md5,
-    metadata::WavMetadata,
+    metadata::{FXMD_CHUNK_ID, WavMetadata},
 };
 
 const PCM_FMT_CHUNK_SIZE: u32 = 16;
@@ -146,11 +146,8 @@ fn wav_metadata_bytes(metadata: &WavMetadata) -> Vec<u8> {
         return Vec::new();
     }
     let mut bytes = Vec::new();
-    if let Some(payload) = metadata.fxvc_chunk_payload() {
-        append_wav_chunk(&mut bytes, b"fxvc", &payload);
-    }
-    if let Some(payload) = metadata.fxcs_chunk_payload() {
-        append_wav_chunk(&mut bytes, b"fxcs", &payload);
+    if let Some(payload) = metadata.unified_chunk_payload() {
+        append_wav_chunk(&mut bytes, &FXMD_CHUNK_ID, &payload);
     }
     if let Some(payload) = metadata.list_info_chunk_payload() {
         append_wav_chunk(&mut bytes, b"LIST", &payload);
@@ -350,7 +347,7 @@ mod tests {
         let chunks = parse_chunk_layout(&wav);
         assert_eq!(
             chunks.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![*b"fmt ", *b"fxvc", *b"fxcs", *b"LIST", *b"cue ", *b"data"]
+            vec![*b"fmt ", *b"fxmd", *b"LIST", *b"cue ", *b"data"]
         );
 
         let mut list_index = None;

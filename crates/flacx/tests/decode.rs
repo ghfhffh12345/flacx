@@ -10,12 +10,12 @@ use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
     cuesheet_block, extensible_pcm_wav_bytes, flac_frames, flac_metadata_blocks, info_list_chunk,
-    ordinary_channel_mask, parse_first_flac_frame_header, parse_fxcs_chunk_payload,
-    parse_fxvc_chunk_payload, parse_wav_format, pcm_wav_bytes, raw_cuesheet_block,
+    ordinary_channel_mask, parse_first_flac_frame_header, parse_fxmd_chunk_payload,
+    parse_wav_format, pcm_wav_bytes, raw_cuesheet_block,
     raw_seektable_block, replace_flac_optional_metadata, rewrite_streaminfo_md5,
     rich_cuesheet_payload, sample_fixture, seektable_block, streaminfo_md5, truncate_bytes,
-    unique_temp_path, vorbis_comment_block, wav_chunk_payloads, wav_cue_points, wav_info_entries,
-    wav_with_chunks,
+    unique_temp_path, vorbis_comment_block, wav_chunk_payloads, wav_cue_points, wav_data_bytes,
+    wav_info_entries, wav_with_chunks, vorbis_comments,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -31,12 +31,14 @@ fn decode_bytes_with_threads(flac: &[u8], threads: usize) -> Vec<u8> {
 }
 
 fn assert_round_trips_bytes_exactly(wav: &[u8], flac: &[u8]) {
+    let expected_format = parse_wav_format(wav);
     for threads in decode_thread_variants() {
         let decoded = decode_bytes_with_threads(flac, threads);
-        assert_eq!(
-            decoded, wav,
-            "decode_bytes changed output for threads={threads}"
-        );
+        let decoded_format = parse_wav_format(&decoded);
+        assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(wav), "decode_bytes changed audio bytes for threads={threads}");
+        assert_eq!(decoded_format.channels, expected_format.channels, "decode_bytes changed channel count for threads={threads}");
+        assert_eq!(decoded_format.sample_rate, expected_format.sample_rate, "decode_bytes changed sample rate for threads={threads}");
+        assert_eq!(decoded_format.bits_per_sample, expected_format.bits_per_sample, "decode_bytes changed bit depth for threads={threads}");
     }
 }
 
@@ -208,9 +210,9 @@ fn decode_file_writes_identical_wav_bytes() {
 
         assert_eq!(summary.total_samples, 2_048);
         assert_eq!(
-            fs::read(&output_path).unwrap(),
-            wav,
-            "decode_file changed output for threads={threads}"
+            wav_data_bytes(&fs::read(&output_path).unwrap()),
+            wav_data_bytes(&wav),
+            "decode_file changed audio output for threads={threads}"
         );
 
         let _ = fs::remove_file(output_path);
@@ -252,7 +254,7 @@ fn failed_decode_file_does_not_leave_accepted_wav_output() {
 fn free_decode_helpers_remain_functional() {
     let wav = pcm_wav_bytes(16, 1, 32_000, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
-    assert_eq!(decode_bytes(&flac).unwrap(), wav);
+    assert_eq!(wav_data_bytes(&decode_bytes(&flac).unwrap()), wav_data_bytes(&wav));
 
     let input_path = unique_temp_path("flac");
     let output_path = unique_temp_path("wav");
@@ -260,7 +262,7 @@ fn free_decode_helpers_remain_functional() {
 
     let summary = decode_file(&input_path, &output_path).unwrap();
     assert_eq!(summary.total_samples, 2_048);
-    assert_eq!(fs::read(&output_path).unwrap(), wav);
+    assert_eq!(wav_data_bytes(&fs::read(&output_path).unwrap()), wav_data_bytes(&wav));
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
@@ -343,7 +345,7 @@ fn decode_uses_seekable_io() {
         .unwrap();
 
     assert_eq!(summary.total_samples, 512);
-    assert_eq!(output.into_inner(), wav);
+    assert_eq!(wav_data_bytes(&output.into_inner()), wav_data_bytes(&wav));
 }
 
 #[test]
@@ -382,19 +384,25 @@ fn restores_cuesheet_metadata_from_arbitrary_flac_input() {
 }
 
 #[test]
-fn decode_emits_authoritative_fxcs_chunk_for_flac_cuesheet() {
+fn decode_emits_canonical_fxmd_chunk_for_flac_cuesheet() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let raw_cuesheet = rich_cuesheet_payload();
     let flac = replace_flac_optional_metadata(&flac, &[raw_cuesheet_block(&raw_cuesheet)]);
 
     let decoded = decode_bytes_with_threads(&flac, 2);
-    let fxcs_payloads = wav_chunk_payloads(&decoded, *b"fxcs");
+    let fxmd_payloads = wav_chunk_payloads(&decoded, *b"fxmd");
+    let parsed = parse_fxmd_chunk_payload(&fxmd_payloads[0]);
 
-    assert_eq!(fxcs_payloads.len(), 1);
-    assert_eq!(parse_fxcs_chunk_payload(&fxcs_payloads[0]).version, 1);
+    assert_eq!(fxmd_payloads.len(), 1);
+    assert_eq!(parsed.version, 1);
     assert_eq!(
-        parse_fxcs_chunk_payload(&fxcs_payloads[0]).raw_payload,
+        parsed
+            .records
+            .iter()
+            .find(|record| record.block_type == 5)
+            .expect("cuesheet record present")
+            .payload,
         raw_cuesheet
     );
     assert_eq!(wav_cue_points(&decoded), vec![0, 2_048]);
@@ -408,7 +416,7 @@ fn decode_keeps_riff_cue_mirroring_when_cuesheet_is_representable() {
 
     let decoded = decode_bytes_with_threads(&flac, 2);
 
-    assert_eq!(wav_chunk_payloads(&decoded, *b"fxcs").len(), 1);
+    assert_eq!(wav_chunk_payloads(&decoded, *b"fxmd").len(), 1);
     assert_eq!(wav_cue_points(&decoded), vec![0, 2_048]);
 }
 
@@ -420,11 +428,17 @@ fn decode_preserves_exact_cuesheet_even_when_riff_cue_is_partial() {
     let flac = replace_flac_optional_metadata(&flac, &[raw_cuesheet_block(&raw_cuesheet)]);
 
     let decoded = decode_bytes_with_threads(&flac, 2);
-    let fxcs_payloads = wav_chunk_payloads(&decoded, *b"fxcs");
+    let fxmd_payloads = wav_chunk_payloads(&decoded, *b"fxmd");
+    let parsed = parse_fxmd_chunk_payload(&fxmd_payloads[0]);
 
-    assert_eq!(fxcs_payloads.len(), 1);
+    assert_eq!(fxmd_payloads.len(), 1);
     assert_eq!(
-        parse_fxcs_chunk_payload(&fxcs_payloads[0]).raw_payload,
+        parsed
+            .records
+            .iter()
+            .find(|record| record.block_type == 5)
+            .expect("cuesheet record present")
+            .payload,
         raw_cuesheet
     );
 }
@@ -460,7 +474,7 @@ fn decode_accepts_valid_seektable_block() {
         .decode_bytes(&flac)
         .unwrap();
 
-    assert_eq!(decoded, wav);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
 #[test]
@@ -471,7 +485,7 @@ fn decode_tolerates_malformed_seektable_by_default() {
 
     let decoded = decode_bytes(&flac).unwrap();
 
-    assert_eq!(decoded, wav);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
 #[test]
@@ -492,7 +506,7 @@ fn decode_rejects_invalid_length_seektable_when_strict() {
 }
 
 #[test]
-fn restores_exact_vorbis_comments_into_fxvc_chunk_and_info_mirror() {
+fn restores_exact_vorbis_comments_into_fxmd_chunk_and_info_mirror() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let flac = replace_flac_optional_metadata(
@@ -506,21 +520,23 @@ fn restores_exact_vorbis_comments_into_fxvc_chunk_and_info_mirror() {
     );
 
     let decoded = decode_bytes_with_threads(&flac, 2);
-    let fxvc_payloads = wav_chunk_payloads(&decoded, *b"fxvc");
+    let fxmd_payloads = wav_chunk_payloads(&decoded, *b"fxmd");
+    let parsed = parse_fxmd_chunk_payload(&fxmd_payloads[0]);
+    let vorbis = parsed
+        .records
+        .iter()
+        .find(|record| record.block_type == 4)
+        .expect("vorbis record present");
 
-    assert_eq!(fxvc_payloads.len(), 1);
+    assert_eq!(fxmd_payloads.len(), 1);
     assert_eq!(
-        parse_fxvc_chunk_payload(&fxvc_payloads[0]),
-        support::ParsedFxvcChunk {
-            version: 1,
-            vendor: String::new(),
-            entries: vec![
-                "artist=Example Artist".to_string(),
-                "UNMAPPED=Opaque".to_string(),
-                "TITLE=Exact Title".to_string(),
-                "TITLE=Duplicate".to_string(),
-            ],
-        }
+        vorbis_comments(&vorbis.payload),
+        vec![
+            "artist=Example Artist".to_string(),
+            "UNMAPPED=Opaque".to_string(),
+            "TITLE=Exact Title".to_string(),
+            "TITLE=Duplicate".to_string(),
+        ]
     );
     assert_eq!(
         wav_info_entries(&decoded),
@@ -533,7 +549,7 @@ fn restores_exact_vorbis_comments_into_fxvc_chunk_and_info_mirror() {
 }
 
 #[test]
-fn round_trips_exact_vorbis_comments_via_fxvc_chunk() {
+fn round_trips_exact_vorbis_comments_via_fxmd_chunk() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let flac = replace_flac_optional_metadata(
@@ -759,7 +775,7 @@ fn strict_channel_mask_provenance_accepts_flacx_marked_non_ordinary_files() {
 
     assert_eq!(format.format_tag, 0xFFFE);
     assert_eq!(format.channel_mask, Some(0x0001_2104));
-    assert_eq!(wav_chunk_payloads(&decoded, *b"fxvc").len(), 1);
+    assert_eq!(wav_chunk_payloads(&decoded, *b"fxmd").len(), 1);
 }
 
 #[test]

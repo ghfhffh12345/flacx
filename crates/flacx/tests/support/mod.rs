@@ -287,80 +287,66 @@ pub fn cue_chunk(offsets: &[u32]) -> Vec<u8> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedFxvcChunk {
-    pub version: u32,
-    pub vendor: String,
-    pub entries: Vec<String>,
+pub struct ParsedFxmdRecord {
+    pub block_type: u8,
+    pub ordinal: u32,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedFxcsChunk {
-    pub version: u32,
-    pub raw_payload: Vec<u8>,
+pub struct ParsedFxmdChunk {
+    pub version: u16,
+    pub blob_count: u32,
+    pub record_count: u32,
+    pub records: Vec<ParsedFxmdRecord>,
 }
 
-pub fn fxvc_chunk_payload(vendor: &str, entries: &[&str]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&1u32.to_le_bytes());
-    payload.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
-    payload.extend_from_slice(vendor.as_bytes());
-    payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    for entry in entries {
-        payload.extend_from_slice(&(entry.len() as u32).to_le_bytes());
-        payload.extend_from_slice(entry.as_bytes());
-    }
-    payload
-}
-
-pub fn parse_fxvc_chunk_payload(payload: &[u8]) -> ParsedFxvcChunk {
-    assert!(payload.len() >= 12, "fxvc payload too short");
+pub fn parse_fxmd_chunk_payload(payload: &[u8]) -> ParsedFxmdChunk {
+    assert!(payload.len() >= 16, "fxmd payload too short");
     let mut offset = 0usize;
-    let version = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+    assert_eq!(&payload[offset..offset + 4], b"fxmd", "fxmd magic mismatch");
     offset += 4;
-    let vendor_len = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+    let version = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+    offset += 2;
+    let _flags = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+    offset += 2;
+    let blob_count = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
     offset += 4;
-    let vendor = String::from_utf8(payload[offset..offset + vendor_len].to_vec()).unwrap();
-    offset += vendor_len;
-    let comment_count =
-        u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+    let record_count = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
     offset += 4;
-    let mut entries = Vec::with_capacity(comment_count);
-    for _ in 0..comment_count {
-        let entry_len =
-            u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+
+    let mut blobs = Vec::with_capacity(blob_count as usize);
+    for _ in 0..blob_count {
+        let blob_len = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
-        entries.push(String::from_utf8(payload[offset..offset + entry_len].to_vec()).unwrap());
-        offset += entry_len;
+        blobs.push(payload[offset..offset + blob_len].to_vec());
+        offset += blob_len;
     }
-    assert_eq!(offset, payload.len(), "fxvc payload trailing bytes");
-    ParsedFxvcChunk {
-        version,
-        vendor,
-        entries,
+
+    let mut records = Vec::with_capacity(record_count as usize);
+    for _ in 0..record_count {
+        let block_type = payload[offset];
+        offset += 1;
+        let _record_flags = payload[offset];
+        offset += 1;
+        offset += 2; // reserved
+        let ordinal = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        let blob_index = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        records.push(ParsedFxmdRecord {
+            block_type,
+            ordinal,
+            payload: blobs[blob_index].clone(),
+        });
     }
-}
+    assert_eq!(offset, payload.len(), "fxmd payload trailing bytes");
 
-pub fn fxcs_chunk_payload(raw_payload: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&1u32.to_le_bytes());
-    payload.extend_from_slice(&(raw_payload.len() as u32).to_le_bytes());
-    payload.extend_from_slice(raw_payload);
-    payload
-}
-
-pub fn parse_fxcs_chunk_payload(payload: &[u8]) -> ParsedFxcsChunk {
-    assert!(payload.len() >= 8, "fxcs payload too short");
-    let mut offset = 0usize;
-    let version = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
-    offset += 4;
-    let raw_len = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
-    offset += 4;
-    let raw_payload = payload[offset..offset + raw_len].to_vec();
-    offset += raw_len;
-    assert_eq!(offset, payload.len(), "fxcs payload trailing bytes");
-    ParsedFxcsChunk {
+    ParsedFxmdChunk {
         version,
-        raw_payload,
+        blob_count,
+        record_count,
+        records,
     }
 }
 

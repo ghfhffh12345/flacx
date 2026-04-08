@@ -6,9 +6,9 @@ mod support;
 
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, decode_with_ffmpeg,
-    flac_metadata_blocks, fxcs_chunk_payload, fxvc_chunk_payload, info_list_chunk,
-    parse_first_flac_frame_header, parse_vorbis_comment_vendor, parse_wav_format, pcm_wav_bytes,
-    rich_cuesheet_payload, sample_fixture, vorbis_comments, wav_with_chunks,
+    flac_metadata_blocks, info_list_chunk,
+    parse_first_flac_frame_header, parse_wav_format, pcm_wav_bytes, sample_fixture,
+    vorbis_comments, wav_data_bytes, wav_with_chunks,
 };
 
 #[test]
@@ -86,7 +86,7 @@ fn encodes_legal_streaminfo_only_sample_rate_using_zero_frame_header_code() {
     let header = parse_first_flac_frame_header(&flac);
     let format = parse_wav_format(&decoded);
 
-    assert_eq!(decoded, wav);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
     assert_eq!(header.blocking_strategy, ParsedFlacBlockingStrategy::Fixed);
     assert_eq!(
         header.coded_number_kind,
@@ -110,7 +110,7 @@ fn encodes_block_sizes_above_32768_with_extended_block_header_code() {
     let decoded = decode_bytes(&flac).unwrap();
     let header = parse_first_flac_frame_header(&flac);
 
-    assert_eq!(decoded, wav);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
     assert_eq!(header.blocking_strategy, ParsedFlacBlockingStrategy::Fixed);
     assert_eq!(
         header.coded_number_kind,
@@ -134,7 +134,7 @@ fn encodes_variable_blocksize_schedule_with_sample_number_coded_headers() {
     let decoded = decode_bytes(&flac).unwrap();
     let header = parse_first_flac_frame_header(&flac);
 
-    assert_eq!(decoded, wav);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
     assert_eq!(
         header.blocking_strategy,
         ParsedFlacBlockingStrategy::Variable
@@ -282,25 +282,12 @@ fn preserves_metadata_deterministically_across_thread_counts() {
 }
 
 #[test]
-fn prefers_exact_fxvc_metadata_over_conflicting_list_info() {
+fn legacy_fxvc_fxcs_chunks_are_ignored_like_unknown_wav_chunks() {
     let wav = wav_with_chunks(
         pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
         &[
-            (
-                *b"LIST",
-                info_list_chunk(&[(*b"IART", b"Mirror Artist"), (*b"INAM", b"Mirror Title")]),
-            ),
-            (
-                *b"fxvc",
-                fxvc_chunk_payload(
-                    "foreign vendor",
-                    &[
-                        "artist=Exact Artist",
-                        "TITLE=Exact Title",
-                        "TITLE=Duplicate",
-                    ],
-                ),
-            ),
+            (*b"fxvc", vec![1, 2, 3, 4]),
+            (*b"fxcs", vec![5, 6, 7, 8]),
         ],
     );
 
@@ -308,181 +295,21 @@ fn prefers_exact_fxvc_metadata_over_conflicting_list_info() {
         .encode_bytes(&wav)
         .unwrap();
     let blocks = flac_metadata_blocks(&flac);
-    let vorbis = blocks
-        .iter()
-        .find(|block| block.block_type == 4)
-        .expect("vorbis comment block present");
+    assert!(!blocks.iter().any(|block| block.block_type == 4));
+    assert!(!blocks.iter().any(|block| block.block_type == 5));
 
-    assert_eq!(
-        parse_vorbis_comment_vendor(&vorbis.payload),
-        "foreign vendor"
-    );
-    assert_eq!(
-        vorbis_comments(&vorbis.payload),
-        vec![
-            "artist=Exact Artist".to_string(),
-            "TITLE=Exact Title".to_string(),
-            "TITLE=Duplicate".to_string(),
-        ]
-    );
-}
-
-#[test]
-fn rejects_malformed_fxvc_chunk_even_when_list_info_fallback_exists() {
-    let mut malformed_fxvc = fxvc_chunk_payload("foreign vendor", &["TITLE=Exact Title"]);
-    malformed_fxvc.push(0);
-    let wav = wav_with_chunks(
-        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
-        &[
-            (*b"LIST", info_list_chunk(&[(*b"INAM", b"Mirror Title")])),
-            (*b"fxvc", malformed_fxvc),
-        ],
-    );
-
-    let error = Encoder::new(EncoderConfig::default().with_threads(2))
-        .encode_bytes(&wav)
-        .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("fxvc payload has trailing bytes")
-    );
-}
-
-#[test]
-fn valid_fxvc_still_wins_when_list_info_is_malformed() {
-    let mut malformed_list = b"INFO".to_vec();
-    malformed_list.extend_from_slice(b"INAM");
-    malformed_list.extend_from_slice(&99u32.to_le_bytes());
-    malformed_list.extend_from_slice(b"too-short");
-    let wav = wav_with_chunks(
-        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
-        &[
-            (*b"LIST", malformed_list),
-            (
-                *b"fxvc",
-                fxvc_chunk_payload(
-                    "foreign vendor",
-                    &[
-                        "artist=Exact Artist",
-                        "TITLE=Exact Title",
-                        "TITLE=Duplicate",
-                    ],
-                ),
-            ),
-        ],
-    );
-
-    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
-        .encode_bytes(&wav)
+    let decoded = decode_bytes(&flac).unwrap();
+    let reencoded = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&decoded)
         .unwrap();
-    let blocks = flac_metadata_blocks(&flac);
-    let vorbis = blocks
-        .iter()
-        .find(|block| block.block_type == 4)
-        .expect("vorbis comment block present");
+    let reencoded_blocks = flac_metadata_blocks(&reencoded);
 
-    assert_eq!(
-        parse_vorbis_comment_vendor(&vorbis.payload),
-        "foreign vendor"
-    );
-    assert_eq!(
-        vorbis_comments(&vorbis.payload),
-        vec![
-            "artist=Exact Artist".to_string(),
-            "TITLE=Exact Title".to_string(),
-            "TITLE=Duplicate".to_string(),
-        ]
-    );
+    assert!(!reencoded_blocks.iter().any(|block| block.block_type == 4));
+    assert!(!reencoded_blocks.iter().any(|block| block.block_type == 5));
 }
 
 #[test]
-fn encode_prefers_fxcs_over_conflicting_riff_cue() {
-    let raw_cuesheet = rich_cuesheet_payload();
-    let wav = wav_with_chunks(
-        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
-        &[
-            (*b"cue ", cue_chunk(&[1_024])),
-            (*b"fxcs", fxcs_chunk_payload(&raw_cuesheet)),
-        ],
-    );
-
-    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
-        .encode_bytes(&wav)
-        .unwrap();
-    let blocks = flac_metadata_blocks(&flac);
-    let cuesheet = blocks
-        .iter()
-        .find(|block| block.block_type == 5)
-        .expect("cuesheet block present");
-
-    assert_eq!(cuesheet.payload, raw_cuesheet);
-}
-
-#[test]
-fn rejects_malformed_fxcs_even_when_riff_cue_fallback_exists() {
-    let mut malformed_fxcs = fxcs_chunk_payload(&rich_cuesheet_payload());
-    malformed_fxcs.push(0);
-    let wav = wav_with_chunks(
-        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
-        &[
-            (*b"cue ", cue_chunk(&[0, 2_048])),
-            (*b"fxcs", malformed_fxcs),
-        ],
-    );
-
-    let error = Encoder::new(EncoderConfig::default().with_threads(2))
-        .encode_bytes(&wav)
-        .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("fxcs payload has trailing bytes")
-    );
-}
-
-#[test]
-fn rejects_unsupported_fxcs_version() {
-    let mut unsupported_fxcs = fxcs_chunk_payload(&rich_cuesheet_payload());
-    unsupported_fxcs[..4].copy_from_slice(&2u32.to_le_bytes());
-    let wav = wav_with_chunks(
-        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
-        &[(*b"fxcs", unsupported_fxcs)],
-    );
-
-    let error = Encoder::new(EncoderConfig::default().with_threads(2))
-        .encode_bytes(&wav)
-        .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("fxcs payload version is unsupported")
-    );
-}
-
-#[test]
-fn rejects_duplicate_fxcs_chunks() {
-    let raw_cuesheet = rich_cuesheet_payload();
-    let wav = wav_with_chunks(
-        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
-        &[
-            (*b"fxcs", fxcs_chunk_payload(&raw_cuesheet)),
-            (*b"fxcs", fxcs_chunk_payload(&raw_cuesheet)),
-        ],
-    );
-
-    let error = Encoder::new(EncoderConfig::default().with_threads(2))
-        .encode_bytes(&wav)
-        .unwrap_err();
-
-    assert!(error.to_string().contains("duplicate fxcs chunk"));
-}
-
-#[test]
-fn encode_falls_back_to_legacy_riff_cue_when_fxcs_absent() {
+fn encodes_riff_cue_when_no_canonical_private_chunk_exists() {
     let wav = wav_with_chunks(
         pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
         &[(*b"cue ", cue_chunk(&[0, 2_048]))],
@@ -501,27 +328,6 @@ fn encode_falls_back_to_legacy_riff_cue_when_fxcs_absent() {
         cuesheet.payload,
         support::cuesheet_block(&[0, 2_048], 4_096).payload
     );
-}
-
-#[test]
-fn round_trips_cuesheet_payload_bytes_exactly() {
-    let raw_cuesheet = rich_cuesheet_payload();
-    let flac = flacx::encode_bytes(&wav_with_chunks(
-        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
-        &[(*b"fxcs", fxcs_chunk_payload(&raw_cuesheet))],
-    ))
-    .unwrap();
-    let decoded = decode_bytes(&flac).unwrap();
-    let reencoded = Encoder::new(EncoderConfig::default().with_threads(2))
-        .encode_bytes(&decoded)
-        .unwrap();
-    let blocks = flac_metadata_blocks(&reencoded);
-    let cuesheet = blocks
-        .iter()
-        .find(|block| block.block_type == 5)
-        .expect("cuesheet block present");
-
-    assert_eq!(cuesheet.payload, raw_cuesheet);
 }
 
 #[test]

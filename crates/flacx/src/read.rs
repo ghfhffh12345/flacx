@@ -28,8 +28,11 @@ use crate::{
 
 const FLAC_MAGIC: &[u8; 4] = b"fLaC";
 const STREAMINFO_BLOCK_TYPE: u8 = 0;
+const APPLICATION_BLOCK_TYPE: u8 = 2;
 const VORBIS_COMMENT_BLOCK_TYPE: u8 = 4;
 const CUESHEET_BLOCK_TYPE: u8 = 5;
+const PADDING_BLOCK_TYPE: u8 = 1;
+const PICTURE_BLOCK_TYPE: u8 = 6;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 const FRAME_CHUNK_SIZE: usize = 32;
 
@@ -1028,6 +1031,7 @@ fn parse_metadata(
             saw_streaminfo = true;
         } else if block_type == SEEKTABLE_BLOCK_TYPE {
             let seektable_result = validate_seektable_payload(&bytes[offset..offset + block_len]);
+            let seektable_is_valid = seektable_result.is_ok();
             if strict_seektable_validation {
                 seektable_result?;
                 if saw_seektable {
@@ -1036,8 +1040,27 @@ fn parse_metadata(
                     ));
                 }
             }
+            if seektable_is_valid {
+                metadata.ingest_flac_metadata_block(
+                    block_type,
+                    &bytes[offset..offset + block_len],
+                    stream_info
+                        .expect("streaminfo parsed before optional metadata")
+                        .total_samples,
+                    stream_info
+                        .expect("streaminfo parsed before optional metadata")
+                        .channels,
+                )?;
+            }
             saw_seektable = true;
-        } else if matches!(block_type, VORBIS_COMMENT_BLOCK_TYPE | CUESHEET_BLOCK_TYPE) {
+        } else if matches!(
+            block_type,
+            PADDING_BLOCK_TYPE
+                | APPLICATION_BLOCK_TYPE
+                | VORBIS_COMMENT_BLOCK_TYPE
+                | CUESHEET_BLOCK_TYPE
+                | PICTURE_BLOCK_TYPE
+        ) {
             metadata.ingest_flac_metadata_block(
                 block_type,
                 &bytes[offset..offset + block_len],

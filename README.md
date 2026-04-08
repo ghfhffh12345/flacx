@@ -98,6 +98,15 @@ Common behavior:
 - decode defaults to the library's decode configuration when `--threads` is
   omitted
 - interactive terminals show live progress for both encode and decode
+- decoded WAV output may include a private canonical preservation chunk plus
+  derived `LIST` / `cue ` mirrors so FLAC metadata can round-trip back through
+  WAV without loss
+
+Compatibility note:
+
+- current workspace builds use the unified `fxmd` preservation chunk only
+- older split private chunks such as `fxvc` / `fxcs` are no longer recognized
+  by runtime code and are treated like unknown WAV chunks
 
 See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for the full CLI
 guide and flag behavior.
