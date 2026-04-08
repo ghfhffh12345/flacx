@@ -12,26 +12,13 @@ Build the release binary from the workspace root:
 cargo build --release
 ```
 
-Then run the binary directly from `target/release/`:
+Then run `flacx` directly from `target/release/` (or after adding that directory to your `PATH`):
 
 ```bash
-target/release/flacx --help
-```
-
-Or invoke it through Cargo while you iterate:
-
-```bash
-cargo run -p flacx-cli --release -- --help
-```
-
-Common direct examples:
-
-```bash
-target/release/flacx encode input.wav -o output.flac --level 8 --threads 4
-target/release/flacx encode album-dir -o encoded-album --depth 0
-target/release/flacx decode input.flac -o output.wav --threads 4
-target/release/flacx decode input.flac --mode strict
-target/release/flacx decode encoded-album -o decoded-album --depth 0
+flacx encode input.wav -o output.flac --level 8 --threads 4
+flacx encode album-dir -o encoded-album --depth 0
+flacx decode input.flac -o output.wav --threads 4
+flacx decode encoded-album -o decoded-album --depth 0
 ```
 
 ## Command model
