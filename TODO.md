@@ -1,4 +1,3 @@
-2. Broaden `CUESHEET` support beyond basic cue-point offsets (RFC 9639 Sections 8.7, 8.7.1).
-3. Add encoder-side `PADDING` metadata block support (RFC 9639 Section 8.3).
-4. Add `PICTURE` metadata block support (RFC 9639 Section 8.8).
-5. Add `APPLICATION` metadata block support (RFC 9639 Section 8.4).
+1. Add encoder-side `PADDING` metadata block support (RFC 9639 Section 8.3).
+2. Add `PICTURE` metadata block support (RFC 9639 Section 8.8).
+3. Add `APPLICATION` metadata block support (RFC 9639 Section 8.4).

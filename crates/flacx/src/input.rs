@@ -4,7 +4,7 @@ use std::{
     thread,
 };
 
-use crate::metadata::{EncodeMetadata, FXVC_CHUNK_ID, MetadataDraft};
+use crate::metadata::{EncodeMetadata, FXCS_CHUNK_ID, FXVC_CHUNK_ID, MetadataDraft};
 use crate::{
     error::{Error, Result},
     md5::digest_bytes,
@@ -413,7 +413,10 @@ fn should_preserve_channel_mask(channels: u16, mask: u32) -> bool {
 }
 
 fn is_captured_metadata_chunk(chunk_id: [u8; 4]) -> bool {
-    matches!(&chunk_id, b"LIST" | b"cue " | &FXVC_CHUNK_ID)
+    matches!(
+        &chunk_id,
+        b"LIST" | b"cue " | &FXVC_CHUNK_ID | &FXCS_CHUNK_ID
+    )
 }
 
 fn is_supported_channel_mask(channels: u16, mask: u32) -> bool {
