@@ -61,15 +61,12 @@ assert_eq!(encode_summary.total_samples, decode_summary.total_samples);
 Recompress an existing FLAC with a different output profile:
 
 ```rust,no_run
-use flacx::{EncoderConfig, RecompressConfig, Recompressor, level::Level};
+use flacx::{RecompressConfig, RecompressMode, Recompressor, level::Level};
 
 let config = RecompressConfig::builder()
-    .encode_config(
-        EncoderConfig::builder()
-            .level(Level::Level0)
-            .threads(2)
-            .build(),
-    )
+    .mode(RecompressMode::Default)
+    .level(Level::Level0)
+    .threads(2)
     .build();
 
 let summary = Recompressor::new(config)
@@ -150,11 +147,33 @@ assert_eq!(encoder_config.level, Level::Level4);
 assert_eq!(decoder_config.threads, 4);
 ```
 
+`RecompressConfig` controls FLAC-to-FLAC recompression:
+
+- `mode` selects `loose`, `default`, or `strict` recompress-side metadata handling
+- `level` selects the output compression preset
+- `threads` sets the worker count shared by decode and encode phases
+- `block_size` optionally overrides the encode-side FLAC block size
+
+```rust,no_run
+use flacx::{RecompressConfig, RecompressMode, level::Level};
+
+let recompress_config = RecompressConfig::default()
+    .with_mode(RecompressMode::Strict)
+    .with_level(Level::Level0)
+    .with_threads(2)
+    .with_block_size(1024);
+
+assert_eq!(recompress_config.mode(), RecompressMode::Strict);
+assert_eq!(recompress_config.level(), Level::Level0);
+assert_eq!(recompress_config.threads(), 2);
+assert_eq!(recompress_config.block_size(), Some(1024));
+```
+
 Notes:
 
 - `with_threads(0)` clamps to at least one thread.
-- `with_level(...)` resets the block size to the preset’s default block size.
-- `with_block_size(...)` clears any previously configured block schedule.
+- `with_level(...)` resets the explicit block-size override so the selected level controls the default block size again.
+- `with_block_size(...)` installs a fixed encode-side block-size override for recompress output.
 
 ## Byte helpers
 
@@ -255,7 +274,7 @@ Progress support is behind the optional `progress` feature and is disabled by
 default.
 
 ```rust,no_run
-use flacx::{Encoder, EncoderConfig, ProgressSnapshot};
+use flacx::{Encoder, EncoderConfig, ProgressSnapshot, RecompressConfig, Recompressor};
 use std::io::Cursor;
 
 let encoder = Encoder::new(EncoderConfig::default());
@@ -274,17 +293,37 @@ let _summary = encoder
         Ok(())
     })
     .unwrap();
+
+let mut recompress_output = Cursor::new(Vec::new());
+let _summary = Recompressor::new(RecompressConfig::default())
+    .recompress_with_progress(
+        Cursor::new(std::fs::read("input.flac").unwrap()),
+        &mut recompress_output,
+        |progress| {
+            println!(
+                "{} {} / {}",
+                progress.phase.as_str(),
+                progress.overall_processed_samples,
+                progress.overall_total_samples
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
 ```
 
 When enabled, the progress surface includes:
 
 - `ProgressSnapshot`
+- `RecompressProgress`
 - `EncodeProgress`
 - `DecodeProgress`
 - `Encoder::encode_with_progress`
 - `Encoder::encode_file_with_progress`
 - `Decoder::decode_with_progress`
 - `Decoder::decode_file_with_progress`
+- `Recompressor::recompress_with_progress`
+- `Recompressor::recompress_file_with_progress`
 
 The CLI crate enables this feature and uses it to render its live terminal
 progress UI.

@@ -157,6 +157,7 @@ fn recompress_help_lists_output_depth_mode_and_block_size() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("-o, --output <OUTPUT>"));
+    assert!(stdout.contains("--in-place"));
     assert!(stdout.contains("--depth <DEPTH>"));
     assert!(stdout.contains("--mode <MODE>"));
     assert!(stdout.contains("--level <LEVEL>"));
@@ -246,12 +247,10 @@ fn recompress_command_matches_library_output() {
     );
     let cli_bytes = fs::read(&output_path).unwrap();
     let library_bytes = Recompressor::new(
-        RecompressConfig::default().with_encode_config(
-            EncoderConfig::default()
-                .with_level(Level::Level0)
-                .with_threads(1)
-                .with_block_size(576),
-        ),
+        RecompressConfig::default()
+            .with_level(Level::Level0)
+            .with_threads(1)
+            .with_block_size(576),
     )
     .recompress_bytes(&flac)
     .unwrap();
@@ -356,10 +355,9 @@ fn recompress_directory_without_output_writes_sibling_recompressed_files() {
     let command = RecompressCommand {
         input: input_dir.clone(),
         output: None,
+        in_place: false,
         depth: 0,
-        config: RecompressConfig::default()
-            .with_encode_config(EncoderConfig::default().with_threads(1))
-            .with_decode_config(DecodeConfig::default().with_threads(1)),
+        config: RecompressConfig::default().with_threads(1),
     };
     let mut stderr = Vec::new();
 
@@ -383,9 +381,115 @@ fn recompress_directory_without_output_writes_sibling_recompressed_files() {
     assert_eq!(final_lines.len(), 2);
     assert!(final_lines[0].starts_with("Batch | "));
     assert!(
-        final_lines[1].contains("disc1/first.flac | File | ")
-            || final_lines[1].contains("disc1/second.flac | File | ")
+        final_lines[1].contains("disc1/first.flac | Encode | ")
+            || final_lines[1].contains("disc1/second.flac | Encode | ")
     );
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_interactive_progress_reports_decode_and_encode_phases() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("album.flac");
+    write_flac_file(&input_path, 1, 2_048);
+    let output_path = input_dir.join("album.recompressed.flac");
+    let command = RecompressCommand {
+        input: input_path.clone(),
+        output: Some(output_path),
+        in_place: false,
+        depth: 1,
+        config: RecompressConfig::default().with_threads(1),
+    };
+    let mut stderr = Vec::new();
+
+    recompress_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains(" | Decode | "));
+    assert!(stderr.contains(" | Encode | "));
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_single_file_in_place_requires_explicit_opt_in() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("album.flac");
+    let (_, original) = write_flac_file(&input_path, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "recompress",
+            input_path.to_str().unwrap(),
+            "--in-place",
+            "--level",
+            "0",
+            "--threads",
+            "1",
+            "--block-size",
+            "576",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rewritten = fs::read(&input_path).unwrap();
+    assert_ne!(rewritten, original);
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_rejects_in_place_when_output_is_also_supplied() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("album.flac");
+    write_flac_file(&input_path, 1, 2_048);
+    let output_path = input_dir.join("album.recompressed.flac");
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "recompress",
+            input_path.to_str().unwrap(),
+            "--in-place",
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_directory_in_place_rewrites_existing_sources() {
+    let input_dir = unique_temp_dir();
+    let first = input_dir.join("disc1").join("first.flac");
+    let second = input_dir.join("disc1").join("second.flac");
+    let (_, first_original) = write_flac_file(&first, 1, 1_024);
+    let (_, second_original) = write_flac_file(&second, 1, 2_048);
+
+    let command = RecompressCommand {
+        input: input_dir.clone(),
+        output: None,
+        in_place: true,
+        depth: 0,
+        config: RecompressConfig::default()
+            .with_level(Level::Level0)
+            .with_threads(1)
+            .with_block_size(576),
+    };
+
+    recompress_command(&command, false, &mut Vec::new()).unwrap();
+
+    assert_ne!(fs::read(&first).unwrap(), first_original);
+    assert_ne!(fs::read(&second).unwrap(), second_original);
 
     let _ = fs::remove_dir_all(input_dir);
 }

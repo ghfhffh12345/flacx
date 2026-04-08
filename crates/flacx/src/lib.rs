@@ -8,8 +8,7 @@
 //! The API is intentionally small:
 //!
 //! - [`EncoderConfig`] and [`DecodeConfig`] hold user-facing settings.
-//! - [`RecompressConfig`] composes the existing decode and encode settings for
-//!   FLAC-to-FLAC recompression.
+//! - [`RecompressConfig`] exposes curated FLAC-to-FLAC recompression settings.
 //! - [`Encoder`], [`Decoder`], and [`Recompressor`] provide the main streaming
 //!   façades.
 //! - [`encode_file`], [`encode_bytes`], [`decode_file`], and [`decode_bytes`]
@@ -49,18 +48,15 @@
 //!     .unwrap();
 //! ```
 //!
-//! Recompress an existing FLAC with a different encode configuration:
+//! Recompress an existing FLAC with a different output profile:
 //!
 //! ```no_run
-//! use flacx::{Decoder, EncoderConfig, RecompressConfig, Recompressor, level::Level};
+//! use flacx::{Decoder, RecompressConfig, RecompressMode, Recompressor, level::Level};
 //!
 //! let config = RecompressConfig::builder()
-//!     .encode_config(
-//!         EncoderConfig::builder()
-//!             .level(Level::Level0)
-//!             .threads(2)
-//!             .build(),
-//!     )
+//!     .mode(RecompressMode::Default)
+//!     .level(Level::Level0)
+//!     .threads(2)
 //!     .build();
 //!
 //! Recompressor::new(config)
@@ -95,27 +91,44 @@
 //!
 //! ## Progress feature
 //!
-//! When the `progress` feature is enabled, encode and decode operations can
-//! report [`ProgressSnapshot`] updates through callbacks.
+//! When the `progress` feature is enabled, encode/decode operations can report
+//! [`ProgressSnapshot`] updates, and recompress operations can report
+//! phase-aware [`RecompressProgress`] updates.
 //!
 //! ```no_run
 //! # #[cfg(feature = "progress")]
 //! # {
-//! use flacx::{Decoder, Encoder, EncoderConfig, ProgressSnapshot};
+//! use flacx::{Encoder, EncoderConfig, ProgressSnapshot, RecompressConfig, Recompressor};
 //!
 //! let encoder = Encoder::new(EncoderConfig::default());
 //! encoder.encode_file_with_progress("input.wav", "output.flac", |progress: ProgressSnapshot| {
 //!     println!("{} / {} samples", progress.processed_samples, progress.total_samples);
 //!     Ok(())
 //! }).unwrap();
+//!
+//! let recompressor = Recompressor::new(RecompressConfig::default());
+//! recompressor.recompress_file_with_progress(
+//!     "input.flac",
+//!     "input.recompressed.flac",
+//!     |progress| {
+//!         println!(
+//!             "{} {} / {}",
+//!             progress.phase.as_str(),
+//!             progress.overall_processed_samples,
+//!             progress.overall_total_samples
+//!         );
+//!         Ok(())
+//!     },
+//! ).unwrap();
 //! # }
 //! ```
 //!
 //! ## Supported scope
 //!
-//! This crate focuses on the current WAV <-> FLAC conversion surface used by
-//! the workspace. The crate documentation intentionally stays aligned with the
-//! exported API so that docs.rs readers can use it as the canonical reference.
+//! This crate focuses on the current WAV <-> FLAC conversion and FLAC -> FLAC
+//! recompression surface used by the workspace. The crate documentation
+//! intentionally stays aligned with the exported API so that docs.rs readers
+//! can use it as the canonical reference.
 
 mod config;
 mod crc;
@@ -143,7 +156,8 @@ pub use decode::{DecodeSummary, Decoder, decode_bytes, decode_file};
 pub use encoder::{EncodeSummary, Encoder, encode_bytes, encode_file};
 pub use error::{Error, Result};
 pub use recompress::{
-    RecompressBuilder, RecompressConfig, Recompressor, recompress_bytes, recompress_file,
+    RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress,
+    Recompressor, recompress_bytes, recompress_file,
 };
 
 /// Inspect a WAV stream and return its total sample count without decoding it.

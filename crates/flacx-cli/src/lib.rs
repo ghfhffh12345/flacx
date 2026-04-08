@@ -4,15 +4,15 @@
 //! this workspace. It stays separate from the publishable `flacx` library
 //! crate while reusing the same encode/decode pipeline and workspace version.
 //!
-//! Progress rendering stays a CLI concern. The library reports real encode and
-//! decode progress, while this crate decides when and how to render live
-//! single-file and batch progress.
+//! Progress rendering stays a CLI concern. The library reports real encode,
+//! decode, and recompress progress, while this crate decides when and how to
+//! render live single-file and batch progress.
 //!
 //! # Command shape
 //!
 //! - `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
 //! - `flacx decode <input> [-o <output-or-dir>] [--depth <depth>]`
-//! - `flacx recompress <input> [-o <output-or-dir>] [--depth <depth>]`
+//! - `flacx recompress <input> [-o <output-or-dir>] [--in-place] [--depth <depth>]`
 //! - encode-only flags:
 //!   - `--output`
 //!   - `--level`
@@ -27,6 +27,7 @@
 //!   - `--depth` (directory input only)
 //! - recompress-only flags:
 //!   - `--output`
+//!   - `--in-place`
 //!   - `--level`
 //!   - `--threads`
 //!   - `--block-size`
@@ -43,7 +44,8 @@ use std::{
 
 use flacx::{
     DecodeConfig, Decoder, Encoder, EncoderConfig, Error, ProgressSnapshot, RecompressConfig,
-    Recompressor, Result, inspect_flac_total_samples, inspect_wav_total_samples,
+    RecompressPhase, RecompressProgress, Recompressor, Result, inspect_flac_total_samples,
+    inspect_wav_total_samples,
 };
 use walkdir::WalkDir;
 
@@ -73,6 +75,7 @@ pub struct DecodeCommand {
 pub struct RecompressCommand {
     pub input: PathBuf,
     pub output: Option<PathBuf>,
+    pub in_place: bool,
     pub depth: usize,
     pub config: RecompressConfig,
 }
@@ -195,7 +198,8 @@ struct ConversionWorkItem {
     display_name: String,
     ensure_parent_dirs: bool,
     input_bytes: u64,
-    total_samples: u64,
+    phase_total_samples: u64,
+    overall_total_samples: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +207,7 @@ struct ProgressDisplay {
     filename: String,
     overall: SampleProgress,
     file: Option<SampleProgress>,
+    phase_label: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,9 +225,12 @@ struct SampleProgress {
 struct CurrentFileProgress {
     filename: String,
     input_bytes: u64,
-    total_samples: u64,
+    phase_total_samples: u64,
+    overall_total_samples: u64,
+    phase: Option<RecompressPhase>,
     saw_update: bool,
     started_at: Option<Instant>,
+    phase_started_at: Option<Instant>,
 }
 
 struct ProgressTrace {
@@ -251,7 +259,12 @@ pub fn encode_command(
         if item.ensure_parent_dirs {
             ensure_output_parent_dirs(&item.output)?;
         }
-        progress.begin_file(&item.display_name, item.input_bytes, item.total_samples);
+        progress.begin_file(
+            &item.display_name,
+            item.input_bytes,
+            item.phase_total_samples,
+            item.overall_total_samples,
+        );
         let result = Encoder::new(command.config.clone()).encode_file_with_progress(
             &item.input,
             &item.output,
@@ -293,7 +306,12 @@ pub fn decode_command(
         if item.ensure_parent_dirs {
             ensure_output_parent_dirs(&item.output)?;
         }
-        progress.begin_file(&item.display_name, item.input_bytes, item.total_samples);
+        progress.begin_file(
+            &item.display_name,
+            item.input_bytes,
+            item.phase_total_samples,
+            item.overall_total_samples,
+        );
         let result = Decoder::new(command.config).decode_file_with_progress(
             &item.input,
             &item.output,
@@ -336,12 +354,17 @@ pub fn recompress_command(
         if item.ensure_parent_dirs {
             ensure_output_parent_dirs(&item.output)?;
         }
-        progress.begin_file(&item.display_name, item.input_bytes, item.total_samples);
-        let result = Recompressor::new(command.config.clone()).recompress_file_with_progress(
+        progress.begin_file(
+            &item.display_name,
+            item.input_bytes,
+            item.phase_total_samples,
+            item.overall_total_samples,
+        );
+        let result = Recompressor::new(command.config).recompress_file_with_progress(
             &item.input,
             &item.output,
-            |update| {
-                progress.observe(update)?;
+            |update: RecompressProgress| {
+                progress.observe_recompress(update)?;
                 Ok(())
             },
         );
@@ -380,13 +403,16 @@ fn plan_decode_worklist(command: &DecodeCommand) -> Result<PlannedWorklist> {
 }
 
 fn plan_recompress_worklist(command: &RecompressCommand) -> Result<PlannedWorklist> {
-    plan_worklist(
-        CommandKind::Recompress,
-        &command.input,
-        command.output.as_deref(),
-        command.depth,
-        inspect_flac_file_total_samples,
-    )
+    if command.input.is_dir() {
+        plan_recompress_directory_worklist(command)
+    } else {
+        let item = plan_recompress_single_file_work_item(command)?;
+        Ok(PlannedWorklist {
+            total_samples: item.overall_total_samples,
+            items: vec![item],
+            is_directory: false,
+        })
+    }
 }
 
 fn plan_worklist(
@@ -401,7 +427,7 @@ fn plan_worklist(
     } else {
         let item = plan_single_file_work_item(kind, input, output, inspect_total_samples)?;
         Ok(PlannedWorklist {
-            total_samples: item.total_samples,
+            total_samples: item.overall_total_samples,
             items: vec![item],
             is_directory: false,
         })
@@ -414,6 +440,7 @@ fn plan_single_file_work_item(
     output: Option<&Path>,
     inspect_total_samples: fn(&Path) -> Result<u64>,
 ) -> Result<ConversionWorkItem> {
+    let total_samples = inspect_total_samples(input)?;
     let output = match output {
         Some(output) => {
             if output.is_dir() {
@@ -435,7 +462,8 @@ fn plan_single_file_work_item(
         display_name: file_display_name(input),
         ensure_parent_dirs: false,
         input_bytes: input_file_size(input)?,
-        total_samples: inspect_total_samples(input)?,
+        phase_total_samples: total_samples,
+        overall_total_samples: total_samples,
     })
 }
 
@@ -531,11 +559,126 @@ fn collect_directory_work_items(
             display_name,
             ensure_parent_dirs,
             input_bytes: input_file_size(entry.path())?,
-            total_samples: total_for_file,
+            phase_total_samples: total_for_file,
+            overall_total_samples: total_for_file,
         });
     }
 
     Ok((worklist, total_samples))
+}
+
+fn plan_recompress_single_file_work_item(
+    command: &RecompressCommand,
+) -> Result<ConversionWorkItem> {
+    let input = &command.input;
+    let phase_total_samples = inspect_flac_file_total_samples(input)?;
+    let overall_total_samples = phase_total_samples.saturating_mul(2);
+    let output = if command.in_place {
+        input.to_path_buf()
+    } else {
+        match command.output.as_deref() {
+            Some(output) => {
+                if output.is_dir() {
+                    return Err(CommandKind::Recompress
+                        .planning_error(CommandKind::Recompress.single_file_output_error(output)));
+                }
+                if output == input {
+                    return Err(CommandKind::Recompress
+                        .planning_error("single-file recompress output must differ from the input path unless --in-place is used"));
+                }
+                output.to_path_buf()
+            }
+            None => CommandKind::Recompress.default_output_path(input),
+        }
+    };
+
+    Ok(ConversionWorkItem {
+        input: input.to_path_buf(),
+        output,
+        display_name: file_display_name(input),
+        ensure_parent_dirs: false,
+        input_bytes: input_file_size(input)?,
+        phase_total_samples,
+        overall_total_samples,
+    })
+}
+
+fn plan_recompress_directory_worklist(command: &RecompressCommand) -> Result<PlannedWorklist> {
+    let output_root = if command.in_place {
+        None
+    } else {
+        match command.output.as_deref() {
+            Some(output_root) => {
+                if output_root == command.input {
+                    return Err(CommandKind::Recompress.planning_error(
+                        "folder recompress output root must differ from the input directory unless --in-place is used",
+                    ));
+                }
+                Some(validate_or_create_output_root(
+                    CommandKind::Recompress,
+                    output_root,
+                )?)
+            }
+            None => None,
+        }
+    };
+
+    let mut walker = WalkDir::new(&command.input)
+        .follow_links(false)
+        .min_depth(1);
+    if command.depth != 0 {
+        walker = walker.max_depth(command.depth);
+    }
+
+    let mut items = Vec::new();
+    let mut total_samples = 0u64;
+    for entry in walker {
+        let entry = entry.map_err(|error| {
+            CommandKind::Recompress
+                .planning_error(CommandKind::Recompress.traversal_error(&command.input, &error))
+        })?;
+        if !entry.file_type().is_file() || !has_extension(entry.path(), "flac") {
+            continue;
+        }
+
+        let input = entry.path().to_path_buf();
+        let relative = input.strip_prefix(&command.input).map_err(|_| {
+            CommandKind::Recompress.planning_error("failed to derive relative input path")
+        })?;
+        let phase_total_samples = inspect_flac_file_total_samples(&input)?;
+        let overall_total_samples = phase_total_samples.saturating_mul(2);
+        total_samples = total_samples
+            .checked_add(overall_total_samples)
+            .ok_or_else(|| {
+                CommandKind::Recompress
+                    .planning_error("total sample count overflowed batch progress accounting")
+            })?;
+        let display_name = relative_display_name(relative);
+        let (output, ensure_parent_dirs) = if command.in_place {
+            (input.clone(), false)
+        } else if let Some(output_root) = output_root.as_deref() {
+            (output_root.join(relative).with_extension("flac"), true)
+        } else {
+            (CommandKind::Recompress.default_output_path(&input), false)
+        };
+
+        items.push(ConversionWorkItem {
+            input,
+            output,
+            display_name,
+            ensure_parent_dirs,
+            input_bytes: input_file_size(entry.path())?,
+            phase_total_samples,
+            overall_total_samples,
+        });
+    }
+
+    items.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    Ok(PlannedWorklist {
+        items,
+        total_samples,
+        is_directory: true,
+    })
 }
 
 fn inspect_wav_file_total_samples(path: &Path) -> Result<u64> {
@@ -665,13 +808,22 @@ impl<W: Write> BatchProgressCoordinator<W> {
         }
     }
 
-    fn begin_file(&mut self, filename: &str, input_bytes: u64, total_samples: u64) {
+    fn begin_file(
+        &mut self,
+        filename: &str,
+        input_bytes: u64,
+        phase_total_samples: u64,
+        overall_total_samples: u64,
+    ) {
         self.current_file = Some(CurrentFileProgress {
             filename: filename.to_string(),
             input_bytes,
-            total_samples,
+            phase_total_samples,
+            overall_total_samples,
+            phase: None,
             saw_update: false,
             started_at: Some(Instant::now()),
+            phase_started_at: None,
         });
         self.file_state = ProgressState::default();
     }
@@ -680,6 +832,11 @@ impl<W: Write> BatchProgressCoordinator<W> {
         let batch_elapsed = self.batch_elapsed();
         let file_elapsed = self.current_file_elapsed();
         self.observe_with_elapsed(progress, batch_elapsed, file_elapsed)
+    }
+
+    fn observe_recompress(&mut self, progress: RecompressProgress) -> std::io::Result<()> {
+        let batch_elapsed = self.batch_elapsed();
+        self.observe_recompress_with_elapsed(progress, batch_elapsed)
     }
 
     fn observe_with_elapsed(
@@ -694,14 +851,14 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 .as_mut()
                 .expect("current file must be set");
             current.saw_update = true;
-            (current.filename.clone(), current.total_samples)
+            (current.filename.clone(), current.phase_total_samples)
         };
         let force_render = progress.processed_samples >= total_samples
             || self
                 .completed_samples
                 .saturating_add(progress.processed_samples)
                 >= self.total_samples;
-        let identities = progress_frame_identities(&filename, self.batch_mode);
+        let identities = progress_frame_identities(&filename, self.batch_mode, None);
         if !self
             .renderer
             .should_render(force_render, &identities, self.batch_mode)
@@ -735,11 +892,70 @@ impl<W: Write> BatchProgressCoordinator<W> {
         self.renderer.render(frame)
     }
 
+    fn observe_recompress_with_elapsed(
+        &mut self,
+        progress: RecompressProgress,
+        batch_elapsed: Duration,
+    ) -> std::io::Result<()> {
+        let (filename, phase_label) = {
+            let current = self
+                .current_file
+                .as_mut()
+                .expect("current file must be set");
+            current.saw_update = true;
+            if current.phase != Some(progress.phase) {
+                current.phase = Some(progress.phase);
+                current.phase_started_at = Some(Instant::now());
+                self.file_state = ProgressState::default();
+            }
+            let phase_label = current.phase.expect("phase must be set").as_str();
+            (current.filename.clone(), phase_label)
+        };
+        let phase_elapsed = self.current_phase_elapsed();
+        let force_render = progress.overall_processed_samples >= progress.overall_total_samples
+            || self
+                .completed_samples
+                .saturating_add(progress.overall_processed_samples)
+                >= self.total_samples;
+        let identities = progress_frame_identities(&filename, self.batch_mode, Some(phase_label));
+        if !self
+            .renderer
+            .should_render(force_render, &identities, self.batch_mode)
+        {
+            return Ok(());
+        }
+
+        let display = self.display_for_recompress_progress(&filename, progress);
+        let overall_estimate = self.overall_state.observe(
+            display
+                .overall
+                .processed_samples
+                .min(display.overall.total_samples),
+            display.overall.total_samples,
+            batch_elapsed,
+        );
+        let file_estimate = display.file.map(|file| {
+            self.file_state.observe(
+                file.processed_samples.min(file.total_samples),
+                file.total_samples,
+                phase_elapsed,
+            )
+        });
+        let frame = format_progress_frame(
+            &display,
+            &overall_estimate,
+            file_estimate.as_ref(),
+            batch_elapsed,
+            phase_elapsed,
+        );
+        self.renderer.render(frame)
+    }
+
     fn finish_current_file(&mut self) -> std::io::Result<()> {
         let Some((needs_final_update, total_samples)) = self
             .current_file
             .as_ref()
-            .map(|current| (!current.saw_update, current.total_samples))
+            .map(|current| (!current.saw_update, current.phase_total_samples))
         else {
             return Ok(());
         };
@@ -767,7 +983,9 @@ impl<W: Write> BatchProgressCoordinator<W> {
                     .map_or(Duration::ZERO, |started_at| started_at.elapsed()),
             )?;
         }
-        self.completed_samples = self.completed_samples.saturating_add(current.total_samples);
+        self.completed_samples = self
+            .completed_samples
+            .saturating_add(current.overall_total_samples);
         Ok(())
     }
 
@@ -790,6 +1008,15 @@ impl<W: Write> BatchProgressCoordinator<W> {
             .as_mut()
             .expect("current file must be set before observing progress");
         let started_at = current.started_at.get_or_insert_with(Instant::now);
+        started_at.elapsed()
+    }
+
+    fn current_phase_elapsed(&mut self) -> Duration {
+        let current = self
+            .current_file
+            .as_mut()
+            .expect("current file must be set before observing phase progress");
+        let started_at = current.phase_started_at.get_or_insert_with(Instant::now);
         started_at.elapsed()
     }
 
@@ -820,6 +1047,37 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 processed_samples: file_processed,
                 total_samples: file_total_samples,
             }),
+            phase_label: None,
+        }
+    }
+
+    fn display_for_recompress_progress(
+        &self,
+        filename: &str,
+        progress: RecompressProgress,
+    ) -> ProgressDisplay {
+        let overall_processed = if self.batch_mode {
+            self.completed_samples
+                .saturating_add(progress.overall_processed_samples)
+        } else {
+            progress.overall_processed_samples
+        };
+
+        ProgressDisplay {
+            filename: filename.to_string(),
+            overall: SampleProgress {
+                processed_samples: overall_processed.min(self.total_samples),
+                total_samples: if self.batch_mode {
+                    self.total_samples
+                } else {
+                    progress.overall_total_samples
+                },
+            },
+            file: self.batch_mode.then_some(SampleProgress {
+                processed_samples: progress.phase_processed_samples,
+                total_samples: progress.phase_total_samples,
+            }),
+            phase_label: Some(progress.phase.as_str()),
         }
     }
 }
@@ -997,7 +1255,13 @@ fn format_progress_frame(
         return ProgressFrame {
             lines: vec![
                 format_batch_overall_line(display.overall, overall_estimate, batch_elapsed),
-                format_batch_file_line(&display.filename, file, file_estimate, file_elapsed),
+                format_batch_file_line(
+                    &display.filename,
+                    display.phase_label.unwrap_or("File"),
+                    file,
+                    file_estimate,
+                    file_elapsed,
+                ),
             ],
         };
     }
@@ -1005,6 +1269,7 @@ fn format_progress_frame(
     ProgressFrame {
         lines: vec![format_single_file_line(
             &display.filename,
+            display.phase_label,
             display.overall,
             overall_estimate,
             batch_elapsed,
@@ -1041,12 +1306,16 @@ fn format_progress_line(
 
 fn format_single_file_line(
     filename: &str,
+    phase_label: Option<&str>,
     progress: SampleProgress,
     estimate: &ProgressEstimate,
     elapsed: Duration,
 ) -> String {
+    let label = phase_label
+        .map(|phase| format!("{filename} | {phase}"))
+        .unwrap_or_else(|| filename.to_string());
     format_progress_line(
-        filename,
+        &label,
         progress,
         estimate,
         elapsed,
@@ -1070,6 +1339,7 @@ fn format_batch_overall_line(
 
 fn format_batch_file_line(
     filename: &str,
+    phase_label: &str,
     progress: SampleProgress,
     estimate: &ProgressEstimate,
     elapsed: Duration,
@@ -1077,7 +1347,7 @@ fn format_batch_file_line(
     format!(
         "{filename} | {}",
         format_progress_line(
-            "File",
+            phase_label,
             progress,
             estimate,
             elapsed,
@@ -1086,11 +1356,22 @@ fn format_batch_file_line(
     )
 }
 
-fn progress_frame_identities(filename: &str, batch_mode: bool) -> Vec<String> {
+fn progress_frame_identities(
+    filename: &str,
+    batch_mode: bool,
+    phase_label: Option<&str>,
+) -> Vec<String> {
     if batch_mode {
-        vec!["Batch".to_string(), format!("{filename} | File")]
+        vec![
+            "Batch".to_string(),
+            format!("{filename} | {}", phase_label.unwrap_or("File")),
+        ]
     } else {
-        vec![filename.to_string()]
+        vec![
+            phase_label
+                .map(|phase| format!("{filename} | {phase}"))
+                .unwrap_or_else(|| filename.to_string()),
+        ]
     }
 }
 
@@ -1103,10 +1384,17 @@ fn render_interval(batch_mode: bool) -> Duration {
 }
 
 fn frame_line_identity(line: &str) -> String {
-    if let Some((filename, _)) = line.split_once(" | File | ") {
-        return format!("{filename} | File");
+    if line.starts_with("Batch | ") {
+        return "Batch".to_string();
     }
-    line.split(" | ").next().unwrap_or_default().to_string()
+    let mut parts = line.split(" | ");
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next().unwrap_or_default();
+    if second.starts_with('[') || second.is_empty() {
+        first.to_string()
+    } else {
+        format!("{first} | {second}")
+    }
 }
 
 fn progress_ratio(progress: SampleProgress) -> f64 {
@@ -1166,7 +1454,7 @@ mod tests {
         ProgressRenderer, ProgressState, SampleProgress, format_progress_frame,
         progress_frame_identities, relative_display_name,
     };
-    use flacx::ProgressSnapshot;
+    use flacx::{ProgressSnapshot, RecompressPhase, RecompressProgress};
 
     fn final_frame_lines(output: &str) -> Vec<&str> {
         output
@@ -1208,6 +1496,7 @@ mod tests {
                         total_samples: 100,
                     },
                     file: None,
+                    phase_label: None,
                 },
                 &ProgressEstimate {
                     eta: Some(Duration::from_secs(0)),
@@ -1309,6 +1598,7 @@ mod tests {
                     processed_samples: 50,
                     total_samples: 100,
                 }),
+                phase_label: None,
             },
             &ProgressEstimate {
                 eta: Some(Duration::from_secs(3)),
@@ -1347,6 +1637,7 @@ mod tests {
                     processed_samples: 5,
                     total_samples: 50,
                 }),
+                phase_label: None,
             },
             &ProgressEstimate::warming_up(),
             None,
@@ -1396,7 +1687,7 @@ mod tests {
     #[test]
     fn batch_progress_uses_exact_total_samples_before_completion() {
         let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 300, true);
-        progress.begin_file("disc1/first.wav", 1_024, 100);
+        progress.begin_file("disc1/first.wav", 1_024, 100, 100);
         progress
             .observe_with_elapsed(
                 ProgressSnapshot {
@@ -1422,7 +1713,7 @@ mod tests {
 
     #[test]
     fn batch_renderer_uses_a_longer_refresh_interval_than_single_file_mode() {
-        let identities = progress_frame_identities("disc1/first.wav", true);
+        let identities = progress_frame_identities("disc1/first.wav", true, None);
         let mut renderer = ProgressRenderer::new(Vec::new(), true);
         renderer.has_drawn = true;
         renderer.last_line_identities = identities.clone();
@@ -1430,6 +1721,57 @@ mod tests {
 
         assert!(!renderer.should_render(false, &identities, true));
         assert!(renderer.should_render(false, &identities, false));
+    }
+
+    #[test]
+    fn recompress_batch_phase_switch_resets_file_estimate_state() {
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 200, true);
+        progress.begin_file("disc1/first.flac", 1_024, 100, 200);
+        progress
+            .observe_recompress(RecompressProgress {
+                phase: RecompressPhase::Decode,
+                phase_processed_samples: 50,
+                phase_total_samples: 100,
+                overall_processed_samples: 50,
+                overall_total_samples: 200,
+                completed_frames: 1,
+                total_frames: 2,
+            })
+            .unwrap();
+        progress.renderer.last_render_at = Some(Instant::now() - Duration::from_secs(1));
+        progress
+            .observe_recompress(RecompressProgress {
+                phase: RecompressPhase::Decode,
+                phase_processed_samples: 100,
+                phase_total_samples: 100,
+                overall_processed_samples: 100,
+                overall_total_samples: 200,
+                completed_frames: 2,
+                total_frames: 2,
+            })
+            .unwrap();
+        assert_eq!(progress.file_state.advancing_updates, 2);
+
+        progress
+            .observe_recompress(RecompressProgress {
+                phase: RecompressPhase::Encode,
+                phase_processed_samples: 10,
+                phase_total_samples: 100,
+                overall_processed_samples: 110,
+                overall_total_samples: 200,
+                completed_frames: 1,
+                total_frames: 2,
+            })
+            .unwrap();
+
+        assert_eq!(progress.file_state.advancing_updates, 1);
+        assert_eq!(
+            progress
+                .current_file
+                .as_ref()
+                .and_then(|current| current.phase),
+            Some(RecompressPhase::Encode)
+        );
     }
 
     #[test]
