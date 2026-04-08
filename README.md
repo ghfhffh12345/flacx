@@ -1,6 +1,6 @@
 # flacx workspace
 
-High-performance WAV/FLAC conversion in Rust.
+High-performance WAV/FLAC conversion and FLAC recompression in Rust.
 
 This repository is a Cargo workspace with two user-facing crates:
 
@@ -73,12 +73,15 @@ flacx encode input.wav -o output.flac --level 8 --threads 4
 flacx encode album-dir -o encoded-album --depth 0
 flacx decode input.flac -o output.wav --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
+flacx recompress input.flac -o input.recompressed.flac --level 0 --threads 4
+flacx recompress album-dir -o recompressed-album --depth 0
 ```
 
 Supported CLI shape:
 
 - `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
 - `flacx decode <input> [-o <output-or-dir>] [--depth <depth>]`
+- `flacx recompress <input> [-o <output-or-dir>] [--depth <depth>]`
 - encode-only flags:
   - `--output`
   - `--level`
@@ -89,6 +92,12 @@ Supported CLI shape:
   - `--output`
   - `--threads`
   - `--depth`
+- recompress-only flags:
+  - `--output`
+  - `--level`
+  - `--threads`
+  - `--block-size`
+  - `--depth`
 
 Encode/decode defaults and folder behavior:
 
@@ -98,12 +107,16 @@ Encode/decode defaults and folder behavior:
 - decode single-file input with no `-o` writes a sibling `.wav` next to the source FLAC
 - decode folder input with no `-o` writes `.wav` siblings next to each discovered FLAC
 - decode folder input with `-o <dir>` preserves relative subpaths under the destination root
+- recompress single-file input with no `-o` writes a sibling `.recompressed.flac` next to the source FLAC
+- recompress folder input with no `-o` writes `.recompressed.flac` siblings next to each discovered FLAC
+- recompress folder input with `-o <dir>` preserves relative subpaths under the destination root
+- recompress rejects same-path overwrite targets
 - `--depth` defaults to `1`, affects directory input only, and uses `0` for unlimited traversal
 - encode `--threads` defaults to `8`
 
 Progress display:
 
-- interactive terminals show a live progress line during encode and decode
+- interactive terminals show a live progress line during encode, decode, and recompress
 - redirected or non-interactive runs do not emit progress UI
 - single-file runs show the current filename, elapsed time, ETA, and rate
 - folder runs show overall batch progress and per-file progress on separate live lines

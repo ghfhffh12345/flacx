@@ -1,16 +1,21 @@
-//! High-performance WAV/FLAC conversion for Rust.
+//! High-performance WAV/FLAC conversion and recompression for Rust.
 //!
 //! The `flacx` crate is the reusable library layer in this workspace. It
 //! exposes compact encode and decode façades, builder-backed configuration
-//! types, byte-oriented helpers, stream inspection helpers, and optional
-//! progress reporting.
+//! types, a FLAC recompression façade, byte-oriented helpers, stream
+//! inspection helpers, and optional progress reporting.
 //!
 //! The API is intentionally small:
 //!
 //! - [`EncoderConfig`] and [`DecodeConfig`] hold user-facing settings.
-//! - [`Encoder`] and [`Decoder`] provide the main streaming façades.
+//! - [`RecompressConfig`] composes the existing decode and encode settings for
+//!   FLAC-to-FLAC recompression.
+//! - [`Encoder`], [`Decoder`], and [`Recompressor`] provide the main streaming
+//!   façades.
 //! - [`encode_file`], [`encode_bytes`], [`decode_file`], and [`decode_bytes`]
 //!   offer convenience entry points for one-off use.
+//! - [`recompress_file`] and [`recompress_bytes`] provide convenience
+//!   FLAC-to-FLAC entry points.
 //! - [`inspect_wav_total_samples`] and [`inspect_flac_total_samples`] let you
 //!   read stream totals without running a full conversion.
 //! - [`level`] exposes the compression presets used by the encoder.
@@ -42,6 +47,31 @@
 //! Decoder::default()
 //!     .decode_file("input.flac", "output.wav")
 //!     .unwrap();
+//! ```
+//!
+//! Recompress an existing FLAC with a different encode configuration:
+//!
+//! ```no_run
+//! use flacx::{Decoder, EncoderConfig, RecompressConfig, Recompressor, level::Level};
+//!
+//! let config = RecompressConfig::builder()
+//!     .encode_config(
+//!         EncoderConfig::builder()
+//!             .level(Level::Level0)
+//!             .threads(2)
+//!             .build(),
+//!     )
+//!     .build();
+//!
+//! Recompressor::new(config)
+//!     .recompress_file("input.flac", "input.recompressed.flac")
+//!     .unwrap();
+//!
+//! let original = Decoder::default().decode_bytes(&std::fs::read("input.flac").unwrap()).unwrap();
+//! let recompressed = Decoder::default()
+//!     .decode_bytes(&std::fs::read("input.recompressed.flac").unwrap())
+//!     .unwrap();
+//! assert_eq!(original, recompressed);
 //! ```
 //!
 //! ## Helpers and inspectors
@@ -99,6 +129,7 @@ mod model;
 mod plan;
 mod progress;
 mod read;
+mod recompress;
 mod reconstruct;
 mod stream_info;
 mod wav_output;
@@ -111,6 +142,9 @@ pub use config::{DecodeBuilder, DecodeConfig, EncoderBuilder, EncoderConfig};
 pub use decode::{DecodeSummary, Decoder, decode_bytes, decode_file};
 pub use encoder::{EncodeSummary, Encoder, encode_bytes, encode_file};
 pub use error::{Error, Result};
+pub use recompress::{
+    RecompressBuilder, RecompressConfig, Recompressor, recompress_bytes, recompress_file,
+};
 
 /// Inspect a WAV stream and return its total sample count without decoding it.
 ///

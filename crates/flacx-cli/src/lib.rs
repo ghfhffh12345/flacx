@@ -12,6 +12,7 @@
 //!
 //! - `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
 //! - `flacx decode <input> [-o <output-or-dir>] [--depth <depth>]`
+//! - `flacx recompress <input> [-o <output-or-dir>] [--depth <depth>]`
 //! - encode-only flags:
 //!   - `--output`
 //!   - `--level`
@@ -24,6 +25,13 @@
 //!   - `--threads`
 //!   - `--mode`
 //!   - `--depth` (directory input only)
+//! - recompress-only flags:
+//!   - `--output`
+//!   - `--level`
+//!   - `--threads`
+//!   - `--block-size`
+//!   - `--mode`
+//!   - `--depth` (directory input only)
 
 use std::{
     env,
@@ -34,8 +42,8 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, Decoder, Encoder, EncoderConfig, Error, ProgressSnapshot, Result,
-    inspect_flac_total_samples, inspect_wav_total_samples,
+    DecodeConfig, Decoder, Encoder, EncoderConfig, Error, ProgressSnapshot, RecompressConfig,
+    Recompressor, Result, inspect_flac_total_samples, inspect_wav_total_samples,
 };
 use walkdir::WalkDir;
 
@@ -61,10 +69,19 @@ pub struct DecodeCommand {
     pub config: DecodeConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecompressCommand {
+    pub input: PathBuf,
+    pub output: Option<PathBuf>,
+    pub depth: usize,
+    pub config: RecompressConfig,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandKind {
     Encode,
     Decode,
+    Recompress,
 }
 
 impl CommandKind {
@@ -72,13 +89,14 @@ impl CommandKind {
         match self {
             Self::Encode => "encode",
             Self::Decode => "decode",
+            Self::Recompress => "recompress",
         }
     }
 
     fn source_extension(self) -> &'static str {
         match self {
             Self::Encode => "wav",
-            Self::Decode => "flac",
+            Self::Decode | Self::Recompress => "flac",
         }
     }
 
@@ -86,6 +104,7 @@ impl CommandKind {
         match self {
             Self::Encode => "flac",
             Self::Decode => "wav",
+            Self::Recompress => "flac",
         }
     }
 
@@ -97,6 +116,10 @@ impl CommandKind {
             ),
             Self::Decode => format!(
                 "output path '{}' is a directory; use a file path for single-file decode",
+                output.display()
+            ),
+            Self::Recompress => format!(
+                "output path '{}' is a directory; use a file path for single-file recompress",
                 output.display()
             ),
         }
@@ -112,6 +135,10 @@ impl CommandKind {
                 "output path '{}' is not a directory for folder decode",
                 output_root.display()
             ),
+            Self::Recompress => format!(
+                "output path '{}' is not a directory for folder recompress",
+                output_root.display()
+            ),
         }
     }
 
@@ -125,6 +152,10 @@ impl CommandKind {
                 "failed to traverse decode input directory '{}': {error}",
                 input_root.display()
             ),
+            Self::Recompress => format!(
+                "failed to traverse recompress input directory '{}': {error}",
+                input_root.display()
+            ),
         }
     }
 
@@ -132,6 +163,20 @@ impl CommandKind {
         match self {
             Self::Encode => Error::Encode(message.into()),
             Self::Decode => Error::Decode(message.into()),
+            Self::Recompress => Error::Encode(message.into()),
+        }
+    }
+
+    fn default_output_path(self, input: &Path) -> PathBuf {
+        match self {
+            Self::Encode | Self::Decode => input.with_extension(self.target_extension()),
+            Self::Recompress => {
+                let stem = input
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("output");
+                input.with_file_name(format!("{stem}.recompressed.flac"))
+            }
         }
     }
 }
@@ -271,6 +316,49 @@ pub fn decode_command(
     Ok(())
 }
 
+pub fn recompress_command(
+    command: &RecompressCommand,
+    interactive: bool,
+    stderr: &mut impl Write,
+) -> Result<()> {
+    let planned = plan_recompress_worklist(command)?;
+    let trace =
+        ProgressTrace::from_env(CommandKind::Recompress, interactive, planned.is_directory)?;
+    let mut progress = BatchProgressCoordinator::new(
+        stderr,
+        interactive,
+        trace,
+        planned.total_samples,
+        planned.is_directory,
+    );
+
+    for item in planned.items {
+        if item.ensure_parent_dirs {
+            ensure_output_parent_dirs(&item.output)?;
+        }
+        progress.begin_file(&item.display_name, item.input_bytes, item.total_samples);
+        let result = Recompressor::new(command.config.clone()).recompress_file_with_progress(
+            &item.input,
+            &item.output,
+            |update| {
+                progress.observe(update)?;
+                Ok(())
+            },
+        );
+
+        match result {
+            Ok(_) => progress.finish_current_file()?,
+            Err(error) => {
+                let _ = progress.end();
+                return Err(error);
+            }
+        }
+    }
+
+    progress.finish()?;
+    Ok(())
+}
+
 fn plan_encode_worklist(command: &EncodeCommand) -> Result<PlannedWorklist> {
     plan_worklist(
         CommandKind::Encode,
@@ -284,6 +372,16 @@ fn plan_encode_worklist(command: &EncodeCommand) -> Result<PlannedWorklist> {
 fn plan_decode_worklist(command: &DecodeCommand) -> Result<PlannedWorklist> {
     plan_worklist(
         CommandKind::Decode,
+        &command.input,
+        command.output.as_deref(),
+        command.depth,
+        inspect_flac_file_total_samples,
+    )
+}
+
+fn plan_recompress_worklist(command: &RecompressCommand) -> Result<PlannedWorklist> {
+    plan_worklist(
+        CommandKind::Recompress,
         &command.input,
         command.output.as_deref(),
         command.depth,
@@ -321,9 +419,14 @@ fn plan_single_file_work_item(
             if output.is_dir() {
                 return Err(kind.planning_error(kind.single_file_output_error(output)));
             }
+            if kind == CommandKind::Recompress && output == input {
+                return Err(kind.planning_error(
+                    "single-file recompress output must differ from the input path",
+                ));
+            }
             output.to_path_buf()
         }
-        None => derive_output_path(input, kind.target_extension()),
+        None => kind.default_output_path(input),
     };
 
     Ok(ConversionWorkItem {
@@ -343,6 +446,12 @@ fn plan_directory_worklist(
     depth: usize,
     inspect_total_samples: fn(&Path) -> Result<u64>,
 ) -> Result<PlannedWorklist> {
+    if kind == CommandKind::Recompress
+        && output_root.is_some_and(|output_root| output_root == input_root)
+    {
+        return Err(kind
+            .planning_error("folder recompress output root must differ from the input directory"));
+    }
     let output_root = match output_root {
         Some(output_root) => Some(validate_or_create_output_root(kind, output_root)?),
         None => None,
@@ -413,7 +522,7 @@ fn collect_directory_work_items(
                     .with_extension(kind.target_extension()),
                 true,
             ),
-            None => (derive_output_path(&input, kind.target_extension()), false),
+            None => (kind.default_output_path(&input), false),
         };
 
         worklist.push(ConversionWorkItem {
@@ -439,10 +548,6 @@ fn inspect_flac_file_total_samples(path: &Path) -> Result<u64> {
 
 fn input_file_size(path: &Path) -> Result<u64> {
     Ok(fs::metadata(path)?.len())
-}
-
-fn derive_output_path(input: &Path, extension: &str) -> PathBuf {
-    input.with_extension(extension)
 }
 
 fn ensure_output_parent_dirs(output: &Path) -> Result<()> {
