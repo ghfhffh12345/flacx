@@ -11,7 +11,7 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use flacx::{DecodeConfig, EncoderConfig, RecompressConfig, level::Level};
+use flacx::{DecodeConfig, EncoderConfig, RecompressConfig, RecompressMode, level::Level};
 use flacx_cli::{
     DecodeCommand, EncodeCommand, RecompressCommand, decode_command, encode_command,
     recompress_command,
@@ -97,6 +97,9 @@ struct RecompressArgs {
     /// Output FLAC path for a single file, or destination directory for a folder input.
     #[arg(short, long)]
     output: Option<std::path::PathBuf>,
+    /// Replace the source FLAC(s) in place after successful recompression.
+    #[arg(long, conflicts_with = "output")]
+    in_place: bool,
     /// Compression level (0-8).
     #[arg(long, default_value_t = 8u8, value_parser = clap::value_parser!(u8).range(0..=8))]
     level: u8,
@@ -176,21 +179,13 @@ fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn recompress(args: RecompressArgs) -> Result<(), Box<dyn std::error::Error>> {
     let level = Level::try_from(args.level).map_err(|_| "invalid level")?;
-    let mut encode = EncoderConfig::default()
+    let mut config = RecompressConfig::default()
+        .with_mode(recompress_mode(args.mode))
         .with_level(level)
         .with_threads(args.threads);
     if let Some(block_size) = args.block_size {
-        encode = encode.with_block_size(block_size);
+        config = config.with_block_size(block_size);
     }
-    encode = apply_encode_mode(encode, args.mode);
-
-    let decode = apply_decode_mode(
-        DecodeConfig::default().with_threads(args.threads),
-        args.mode,
-    );
-    let config = RecompressConfig::default()
-        .with_decode_config(decode)
-        .with_encode_config(encode);
 
     let interactive = io::stderr().is_terminal();
     enforce_interactive_mode(interactive, interactive_required())?;
@@ -198,6 +193,7 @@ fn recompress(args: RecompressArgs) -> Result<(), Box<dyn std::error::Error>> {
     let command = RecompressCommand {
         input: args.input,
         output: args.output,
+        in_place: args.in_place,
         depth: args.depth,
         config,
     };
@@ -236,6 +232,14 @@ fn apply_decode_mode(config: DecodeConfig, mode: ModePreset) -> DecodeConfig {
     }
 }
 
+fn recompress_mode(mode: ModePreset) -> RecompressMode {
+    match mode {
+        ModePreset::Loose => RecompressMode::Loose,
+        ModePreset::Default => RecompressMode::Default,
+        ModePreset::Strict => RecompressMode::Strict,
+    }
+}
+
 fn interactive_required() -> bool {
     env::var_os("FLACX_REQUIRE_INTERACTIVE").is_some()
 }
@@ -254,6 +258,7 @@ fn enforce_interactive_mode(
 mod tests {
     use super::{
         Cli, Commands, ModePreset, apply_decode_mode, apply_encode_mode, enforce_interactive_mode,
+        recompress_mode,
     };
     use clap::Parser;
 
@@ -395,10 +400,25 @@ mod tests {
                     args.output,
                     Some(std::path::PathBuf::from("album.recompressed.flac"))
                 );
+                assert!(!args.in_place);
                 assert_eq!(args.level, 0);
                 assert_eq!(args.threads, 4);
                 assert_eq!(args.depth, 0);
                 assert_eq!(args.mode, ModePreset::Strict);
+            }
+            _ => panic!("expected recompress command"),
+        }
+    }
+
+    #[test]
+    fn recompress_command_parses_explicit_in_place_flag() {
+        let cli = Cli::parse_from(["flacx", "recompress", "album.flac", "--in-place"]);
+
+        match cli.command {
+            Commands::Recompress(args) => {
+                assert_eq!(args.input, std::path::PathBuf::from("album.flac"));
+                assert!(args.in_place);
+                assert_eq!(args.output, None);
             }
             _ => panic!("expected recompress command"),
         }
@@ -427,6 +447,19 @@ mod tests {
         assert!(!recompress_loose_encode.capture_fxmd);
         assert!(!recompress_loose_encode.strict_fxmd_validation);
         assert!(!recompress_loose_decode.emit_fxmd);
+
+        assert_eq!(
+            recompress_mode(ModePreset::Loose),
+            flacx::RecompressMode::Loose
+        );
+        assert_eq!(
+            recompress_mode(ModePreset::Default),
+            flacx::RecompressMode::Default
+        );
+        assert_eq!(
+            recompress_mode(ModePreset::Strict),
+            flacx::RecompressMode::Strict
+        );
     }
 
     #[test]

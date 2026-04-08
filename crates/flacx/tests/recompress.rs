@@ -1,8 +1,9 @@
 use std::{fs, io::Cursor};
 
-use flacx::{
-    DecodeConfig, Decoder, Encoder, EncoderConfig, RecompressConfig, Recompressor, recompress_bytes,
-};
+use flacx::{Decoder, Encoder, RecompressConfig, RecompressMode, Recompressor, recompress_bytes};
+
+#[cfg(feature = "progress")]
+use flacx::{RecompressPhase, RecompressProgress};
 
 mod support;
 
@@ -30,11 +31,9 @@ fn recompress_api_accepts_seekable_readers_and_preserves_audio() {
     let mut output = Cursor::new(Vec::new());
 
     let summary = Recompressor::new(
-        RecompressConfig::default().with_encode_config(
-            EncoderConfig::default()
-                .with_threads(1)
-                .with_block_size(576),
-        ),
+        RecompressConfig::default()
+            .with_threads(1)
+            .with_block_size(576),
     )
     .recompress(Cursor::new(flac), &mut output)
     .unwrap();
@@ -58,11 +57,9 @@ fn recompress_file_uses_configured_options() {
     fs::write(&input_path, &flac).unwrap();
 
     let summary = Recompressor::new(
-        RecompressConfig::default().with_encode_config(
-            EncoderConfig::default()
-                .with_threads(1)
-                .with_block_size(576),
-        ),
+        RecompressConfig::default()
+            .with_threads(1)
+            .with_block_size(576),
     )
     .recompress_file(&input_path, &output_path)
     .unwrap();
@@ -119,16 +116,73 @@ fn recompress_strict_mode_rejects_invalid_seektable() {
         &[seektable_block(&[(128, 1_024, 128), (64, 0, 64)])],
     );
 
-    let strict = Recompressor::new(
-        RecompressConfig::default()
-            .with_decode_config(DecodeConfig::default().with_strict_seektable_validation(true)),
-    )
-    .recompress_bytes(&malformed)
-    .unwrap_err();
+    let strict = Recompressor::new(RecompressConfig::default().with_mode(RecompressMode::Strict))
+        .recompress_bytes(&malformed)
+        .unwrap_err();
 
     assert!(
         strict
             .to_string()
             .contains("seektable sample numbers must be in ascending order")
     );
+}
+
+#[test]
+fn recompress_builder_matches_fluent_config() {
+    let builder = RecompressConfig::builder()
+        .mode(RecompressMode::Strict)
+        .level(flacx::level::Level::Level0)
+        .threads(4)
+        .block_size(576)
+        .build();
+
+    let fluent = RecompressConfig::default()
+        .with_mode(RecompressMode::Strict)
+        .with_level(flacx::level::Level::Level0)
+        .with_threads(4)
+        .with_block_size(576);
+
+    assert_eq!(builder, fluent);
+    assert_eq!(builder.mode(), RecompressMode::Strict);
+    assert_eq!(builder.level(), flacx::level::Level::Level0);
+    assert_eq!(builder.threads(), 4);
+    assert_eq!(builder.block_size(), Some(576));
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn recompress_progress_reports_decode_then_encode_phases() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut updates = Vec::<RecompressProgress>::new();
+
+    Recompressor::new(RecompressConfig::default().with_threads(1))
+        .recompress_with_progress(Cursor::new(flac), &mut output, |progress| {
+            updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(!updates.is_empty());
+    assert_eq!(updates.first().unwrap().phase, RecompressPhase::Decode);
+    assert!(
+        updates
+            .iter()
+            .any(|progress| progress.phase == RecompressPhase::Encode)
+    );
+
+    let mut saw_encode = false;
+    let mut previous_overall = 0u64;
+    for progress in updates {
+        if progress.phase == RecompressPhase::Encode {
+            saw_encode = true;
+        }
+        if saw_encode {
+            assert_eq!(progress.phase, RecompressPhase::Encode);
+        }
+        assert!(progress.overall_processed_samples >= previous_overall);
+        previous_overall = progress.overall_processed_samples;
+    }
+    assert_eq!(previous_overall, 4_096);
 }
