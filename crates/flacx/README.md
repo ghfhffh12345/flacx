@@ -10,7 +10,7 @@ reusable encode/decode pipeline used by Rust callers and by the sibling
 
 ```toml
 [dependencies]
-flacx = "0.8.0"
+flacx = "0.8.1"
 ```
 
 If you want live progress reporting from library code, enable the optional
@@ -18,7 +18,7 @@ If you want live progress reporting from library code, enable the optional
 
 ```toml
 [dependencies]
-flacx = { version = "0.8.0", features = ["progress"] }
+flacx = { version = "0.8.1", features = ["progress"] }
 ```
 
 ## Public API at a glance

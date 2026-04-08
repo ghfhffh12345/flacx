@@ -28,7 +28,7 @@ Add the library crate to your project:
 
 ```toml
 [dependencies]
-flacx = "0.8.0"
+flacx = "0.8.1"
 ```
 
 Then encode WAV to FLAC from Rust:
