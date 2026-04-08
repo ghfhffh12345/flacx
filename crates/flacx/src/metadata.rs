@@ -16,7 +16,7 @@ const CUESHEET_TRACK_HEADER_LEN: usize = 36;
 const CUESHEET_INDEX_LEN: usize = 12;
 pub(crate) const FXMD_CHUNK_ID: [u8; 4] = *b"fxmd";
 const FXMD_MAGIC: [u8; 4] = *b"fxmd";
-const FXMD_VERSION: u16 = 1;
+const FXMD_VERSION: u16 = 2;
 const WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY: &str = "WAVEFORMATEXTENSIBLE_CHANNEL_MASK";
 pub(crate) const FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY: &str = "FLACX_CHANNEL_LAYOUT_PROVENANCE";
 const FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE: &str = "1";
@@ -45,6 +45,10 @@ pub(crate) struct EncodeMetadata {
 }
 
 impl EncodeMetadata {
+    pub(crate) fn has_preserved_bundle(&self) -> bool {
+        self.preserved.is_some()
+    }
+
     pub(crate) fn set_channel_mask(&mut self, channels: u16, mask: u32) {
         if self.preserved.is_some() {
             return;
@@ -309,15 +313,7 @@ impl PreservedMetadataBundle {
     }
 
     fn ingest_flac_block(&mut self, block_type: u8, payload: &[u8]) -> crate::error::Result<()> {
-        if !matches!(
-            block_type,
-            SEEKTABLE_BLOCK_TYPE
-                | APPLICATION_BLOCK_TYPE
-                | PADDING_BLOCK_TYPE
-                | VORBIS_COMMENT_BLOCK_TYPE
-                | CUESHEET_BLOCK_TYPE
-                | PICTURE_BLOCK_TYPE
-        ) {
+        if block_type == 0 {
             return Ok(());
         }
         validate_preserved_block_payload(block_type, payload)
@@ -487,7 +483,10 @@ impl PreservedMetadataRecord {
                 FlacMetadataBlock::CueSheet(CueSheetBlock::from_raw_payload(&self.payload))
             }
             PICTURE_BLOCK_TYPE => FlacMetadataBlock::Picture(PictureBlock::new(&self.payload)),
-            _ => unreachable!("unsupported preserved block type {}", self.block_type),
+            _ => FlacMetadataBlock::Opaque {
+                block_type: self.block_type,
+                payload: self.payload.clone(),
+            },
         }
     }
 }
@@ -500,6 +499,7 @@ pub(crate) enum FlacMetadataBlock {
     VorbisComment(VorbisCommentBlock),
     CueSheet(CueSheetBlock),
     Picture(PictureBlock),
+    Opaque { block_type: u8, payload: Vec<u8> },
 }
 
 impl FlacMetadataBlock {
@@ -511,6 +511,7 @@ impl FlacMetadataBlock {
             Self::VorbisComment(_) => VORBIS_COMMENT_BLOCK_TYPE,
             Self::CueSheet(_) => CUESHEET_BLOCK_TYPE,
             Self::Picture(_) => PICTURE_BLOCK_TYPE,
+            Self::Opaque { block_type, .. } => *block_type,
         }
     }
 
@@ -522,6 +523,7 @@ impl FlacMetadataBlock {
             Self::VorbisComment(block) => block.payload(),
             Self::CueSheet(cuesheet) => cuesheet.payload(),
             Self::Picture(block) => block.payload(),
+            Self::Opaque { payload, .. } => payload.clone(),
         }
     }
 }
@@ -619,7 +621,8 @@ fn validate_preserved_block_payload(
             .map_err(|_| "cuesheet payload is invalid")
             .map(|_| ()),
         PICTURE_BLOCK_TYPE => validate_picture_payload(payload),
-        _ => Err("unsupported preserved metadata block type"),
+        0 | 127 => Err("unsupported preserved metadata block type"),
+        _ => Ok(()),
     }
 }
 
@@ -1258,9 +1261,11 @@ fn append_chunk_payload(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FlacMetadataBlock, FxmdChunkPolicy, MetadataDraft,
-        SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, SeekPoint, WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
-        WavMetadata, parse_cuesheet_tracks, validate_seektable_payload,
+        APPLICATION_BLOCK_TYPE, FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FXMD_VERSION,
+        FlacMetadataBlock, FxmdChunkPolicy, MetadataDraft, PICTURE_BLOCK_TYPE,
+        PreservedMetadataBundle, SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, SeekPoint,
+        WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY, WavMetadata, parse_cuesheet_tracks,
+        validate_seektable_payload,
     };
 
     fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
@@ -1341,6 +1346,27 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
         )
+    }
+
+    fn application_payload(bytes: &[u8]) -> Vec<u8> {
+        let mut payload = b"TEST".to_vec();
+        payload.extend_from_slice(bytes);
+        payload
+    }
+
+    fn picture_payload(bytes: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&3u32.to_le_bytes());
+        payload.extend_from_slice(&9u32.to_le_bytes());
+        payload.extend_from_slice(b"image/png");
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&24u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(bytes);
+        payload
     }
 
     #[test]
@@ -1644,5 +1670,36 @@ mod tests {
                 .to_string()
                 .contains(FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY)
         );
+    }
+
+    #[test]
+    fn fxmd_v2_round_trips_exact_preserved_payloads() {
+        let mut bundle = PreservedMetadataBundle::default();
+        bundle
+            .ingest_flac_block(APPLICATION_BLOCK_TYPE, &application_payload(b"opaque-app"))
+            .unwrap();
+        bundle
+            .ingest_flac_block(PICTURE_BLOCK_TYPE, &picture_payload(b"\x89PNGexact"))
+            .unwrap();
+
+        let payload = bundle.fxmd_chunk_payload().unwrap();
+        let restored = PreservedMetadataBundle::from_fxmd_payload(&payload).unwrap();
+
+        assert_eq!(payload[4..6], FXMD_VERSION.to_le_bytes());
+        assert_eq!(restored, bundle);
+    }
+
+    #[test]
+    fn rejects_legacy_fxmd_versions() {
+        let mut bundle = PreservedMetadataBundle::default();
+        bundle
+            .ingest_flac_block(APPLICATION_BLOCK_TYPE, &application_payload(b"opaque-app"))
+            .unwrap();
+        let mut payload = bundle.fxmd_chunk_payload().unwrap();
+        payload[4..6].copy_from_slice(&1u16.to_le_bytes());
+
+        let error = PreservedMetadataBundle::from_fxmd_payload(&payload).unwrap_err();
+
+        assert!(error.to_string().contains("version is unsupported"));
     }
 }

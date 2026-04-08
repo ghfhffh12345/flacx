@@ -263,8 +263,15 @@ impl Encoder {
         let plan = EncodePlan::new(wav.spec, self.config.clone())?;
         let mut stream_info = plan.stream_info();
         stream_info.md5 = streaminfo_md5;
+        let has_preserved_bundle = metadata.has_preserved_bundle();
         let metadata_blocks = metadata.flac_blocks();
-        let mut writer = FlacWriter::new(output, stream_info, &metadata_blocks, plan.total_frames)?;
+        let mut writer = FlacWriter::new(
+            output,
+            stream_info,
+            &metadata_blocks,
+            plan.total_frames,
+            !has_preserved_bundle,
+        )?;
 
         if plan.total_frames == 0 {
             let (_, stream_info) = writer.finalize()?;

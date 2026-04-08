@@ -92,7 +92,7 @@ let _decoder = Decoder::new(decoder_config);
 - `block_size` sets a fixed block size
 - `block_schedule` enables a custom block-size schedule for advanced use
 - `capture_fxmd` controls whether encode-side WAV ingestion imports the private `fxmd` chunk
-- `strict_fxmd_validation` controls whether malformed or duplicate `fxmd` chunks are rejected during encode-side ingestion
+- `strict_fxmd_validation` controls whether malformed, duplicate, or legacy-version `fxmd` chunks are rejected during encode-side ingestion
 
 `EncoderConfig::default()` uses `Level::Level8` and a thread count derived from
 the current machine’s available parallelism.
@@ -170,7 +170,8 @@ minimal PCM-only WAV, even when the audio samples are unchanged.
 Compatibility note:
 
 - the current crate recognizes only the unified private `fxmd` preservation
-  chunk at runtime
+  chunk at runtime, and exact metadata-preserving workflows require the current
+  `fxmd` format version
 - older split private chunks such as `fxvc` / `fxcs` are intentionally no
   longer imported and are treated like unknown WAV chunks
 

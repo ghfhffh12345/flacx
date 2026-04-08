@@ -88,8 +88,8 @@ flacx encode album-dir -o encoded-album --depth 0
 - Directory input with no `-o` writes `.wav` siblings next to each discovered FLAC.
 - Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
 - `--mode loose` treats `fxmd` as unknown in both directions and disables relaxable validation.
-- `--mode default` preserves current `fxmd` behavior without enabling extra validation.
-- `--mode strict` preserves current `fxmd` behavior and enables the relaxable validation set.
+- `--mode default` preserves current `fxmd` behavior and rejects malformed, duplicate, or legacy-version `fxmd` payloads.
+- `--mode strict` preserves current `fxmd` behavior and enables the relaxable validation set while also rejecting malformed, duplicate, or legacy-version `fxmd` payloads.
 - For single-file input, `-o` must be a file path.
 - For directory input, `-o` must be a directory path.
 
