@@ -22,16 +22,16 @@ documentation stays focused on the supported library and CLI workflows.
 
 ## Quick start
 
-### Library crate
+### Library
 
 Add the library crate to your project:
 
 ```toml
 [dependencies]
-flacx = "0.7.0"
+flacx = "0.8.0"
 ```
 
-Encode WAV to FLAC from Rust:
+Then encode WAV to FLAC from Rust:
 
 ```rust
 use flacx::{Encoder, EncoderConfig, level::Level};
@@ -46,7 +46,7 @@ Encoder::new(config)
     .unwrap();
 ```
 
-Decode FLAC back to WAV:
+And decode FLAC back to WAV:
 
 ```rust
 use flacx::Decoder;
@@ -56,10 +56,9 @@ Decoder::default()
     .unwrap();
 ```
 
-For the complete library user guide, see
-[`crates/flacx/README.md`](crates/flacx/README.md).
+See [`crates/flacx/README.md`](crates/flacx/README.md) for the crate-focused usage guide.
 
-### CLI crate
+### CLI
 
 Build the release binary from the workspace root:
 
@@ -67,59 +66,58 @@ Build the release binary from the workspace root:
 cargo build --release
 ```
 
-Run `flacx` from `target/release/` or after adding that directory to your
-`PATH`:
+Then run `flacx` directly from `target/release/` (or after adding that directory to your `PATH`):
 
 ```bash
 flacx encode input.wav -o output.flac --level 8 --threads 4
 flacx encode album-dir -o encoded-album --depth 0
 flacx decode input.flac -o output.wav --threads 4
-flacx decode input.flac --mode strict
 flacx decode encoded-album -o decoded-album --depth 0
 ```
 
-The command surface is:
+Supported CLI shape:
 
-```text
-flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <n>] [--mode <loose|default|strict>] [--depth <n>]
-flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--mode <loose|default|strict>] [--depth <n>]
-```
+- `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
+- `flacx decode <input> [-o <output-or-dir>] [--depth <depth>]`
+- encode-only flags:
+  - `--output`
+  - `--level`
+  - `--threads`
+  - `--block-size`
+  - `--depth`
+- decode-only flags:
+  - `--output`
+  - `--threads`
+  - `--depth`
 
-Common behavior:
+Encode/decode defaults and folder behavior:
 
-- single-file input with no `-o` writes a sibling output file next to the
-  source file
-- directory input with no `-o` writes sibling outputs next to each discovered
-  file
-- directory input with `-o <dir>` preserves relative subpaths under the
-  destination root
-- `--depth` applies only to directory input and uses `0` for unlimited
-  traversal
-- encode defaults to `--threads 8`
-- both commands default `--mode` to `default`
-- decode defaults to the library's decode configuration when `--threads` is
-  omitted
-- interactive terminals show live progress for both encode and decode
-- decoded WAV output may include a private canonical preservation chunk plus
-  derived `LIST` / `cue ` mirrors so FLAC metadata can round-trip back through
-  WAV without loss
+- single-file input with no `-o` writes a sibling `.flac` next to the source WAV
+- folder input with no `-o` writes `.flac` siblings next to each discovered WAV
+- folder input with `-o <dir>` preserves relative subpaths under the destination root
+- decode single-file input with no `-o` writes a sibling `.wav` next to the source FLAC
+- decode folder input with no `-o` writes `.wav` siblings next to each discovered FLAC
+- decode folder input with `-o <dir>` preserves relative subpaths under the destination root
+- `--depth` defaults to `1`, affects directory input only, and uses `0` for unlimited traversal
+- encode `--threads` defaults to `8`
 
-Compatibility note:
+Progress display:
 
-- current workspace builds use the unified `fxmd` preservation chunk only
-- older split private chunks such as `fxvc` / `fxcs` are no longer recognized
-  by runtime code and are treated like unknown WAV chunks
+- interactive terminals show a live progress line during encode and decode
+- redirected or non-interactive runs do not emit progress UI
+- single-file runs show the current filename, elapsed time, ETA, and rate
+- folder runs show overall batch progress and per-file progress on separate live lines
+- batch progress uses exact samples processed across the full planned worklist
 
-See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for the full CLI
-guide and flag behavior.
+See [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) for CLI usage details.
 
 ## Workspace commands
 
 ```bash
 cargo build --workspace
 cargo test --workspace
-cargo doc --workspace --no-deps
-cargo run -p flacx-cli -- --help
+flacx --help
+cargo run -p flacx --release --example benchmark
 ```
 
 ## Performance note
