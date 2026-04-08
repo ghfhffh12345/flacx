@@ -4,15 +4,18 @@ use std::{
     process::{Command, Output},
 };
 
-use flacx::{DecodeConfig, Encoder, EncoderConfig, level::Level};
-use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
+use flacx::{DecodeConfig, Encoder, EncoderConfig, RecompressConfig, Recompressor, level::Level};
+use flacx_cli::{
+    DecodeCommand, EncodeCommand, RecompressCommand, decode_command, encode_command,
+    recompress_command,
+};
 
 #[path = "../../flacx/tests/support/mod.rs"]
 mod support;
 
 use support::{
-    application_block, cuesheet_block, extensible_pcm_wav_bytes, legacy_fxmd_v1_payload,
-    flac_metadata_blocks, pcm_wav_bytes, picture_block, raw_seektable_block,
+    application_block, cuesheet_block, extensible_pcm_wav_bytes, flac_metadata_blocks,
+    legacy_fxmd_v1_payload, pcm_wav_bytes, picture_block, raw_seektable_block,
     replace_flac_optional_metadata, sample_fixture, unique_temp_path, vorbis_comment_block,
     wav_chunk_payloads, wav_data_bytes, wav_with_chunks,
 };
@@ -85,6 +88,18 @@ fn encode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Ou
         .unwrap()
 }
 
+fn recompress_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
+    let mut command_args = vec!["recompress"];
+    command_args.extend_from_slice(args);
+    command_args.push(input_path.to_str().unwrap());
+    command_args.push("-o");
+    command_args.push(output_path.to_str().unwrap());
+    Command::new(flacx_bin())
+        .args(command_args)
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn help_lists_encode_and_decode_commands() {
     let output = Command::new(flacx_bin()).arg("--help").output().unwrap();
@@ -93,6 +108,7 @@ fn help_lists_encode_and_decode_commands() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("encode"));
     assert!(stdout.contains("decode"));
+    assert!(stdout.contains("recompress"));
     assert!(stdout.contains("--help"));
 }
 
@@ -129,6 +145,23 @@ fn decode_help_lists_output_depth_and_threads() {
     assert!(stdout.contains("strict"));
     assert!(!stdout.contains("--strict-channel-mask-provenance"));
     assert!(!stdout.contains("--strict-seektable-validation"));
+}
+
+#[test]
+fn recompress_help_lists_output_depth_mode_and_block_size() {
+    let output = Command::new(flacx_bin())
+        .args(["recompress", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("-o, --output <OUTPUT>"));
+    assert!(stdout.contains("--depth <DEPTH>"));
+    assert!(stdout.contains("--mode <MODE>"));
+    assert!(stdout.contains("--level <LEVEL>"));
+    assert!(stdout.contains("--block-size <BLOCK_SIZE>"));
+    assert!(stdout.contains("--threads <THREADS>"));
 }
 
 #[test]
@@ -193,6 +226,42 @@ fn encode_command_matches_library_output() {
 }
 
 #[test]
+fn recompress_command_matches_library_output() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("flac");
+    fs::write(&input_path, &flac).unwrap();
+
+    let output = recompress_cli_output(
+        &input_path,
+        &output_path,
+        &["--level", "0", "--threads", "1", "--block-size", "576"],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli_bytes = fs::read(&output_path).unwrap();
+    let library_bytes = Recompressor::new(
+        RecompressConfig::default().with_encode_config(
+            EncoderConfig::default()
+                .with_level(Level::Level0)
+                .with_threads(1)
+                .with_block_size(576),
+        ),
+    )
+    .recompress_bytes(&flac)
+    .unwrap();
+    assert_eq!(cli_bytes, library_bytes);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn encode_command_emits_progress_trace_when_requested() {
     let input_dir = unique_temp_dir();
     let input_path = input_dir.join("input.wav");
@@ -225,6 +294,98 @@ fn encode_command_emits_progress_trace_when_requested() {
     assert!(trace.contains("batch_mode=0"));
     assert!(trace.contains("event=file_finish"));
     assert!(trace.contains("filename=input.wav"));
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_single_file_without_output_writes_sibling_recompressed_file() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("album.flac");
+    write_flac_file(&input_path, 1, 2_048);
+    let output_path = input_dir.join("album.recompressed.flac");
+
+    let output = Command::new(flacx_bin())
+        .args(["recompress", input_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists());
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_rejects_same_path_output() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("album.flac");
+    write_flac_file(&input_path, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "recompress",
+            input_path.to_str().unwrap(),
+            "-o",
+            input_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("single-file recompress output must differ from the input path")
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_directory_without_output_writes_sibling_recompressed_files() {
+    let input_dir = unique_temp_dir();
+    let first = input_dir.join("disc1").join("first.flac");
+    let second = input_dir.join("disc1").join("second.flac");
+    write_flac_file(&first, 1, 1_024);
+    write_flac_file(&second, 1, 2_048);
+
+    let command = RecompressCommand {
+        input: input_dir.clone(),
+        output: None,
+        depth: 0,
+        config: RecompressConfig::default()
+            .with_encode_config(EncoderConfig::default().with_threads(1))
+            .with_decode_config(DecodeConfig::default().with_threads(1)),
+    };
+    let mut stderr = Vec::new();
+
+    recompress_command(&command, true, &mut stderr).unwrap();
+
+    assert!(
+        input_dir
+            .join("disc1")
+            .join("first.recompressed.flac")
+            .exists()
+    );
+    assert!(
+        input_dir
+            .join("disc1")
+            .join("second.recompressed.flac")
+            .exists()
+    );
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    let final_lines = final_progress_frame_lines(&stderr);
+    assert_eq!(final_lines.len(), 2);
+    assert!(final_lines[0].starts_with("Batch | "));
+    assert!(
+        final_lines[1].contains("disc1/first.flac | File | ")
+            || final_lines[1].contains("disc1/second.flac | File | ")
+    );
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -689,7 +850,15 @@ fn encode_command_rejects_legacy_fxmd_v1_in_default_and_strict_and_ignores_it_in
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let legacy_fxmd = legacy_fxmd_v1_payload(&[
         application_block(b"legacy-application"),
-        picture_block("image/png", "legacy cover", 1, 1, 24, 0, &[0x89, 0x50, 0x4E, 0x47]),
+        picture_block(
+            "image/png",
+            "legacy cover",
+            1,
+            1,
+            24,
+            0,
+            &[0x89, 0x50, 0x4E, 0x47],
+        ),
     ]);
     let wav = wav_with_chunks(wav, &[(*b"fxmd", legacy_fxmd)]);
     let input_path = unique_temp_path("wav");

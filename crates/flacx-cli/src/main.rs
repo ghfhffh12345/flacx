@@ -1,4 +1,5 @@
-//! Command-line WAV/FLAC conversion built on the `flacx` workspace library.
+//! Command-line WAV/FLAC conversion and FLAC recompression built on the `flacx`
+//! workspace library.
 //!
 //! This crate stays separate from the publishable library package while
 //! reusing the same encode pipeline and workspace version.
@@ -10,15 +11,18 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use flacx::{DecodeConfig, EncoderConfig, level::Level};
-use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
+use flacx::{DecodeConfig, EncoderConfig, RecompressConfig, level::Level};
+use flacx_cli::{
+    DecodeCommand, EncodeCommand, RecompressCommand, decode_command, encode_command,
+    recompress_command,
+};
 
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Parser)]
 #[command(
     name = "flacx",
-    about = "WAV/FLAC conversion using the flacx library",
+    about = "WAV/FLAC conversion and FLAC recompression using the flacx library",
     version = CLI_VERSION,
     propagate_version = true
 )]
@@ -33,6 +37,8 @@ enum Commands {
     Encode(EncodeArgs),
     /// Decode a supported FLAC file to WAV.
     Decode(DecodeArgs),
+    /// Recompress a supported FLAC file to a new FLAC.
+    Recompress(RecompressArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -84,6 +90,30 @@ struct DecodeArgs {
     depth: usize,
 }
 
+#[derive(Debug, Args)]
+struct RecompressArgs {
+    /// Input FLAC path.
+    input: std::path::PathBuf,
+    /// Output FLAC path for a single file, or destination directory for a folder input.
+    #[arg(short, long)]
+    output: Option<std::path::PathBuf>,
+    /// Compression level (0-8).
+    #[arg(long, default_value_t = 8u8, value_parser = clap::value_parser!(u8).range(0..=8))]
+    level: u8,
+    /// Number of recompression worker threads.
+    #[arg(long, default_value_t = 8usize)]
+    threads: usize,
+    /// Override the FLAC block size.
+    #[arg(long)]
+    block_size: Option<u16>,
+    /// Policy preset for metadata handling and relaxable validation.
+    #[arg(long, value_enum, default_value_t = ModePreset::Default)]
+    mode: ModePreset,
+    /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
+    #[arg(long, default_value_t = 1usize)]
+    depth: usize,
+}
+
 fn main() -> ExitCode {
     if let Err(error) = run() {
         let _ = writeln!(io::stderr(), "{error}");
@@ -97,6 +127,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Commands::Encode(args) => encode(args)?,
         Commands::Decode(args) => decode(args)?,
+        Commands::Recompress(args) => recompress(args)?,
     }
     Ok(())
 }
@@ -140,6 +171,37 @@ fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         config,
     };
     decode_command(&command, interactive, &mut stderr)?;
+    Ok(())
+}
+
+fn recompress(args: RecompressArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let level = Level::try_from(args.level).map_err(|_| "invalid level")?;
+    let mut encode = EncoderConfig::default()
+        .with_level(level)
+        .with_threads(args.threads);
+    if let Some(block_size) = args.block_size {
+        encode = encode.with_block_size(block_size);
+    }
+    encode = apply_encode_mode(encode, args.mode);
+
+    let decode = apply_decode_mode(
+        DecodeConfig::default().with_threads(args.threads),
+        args.mode,
+    );
+    let config = RecompressConfig::default()
+        .with_decode_config(decode)
+        .with_encode_config(encode);
+
+    let interactive = io::stderr().is_terminal();
+    enforce_interactive_mode(interactive, interactive_required())?;
+    let mut stderr = io::stderr().lock();
+    let command = RecompressCommand {
+        input: args.input,
+        output: args.output,
+        depth: args.depth,
+        config,
+    };
+    recompress_command(&command, interactive, &mut stderr)?;
     Ok(())
 }
 
@@ -293,6 +355,56 @@ mod tests {
     }
 
     #[test]
+    fn recompress_command_defaults_threads_and_depth() {
+        let cli = Cli::parse_from(["flacx", "recompress", "input.flac"]);
+
+        match cli.command {
+            Commands::Recompress(args) => {
+                assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
+                assert_eq!(args.output, None);
+                assert_eq!(args.threads, 8);
+                assert_eq!(args.mode, ModePreset::Default);
+                assert_eq!(args.depth, 1);
+            }
+            _ => panic!("expected recompress command"),
+        }
+    }
+
+    #[test]
+    fn recompress_command_parses_output_depth_and_level_flags() {
+        let cli = Cli::parse_from([
+            "flacx",
+            "recompress",
+            "album.flac",
+            "-o",
+            "album.recompressed.flac",
+            "--level",
+            "0",
+            "--threads",
+            "4",
+            "--depth",
+            "0",
+            "--mode",
+            "strict",
+        ]);
+
+        match cli.command {
+            Commands::Recompress(args) => {
+                assert_eq!(args.input, std::path::PathBuf::from("album.flac"));
+                assert_eq!(
+                    args.output,
+                    Some(std::path::PathBuf::from("album.recompressed.flac"))
+                );
+                assert_eq!(args.level, 0);
+                assert_eq!(args.threads, 4);
+                assert_eq!(args.depth, 0);
+                assert_eq!(args.mode, ModePreset::Strict);
+            }
+            _ => panic!("expected recompress command"),
+        }
+    }
+
+    #[test]
     fn preset_mapping_matches_cli_contract() {
         let encode_default =
             apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Default);
@@ -307,6 +419,14 @@ mod tests {
         assert!(decode_strict.emit_fxmd);
         assert!(decode_strict.strict_channel_mask_provenance);
         assert!(decode_strict.strict_seektable_validation);
+
+        let recompress_loose_encode =
+            apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Loose);
+        let recompress_loose_decode =
+            apply_decode_mode(flacx::DecodeConfig::default(), ModePreset::Loose);
+        assert!(!recompress_loose_encode.capture_fxmd);
+        assert!(!recompress_loose_encode.strict_fxmd_validation);
+        assert!(!recompress_loose_decode.emit_fxmd);
     }
 
     #[test]

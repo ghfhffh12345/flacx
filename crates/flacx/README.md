@@ -1,6 +1,6 @@
 # flacx
 
-High-performance WAV/FLAC conversion for Rust.
+High-performance WAV/FLAC conversion and FLAC recompression for Rust.
 
 `flacx` is the publishable library crate in this workspace. It exposes the
 reusable encode/decode pipeline used by Rust callers and by the sibling
@@ -27,13 +27,15 @@ flacx = { version = "0.8.1", features = ["progress"] }
 | --- | --- |
 | Encoder configuration | `EncoderConfig`, `EncoderBuilder`, `Encoder::builder()` |
 | Decoder configuration | `DecodeConfig`, `DecodeBuilder`, `Decoder::builder()` |
+| Recompression configuration | `RecompressConfig`, `RecompressBuilder`, `Recompressor::builder()` |
 | Encoding | `Encoder`, `EncodeSummary`, `encode_file`, `encode_bytes` |
 | Decoding | `Decoder`, `DecodeSummary`, `decode_file`, `decode_bytes` |
+| Recompression | `Recompressor`, `recompress_file`, `recompress_bytes` |
 | Inspection helpers | `inspect_wav_total_samples`, `inspect_flac_total_samples` |
 | Compression levels | `level::Level`, `level::LevelProfile` |
 | Optional progress | `ProgressSnapshot`, `EncodeProgress`, `DecodeProgress`, progress-enabled methods |
 
-## Quick start: encode and decode files
+## Quick start: encode, decode, and recompress files
 
 The file-based API is the simplest entry point when you already have paths on
 disk.
@@ -54,6 +56,26 @@ assert!(encode_summary.total_samples > 0);
 let decoder = Decoder::default();
 let decode_summary = decoder.decode_file("output.flac", "roundtrip.wav").unwrap();
 assert_eq!(encode_summary.total_samples, decode_summary.total_samples);
+```
+
+Recompress an existing FLAC with a different output profile:
+
+```rust,no_run
+use flacx::{EncoderConfig, RecompressConfig, Recompressor, level::Level};
+
+let config = RecompressConfig::builder()
+    .encode_config(
+        EncoderConfig::builder()
+            .level(Level::Level0)
+            .threads(2)
+            .build(),
+    )
+    .build();
+
+let summary = Recompressor::new(config)
+    .recompress_file("input.flac", "input.recompressed.flac")
+    .unwrap();
+assert!(summary.total_samples > 0);
 ```
 
 Both `EncodeSummary` and `DecodeSummary` report the frame count, total samples,
@@ -155,6 +177,16 @@ These helpers are useful when you are:
 - testing encode/decode behavior in memory
 - piping data through a higher-level application buffer
 - avoiding temporary output files in a prototype
+
+The recompression helpers work the same way for FLAC input:
+
+```rust,no_run
+use flacx::recompress_bytes;
+
+let flac_bytes = std::fs::read("input.flac").unwrap();
+let recompressed = recompress_bytes(&flac_bytes).unwrap();
+assert!(!recompressed.is_empty());
+```
 
 ## Metadata round-trip behavior
 
@@ -258,6 +290,10 @@ The CLI crate enables this feature and uses it to render its live terminal
 progress UI.
 
 ## Supported scope
+
+- WAV -> FLAC encoding
+- FLAC -> WAV decoding
+- FLAC -> FLAC recompression with policy-driven metadata handling
 
 `flacx` is focused on the current WAV ↔ FLAC workflow:
 

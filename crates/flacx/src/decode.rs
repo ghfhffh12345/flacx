@@ -326,7 +326,7 @@ pub fn decode_bytes(input: &[u8]) -> Result<Vec<u8>> {
     Decoder::default().decode_bytes(input)
 }
 
-fn open_temp_output(output_path: &Path) -> Result<(PathBuf, File)> {
+pub(crate) fn open_temp_output(output_path: &Path) -> Result<(PathBuf, File)> {
     let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
     let pid = std::process::id();
 
@@ -350,7 +350,7 @@ fn open_temp_output(output_path: &Path) -> Result<(PathBuf, File)> {
     ))
 }
 
-fn commit_temp_output(temp_path: &Path, output_path: &Path) -> Result<()> {
+pub(crate) fn commit_temp_output(temp_path: &Path, output_path: &Path) -> Result<()> {
     match fs::rename(temp_path, output_path) {
         Ok(()) => Ok(()),
         Err(error)

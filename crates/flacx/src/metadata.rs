@@ -194,6 +194,26 @@ impl WavMetadata {
         Some(payload)
     }
 
+    pub(crate) fn into_encode_metadata(self) -> EncodeMetadata {
+        if !self.preserved.is_empty() {
+            return EncodeMetadata {
+                preserved: Some(self.preserved),
+                vorbis_comment: None,
+                cuesheet: None,
+                channel_mask: None,
+                channel_layout_provenance: false,
+            };
+        }
+
+        EncodeMetadata {
+            preserved: None,
+            vorbis_comment: self.vorbis_comment,
+            cuesheet: self.cuesheet,
+            channel_mask: self.channel_mask,
+            channel_layout_provenance: self.channel_layout_provenance,
+        }
+    }
+
     fn ingest_vorbis_comment_payload(
         &mut self,
         payload: &[u8],
@@ -1636,6 +1656,19 @@ mod tests {
             .unwrap();
 
         assert!(metadata.has_channel_layout_provenance());
+    }
+
+    #[test]
+    fn wav_metadata_with_preserved_bundle_converts_back_to_encode_metadata() {
+        let mut metadata = WavMetadata::default();
+        metadata
+            .ingest_flac_metadata_block(2, &application_payload(b"opaque-app"), 8_000, 1)
+            .unwrap();
+
+        let blocks = metadata.into_encode_metadata().flac_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_type(), 2);
+        assert_eq!(blocks[0].payload(), application_payload(b"opaque-app"));
     }
 
     #[test]

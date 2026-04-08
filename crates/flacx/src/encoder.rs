@@ -245,7 +245,7 @@ impl Encoder {
         Ok(output.into_inner())
     }
 
-    fn encode_wav_data<W, P>(
+    pub(crate) fn encode_wav_data<W, P>(
         &self,
         input: crate::input::EncodeWavData,
         output: W,

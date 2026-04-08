@@ -1,6 +1,7 @@
 # flacx-cli
 
-`flacx-cli` is the workspace command-line interface for WAV/FLAC conversion.
+`flacx-cli` is the workspace command-line interface for WAV/FLAC conversion and
+FLAC recompression.
 It uses the same encode/decode pipeline as the `flacx` library crate and is
 kept separate from the publishable library package.
 
@@ -19,14 +20,17 @@ flacx encode input.wav -o output.flac --level 8 --threads 4
 flacx encode album-dir -o encoded-album --depth 0
 flacx decode input.flac -o output.wav --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
+flacx recompress input.flac -o input.recompressed.flac --level 0 --threads 4
+flacx recompress album-dir -o recompressed-album --depth 0
 ```
 
 ## Command model
 
-The CLI exposes two top-level commands:
+The CLI exposes three top-level commands:
 
 - `flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <samples>] [--mode <loose|default|strict>] [--depth <n>]`
 - `flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--mode <loose|default|strict>] [--depth <n>]`
+- `flacx recompress <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <samples>] [--mode <loose|default|strict>] [--depth <n>]`
 
 The input can be either a single file or a directory tree.
 Directory traversal is controlled by `--depth`.
@@ -101,6 +105,43 @@ flacx decode input.flac -o output.wav --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
 flacx decode input.flac --mode loose
 flacx decode input.flac --mode strict
+```
+
+## Recompress
+
+### Flags
+
+- `-o, --output <path>`
+- `--level <0-8>`
+- `--threads <n>`
+- `--block-size <samples>`
+- `--mode <loose|default|strict>`
+- `--depth <n>`
+
+### Defaults and behavior
+
+- `--level` defaults to `8`.
+- `--threads` defaults to `8`.
+- `--block-size` is optional; when omitted, the block size comes from the selected compression level.
+- `--mode` defaults to `default`.
+- `--depth` defaults to `1`.
+- `--depth` only affects directory input.
+- Use `--depth 0` for unlimited recursive traversal.
+- Single-file input with no `-o` writes a sibling `.recompressed.flac` next to the source FLAC.
+- Single-file input with `-o <path>` writes to that exact file path.
+- Single-file recompress rejects same-path output.
+- Directory input with no `-o` writes `.recompressed.flac` siblings next to each discovered FLAC.
+- Directory input with `-o <dir>` preserves relative subpaths under the destination directory and keeps the original filename because the output root differs.
+- `--mode` keeps metadata handling and validation aligned with the existing loose/default/strict policy model.
+- For single-file input, `-o` must be a file path.
+- For directory input, `-o` must be a directory path.
+
+### Examples
+
+```bash
+flacx recompress input.flac
+flacx recompress input.flac -o input.recompressed.flac --level 0 --threads 4
+flacx recompress album-dir -o recompressed-album --depth 0
 ```
 
 ## Output layout summary
