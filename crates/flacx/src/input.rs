@@ -745,6 +745,23 @@ mod tests {
         vec![0x66, 0x78, 0x6d]
     }
 
+    fn valid_fxmd_chunk(version: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"fxmd");
+        payload.extend_from_slice(&version.to_le_bytes());
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.push(0);
+        payload.push(1); // padding block type
+        payload.push(0);
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload
+    }
+
     #[test]
     fn parses_16bit_pcm_wav() {
         let samples = [0, -1_000, 1_000, -2_000];
@@ -943,5 +960,39 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
         assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
+    }
+
+    #[test]
+    fn read_wav_for_encode_rejects_legacy_fxmd_chunks_by_default() {
+        let wav = with_chunks(
+            pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
+            &[(*b"fxmd", valid_fxmd_chunk(1))],
+        );
+
+        let error = read_wav_for_encode_with_config(Cursor::new(wav), &EncoderConfig::default())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("version is unsupported"));
+    }
+
+    #[test]
+    fn read_wav_for_encode_leniently_ignores_legacy_fxmd_chunks_when_validation_is_disabled() {
+        let wav = with_chunks(
+            pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
+            &[
+                (*b"fxmd", valid_fxmd_chunk(1)),
+                (*b"LIST", info_list_chunk(&[(*b"IART", b"Example Artist")])),
+            ],
+        );
+
+        let parsed = read_wav_for_encode_with_config(
+            Cursor::new(wav),
+            &EncoderConfig::default().with_strict_fxmd_validation(false),
+        )
+        .unwrap();
+
+        let blocks = parsed.metadata.flac_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
     }
 }

@@ -150,7 +150,7 @@ fn apply_encode_mode(config: EncoderConfig, mode: ModePreset) -> EncoderConfig {
             .with_strict_fxmd_validation(false),
         ModePreset::Default => config
             .with_capture_fxmd(true)
-            .with_strict_fxmd_validation(false),
+            .with_strict_fxmd_validation(true),
         ModePreset::Strict => config
             .with_capture_fxmd(true)
             .with_strict_fxmd_validation(true),
@@ -297,7 +297,7 @@ mod tests {
         let encode_default =
             apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Default);
         assert!(encode_default.capture_fxmd);
-        assert!(!encode_default.strict_fxmd_validation);
+        assert!(encode_default.strict_fxmd_validation);
 
         let encode_loose = apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Loose);
         assert!(!encode_loose.capture_fxmd);

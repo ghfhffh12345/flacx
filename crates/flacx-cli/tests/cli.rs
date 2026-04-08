@@ -11,9 +11,10 @@ use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 mod support;
 
 use support::{
-    cuesheet_block, extensible_pcm_wav_bytes, pcm_wav_bytes, raw_seektable_block,
+    application_block, cuesheet_block, extensible_pcm_wav_bytes, legacy_fxmd_v1_payload,
+    flac_metadata_blocks, pcm_wav_bytes, picture_block, raw_seektable_block,
     replace_flac_optional_metadata, sample_fixture, unique_temp_path, vorbis_comment_block,
-    wav_chunk_payloads, wav_data_bytes,
+    wav_chunk_payloads, wav_data_bytes, wav_with_chunks,
 };
 
 fn flacx_bin() -> &'static str {
@@ -62,6 +63,18 @@ fn final_progress_frame_lines(stderr: &str) -> Vec<&str> {
 
 fn decode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
     let mut command_args = vec!["decode"];
+    command_args.extend_from_slice(args);
+    command_args.push(input_path.to_str().unwrap());
+    command_args.push("-o");
+    command_args.push(output_path.to_str().unwrap());
+    Command::new(flacx_bin())
+        .args(command_args)
+        .output()
+        .unwrap()
+}
+
+fn encode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
+    let mut command_args = vec!["encode"];
     command_args.extend_from_slice(args);
     command_args.push(input_path.to_str().unwrap());
     command_args.push("-o");
@@ -669,6 +682,50 @@ fn decode_command_loose_omits_fxmd_output_while_default_preserves_it() {
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(default_output_path);
     let _ = fs::remove_file(loose_output_path);
+}
+
+#[test]
+fn encode_command_rejects_legacy_fxmd_v1_in_default_and_strict_and_ignores_it_in_loose() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let legacy_fxmd = legacy_fxmd_v1_payload(&[
+        application_block(b"legacy-application"),
+        picture_block("image/png", "legacy cover", 1, 1, 24, 0, &[0x89, 0x50, 0x4E, 0x47]),
+    ]);
+    let wav = wav_with_chunks(wav, &[(*b"fxmd", legacy_fxmd)]);
+    let input_path = unique_temp_path("wav");
+    let default_output_path = unique_temp_path("flac");
+    let loose_output_path = unique_temp_path("flac");
+    let strict_output_path = unique_temp_path("flac");
+    fs::write(&input_path, &wav).unwrap();
+
+    let default_output = encode_cli_output(&input_path, &default_output_path, &[]);
+    assert!(!default_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&default_output.stderr)
+            .contains("fxmd payload version is unsupported")
+    );
+
+    let strict_output = encode_cli_output(&input_path, &strict_output_path, &["--mode", "strict"]);
+    assert!(!strict_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&strict_output.stderr)
+            .contains("fxmd payload version is unsupported")
+    );
+
+    let loose_output = encode_cli_output(&input_path, &loose_output_path, &["--mode", "loose"]);
+    assert!(
+        loose_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&loose_output.stderr)
+    );
+    let loose_blocks = flac_metadata_blocks(&fs::read(&loose_output_path).unwrap());
+    assert!(!loose_blocks.iter().any(|block| block.block_type == 2));
+    assert!(!loose_blocks.iter().any(|block| block.block_type == 6));
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(default_output_path);
+    let _ = fs::remove_file(loose_output_path);
+    let _ = fs::remove_file(strict_output_path);
 }
 
 #[test]

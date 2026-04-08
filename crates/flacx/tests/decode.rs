@@ -7,11 +7,11 @@ use flacx::{
 mod support;
 
 use support::{
-    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
+    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, ParsedMetadataBlock, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
     cuesheet_block, extensible_pcm_wav_bytes, flac_frames, flac_metadata_blocks, info_list_chunk,
     ordinary_channel_mask, parse_first_flac_frame_header, parse_fxmd_chunk_payload,
-    parse_wav_format, pcm_wav_bytes, raw_cuesheet_block,
+    parse_wav_format, pcm_wav_bytes, picture_block, raw_cuesheet_block,
     raw_seektable_block, replace_flac_optional_metadata, rewrite_streaminfo_md5,
     rich_cuesheet_payload, sample_fixture, seektable_block, streaminfo_md5, truncate_bytes,
     unique_temp_path, vorbis_comment_block, wav_chunk_payloads, wav_cue_points, wav_data_bytes,
@@ -395,7 +395,7 @@ fn decode_emits_canonical_fxmd_chunk_for_flac_cuesheet() {
     let parsed = parse_fxmd_chunk_payload(&fxmd_payloads[0]);
 
     assert_eq!(fxmd_payloads.len(), 1);
-    assert_eq!(parsed.version, 1);
+    assert_eq!(parsed.version, 2);
     assert_eq!(
         parsed
             .records
@@ -418,6 +418,131 @@ fn decode_keeps_riff_cue_mirroring_when_cuesheet_is_representable() {
 
     assert_eq!(wav_chunk_payloads(&decoded, *b"fxmd").len(), 1);
     assert_eq!(wav_cue_points(&decoded), vec![0, 2_048]);
+}
+
+#[test]
+fn round_trips_application_and_picture_metadata_exactly_via_fxmd_v2() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let application = application_block(b"opaque-metadata");
+    let picture = picture_block(
+        "image/png",
+        "front cover",
+        1,
+        1,
+        24,
+        0,
+        &[0x89, 0x50, 0x4E, 0x47],
+    );
+    let flac = replace_flac_optional_metadata(&flac, &[application.clone(), picture.clone()]);
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+    let fxmd_payloads = wav_chunk_payloads(&decoded, *b"fxmd");
+    let parsed = parse_fxmd_chunk_payload(&fxmd_payloads[0]);
+
+    assert_eq!(fxmd_payloads.len(), 1);
+    assert_eq!(parsed.version, 2);
+    assert_eq!(
+        parsed
+            .records
+            .iter()
+            .map(|record| (record.block_type, record.payload.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (2, application.payload.clone()),
+            (6, picture.payload.clone()),
+        ]
+    );
+    assert!(wav_info_entries(&decoded).is_empty());
+    assert!(wav_cue_points(&decoded).is_empty());
+
+    let reencoded = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&decoded)
+        .unwrap();
+    let reencoded_blocks = flac_metadata_blocks(&reencoded);
+    let reencoded_application = reencoded_blocks
+        .iter()
+        .find(|block| block.block_type == 2)
+        .expect("application block present");
+    let reencoded_picture = reencoded_blocks
+        .iter()
+        .find(|block| block.block_type == 6)
+        .expect("picture block present");
+    let original_blocks = flac_metadata_blocks(&flac);
+    let original_application = original_blocks
+        .iter()
+        .find(|block| block.block_type == 2)
+        .expect("application block present");
+    let original_picture = original_blocks
+        .iter()
+        .find(|block| block.block_type == 6)
+        .expect("picture block present");
+
+    assert_eq!(reencoded_application.payload, original_application.payload);
+    assert_eq!(reencoded_picture.payload, original_picture.payload);
+}
+
+#[test]
+fn round_trips_fxmd_payload_exactly_through_flac_wav_flac_wav() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(
+        &flac,
+        &[
+            application_block(b"opaque-metadata"),
+            picture_block("image/png", "front cover", 1, 1, 24, 0, &[0x89, 0x50, 0x4E, 0x47]),
+        ],
+    );
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+    let fxmd_payload = wav_chunk_payloads(&decoded, *b"fxmd")
+        .into_iter()
+        .next()
+        .expect("fxmd chunk present");
+    let wav_with_fxmd = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
+        &[(*b"fxmd", fxmd_payload.clone())],
+    );
+
+    let reencoded = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&wav_with_fxmd)
+        .unwrap();
+    let decoded_again = decode_bytes_with_threads(&reencoded, 2);
+
+    assert_eq!(
+        wav_chunk_payloads(&decoded_again, *b"fxmd"),
+        vec![fxmd_payload]
+    );
+    assert_eq!(wav_data_bytes(&decoded_again), wav_data_bytes(&wav));
+}
+
+#[test]
+fn round_trips_unknown_metadata_blocks_opaquely_via_fxmd_v2() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let unknown = ParsedMetadataBlock {
+        is_last: false,
+        block_type: 8,
+        payload: b"opaque-reserved-block".to_vec(),
+    };
+    let flac = replace_flac_optional_metadata(&flac, std::slice::from_ref(&unknown));
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+    let parsed = parse_fxmd_chunk_payload(&wav_chunk_payloads(&decoded, *b"fxmd")[0]);
+    let reencoded = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&decoded)
+        .unwrap();
+
+    assert_eq!(
+        parsed
+            .records
+            .iter()
+            .find(|record| record.block_type == 8)
+            .expect("unknown metadata record preserved")
+            .payload,
+        unknown.payload
+    );
+    assert_eq!(flac_metadata_blocks(&reencoded), flac_metadata_blocks(&flac));
 }
 
 #[test]

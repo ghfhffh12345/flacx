@@ -41,11 +41,12 @@ impl<W: Seek + Write> FlacWriter<W> {
         stream_info: StreamInfo,
         metadata_blocks: &[FlacMetadataBlock],
         total_frames: usize,
+        allow_implicit_seektable: bool,
     ) -> io::Result<Self> {
         let has_explicit_seektable = metadata_blocks
             .iter()
             .any(|block| matches!(block, FlacMetadataBlock::SeekTable(_)));
-        let seektable_selection = if has_explicit_seektable {
+        let seektable_selection = if has_explicit_seektable || !allow_implicit_seektable {
             None
         } else {
             SeekTableSelection::for_total_frames(total_frames)
@@ -775,7 +776,7 @@ mod tests {
     fn writer_marks_streaminfo_as_last_when_no_optional_metadata_exists() {
         let stream_info = StreamInfo::new(44_100, 2, 16, 128, [0u8; 16]);
         let writer = Cursor::new(Vec::new());
-        let (writer, _) = FlacWriter::new(writer, stream_info, &[], 0)
+        let (writer, _) = FlacWriter::new(writer, stream_info, &[], 0, true)
             .unwrap()
             .finalize()
             .unwrap();
@@ -816,7 +817,7 @@ mod tests {
         let metadata_blocks = draft.finish(64).flac_blocks();
         let stream_info = StreamInfo::new(44_100, 2, 16, 64, [0u8; 16]);
         let writer = Cursor::new(Vec::new());
-        let mut writer = FlacWriter::new(writer, stream_info, &metadata_blocks, 1).unwrap();
+        let mut writer = FlacWriter::new(writer, stream_info, &metadata_blocks, 1, true).unwrap();
         writer.write_frame(0, 0, 64, &[0xAA]).unwrap();
         let (writer, _) = writer.finalize().unwrap();
         let blocks = parse_metadata_blocks(&writer.into_inner());
@@ -853,7 +854,7 @@ mod tests {
     fn writer_backpatches_seektable_entries_from_written_frame_layout() {
         let stream_info = StreamInfo::new(44_100, 1, 16, 48, [0u8; 16]);
         let writer = Cursor::new(Vec::new());
-        let mut writer = FlacWriter::new(writer, stream_info, &[], 3).unwrap();
+        let mut writer = FlacWriter::new(writer, stream_info, &[], 3, true).unwrap();
 
         writer.write_frame(0, 0, 16, &[0xAA; 4]).unwrap();
         writer.write_frame(1, 16, 24, &[0xBB; 7]).unwrap();

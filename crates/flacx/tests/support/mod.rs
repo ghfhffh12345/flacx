@@ -512,6 +512,55 @@ pub fn application_block(payload: &[u8]) -> ParsedMetadataBlock {
     }
 }
 
+pub fn picture_block(
+    mime: &str,
+    description: &str,
+    width: u32,
+    height: u32,
+    depth: u32,
+    colors: u32,
+    data: &[u8],
+) -> ParsedMetadataBlock {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&3u32.to_le_bytes());
+    payload.extend_from_slice(&(mime.len() as u32).to_le_bytes());
+    payload.extend_from_slice(mime.as_bytes());
+    payload.extend_from_slice(&(description.len() as u32).to_le_bytes());
+    payload.extend_from_slice(description.as_bytes());
+    payload.extend_from_slice(&width.to_le_bytes());
+    payload.extend_from_slice(&height.to_le_bytes());
+    payload.extend_from_slice(&depth.to_le_bytes());
+    payload.extend_from_slice(&colors.to_le_bytes());
+    payload.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    payload.extend_from_slice(data);
+    ParsedMetadataBlock {
+        is_last: false,
+        block_type: 6,
+        payload,
+    }
+}
+
+pub fn legacy_fxmd_v1_payload(blocks: &[ParsedMetadataBlock]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"fxmd");
+    payload.extend_from_slice(&1u16.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
+    for block in blocks {
+        payload.extend_from_slice(&(block.payload.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&block.payload);
+    }
+    for (ordinal, block) in blocks.iter().enumerate() {
+        payload.push(block.block_type);
+        payload.push(0);
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&(ordinal as u32).to_le_bytes());
+        payload.extend_from_slice(&(ordinal as u32).to_le_bytes());
+    }
+    payload
+}
+
 pub fn wav_info_entries(wav_bytes: &[u8]) -> Vec<([u8; 4], String)> {
     let mut entries = Vec::new();
     for (chunk_id, payload) in wav_chunks(wav_bytes) {

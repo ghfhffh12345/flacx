@@ -28,11 +28,6 @@ use crate::{
 
 const FLAC_MAGIC: &[u8; 4] = b"fLaC";
 const STREAMINFO_BLOCK_TYPE: u8 = 0;
-const APPLICATION_BLOCK_TYPE: u8 = 2;
-const VORBIS_COMMENT_BLOCK_TYPE: u8 = 4;
-const CUESHEET_BLOCK_TYPE: u8 = 5;
-const PADDING_BLOCK_TYPE: u8 = 1;
-const PICTURE_BLOCK_TYPE: u8 = 6;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 const FRAME_CHUNK_SIZE: usize = 32;
 
@@ -1053,14 +1048,7 @@ fn parse_metadata(
                 )?;
             }
             saw_seektable = true;
-        } else if matches!(
-            block_type,
-            PADDING_BLOCK_TYPE
-                | APPLICATION_BLOCK_TYPE
-                | VORBIS_COMMENT_BLOCK_TYPE
-                | CUESHEET_BLOCK_TYPE
-                | PICTURE_BLOCK_TYPE
-        ) {
+        } else {
             metadata.ingest_flac_metadata_block(
                 block_type,
                 &bytes[offset..offset + block_len],
