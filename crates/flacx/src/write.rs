@@ -599,7 +599,7 @@ mod tests {
     };
     use crate::{
         level::LevelProfile,
-        metadata::{FlacMetadataBlock, MetadataDraft},
+        metadata::{FlacMetadataBlock, FxmdChunkPolicy, MetadataDraft},
         model::{ChannelAssignment, encode_frame},
         stream_info::StreamInfo,
     };
@@ -796,7 +796,9 @@ mod tests {
             chunk.extend_from_slice(b"Artist");
             chunk
         };
-        draft.ingest_chunk(*b"LIST", &info_chunk).unwrap();
+        draft
+            .ingest_chunk(*b"LIST", &info_chunk, FxmdChunkPolicy::IGNORE)
+            .unwrap();
         draft
             .ingest_chunk(
                 *b"cue ",
@@ -808,6 +810,7 @@ mod tests {
                     0, 0, 0, 0, // block start
                     16, 0, 0, 0, // sample offset
                 ],
+                FxmdChunkPolicy::IGNORE,
             )
             .unwrap();
         let metadata_blocks = draft.finish(64).flac_blocks();
@@ -838,6 +841,7 @@ mod tests {
                     b'I', b'N', b'F', b'O', b'I', b'N', b'A', b'M', 5, 0, 0, 0, b'T', b'i', b't',
                     b'l', b'e', 0,
                 ],
+                FxmdChunkPolicy::IGNORE,
             )
             .unwrap();
         let blocks = draft.finish(32).flac_blocks();

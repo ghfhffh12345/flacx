@@ -20,7 +20,7 @@ use std::{
 use crate::{
     config::{EncoderBuilder, EncoderConfig},
     error::{Error, Result},
-    input::read_wav_for_encode,
+    input::read_wav_for_encode_with_config,
     model::encode_frame,
     plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
     progress::{NoProgress, ProgressSink, ProgressSnapshot},
@@ -130,7 +130,7 @@ impl Encoder {
         R: Read + Seek,
         W: Write + Seek,
     {
-        let input = read_wav_for_encode(input)?;
+        let input = read_wav_for_encode_with_config(input, &self.config)?;
         let mut progress = NoProgress;
         self.encode_wav_data(input, output, &mut progress)
     }
@@ -168,7 +168,7 @@ impl Encoder {
         W: Write + Seek,
         F: FnMut(ProgressSnapshot) -> Result<()>,
     {
-        let input = read_wav_for_encode(input)?;
+        let input = read_wav_for_encode_with_config(input, &self.config)?;
         let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
         self.encode_wav_data(input, output, &mut progress)
     }

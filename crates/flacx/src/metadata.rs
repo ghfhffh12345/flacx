@@ -22,6 +22,19 @@ pub(crate) const FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY: &str = "FLACX_CHANNEL_LAYO
 const FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE: &str = "1";
 const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FxmdChunkPolicy {
+    pub(crate) capture: bool,
+    pub(crate) strict: bool,
+}
+
+impl FxmdChunkPolicy {
+    pub(crate) const IGNORE: Self = Self {
+        capture: false,
+        strict: false,
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct EncodeMetadata {
     preserved: Option<PreservedMetadataBundle>,
@@ -363,11 +376,16 @@ impl PreservedMetadataBundle {
         }
         let mut cursor = 0usize;
         if payload[cursor..cursor + 4] != FXMD_MAGIC {
-            return Err(crate::error::Error::InvalidWav("fxmd payload magic is invalid"));
+            return Err(crate::error::Error::InvalidWav(
+                "fxmd payload magic is invalid",
+            ));
         }
         cursor += 4;
-        let version =
-            u16::from_le_bytes(payload[cursor..cursor + 2].try_into().expect("fxmd version slice"));
+        let version = u16::from_le_bytes(
+            payload[cursor..cursor + 2]
+                .try_into()
+                .expect("fxmd version slice"),
+        );
         cursor += 2;
         if version != FXMD_VERSION {
             return Err(crate::error::Error::InvalidWav(
@@ -454,7 +472,9 @@ struct PreservedMetadataRecord {
 impl PreservedMetadataRecord {
     fn to_flac_metadata_block(&self) -> FlacMetadataBlock {
         match self.block_type {
-            SEEKTABLE_BLOCK_TYPE => FlacMetadataBlock::SeekTable(SeekTableBlock::new(&self.payload)),
+            SEEKTABLE_BLOCK_TYPE => {
+                FlacMetadataBlock::SeekTable(SeekTableBlock::new(&self.payload))
+            }
             APPLICATION_BLOCK_TYPE => {
                 FlacMetadataBlock::Application(ApplicationBlock::new(&self.payload))
             }
@@ -463,7 +483,9 @@ impl PreservedMetadataRecord {
                 VorbisCommentBlock::from_flac_payload(&self.payload)
                     .expect("preserved vorbis comment payload previously validated"),
             ),
-            CUESHEET_BLOCK_TYPE => FlacMetadataBlock::CueSheet(CueSheetBlock::from_raw_payload(&self.payload)),
+            CUESHEET_BLOCK_TYPE => {
+                FlacMetadataBlock::CueSheet(CueSheetBlock::from_raw_payload(&self.payload))
+            }
             PICTURE_BLOCK_TYPE => FlacMetadataBlock::Picture(PictureBlock::new(&self.payload)),
             _ => unreachable!("unsupported preserved block type {}", self.block_type),
         }
@@ -570,10 +592,14 @@ impl PictureBlock {
     }
 }
 
-fn validate_preserved_block_payload(block_type: u8, payload: &[u8]) -> std::result::Result<(), &'static str> {
+fn validate_preserved_block_payload(
+    block_type: u8,
+    payload: &[u8],
+) -> std::result::Result<(), &'static str> {
     match block_type {
-        SEEKTABLE_BLOCK_TYPE => validate_seektable_payload(payload)
-            .map_err(|_| "seektable payload is invalid"),
+        SEEKTABLE_BLOCK_TYPE => {
+            validate_seektable_payload(payload).map_err(|_| "seektable payload is invalid")
+        }
         APPLICATION_BLOCK_TYPE => {
             if payload.len() < 4 {
                 return Err("application payload must contain a 4-byte application id");
@@ -589,11 +615,9 @@ fn validate_preserved_block_payload(block_type: u8, payload: &[u8]) -> std::resu
         VORBIS_COMMENT_BLOCK_TYPE => VorbisCommentBlock::from_flac_payload(payload)
             .ok_or("vorbis comment payload is invalid")
             .map(|_| ()),
-        CUESHEET_BLOCK_TYPE => {
-            parse_cuesheet_tracks(payload)
-                .map_err(|_| "cuesheet payload is invalid")
-                .map(|_| ())
-        }
+        CUESHEET_BLOCK_TYPE => parse_cuesheet_tracks(payload)
+            .map_err(|_| "cuesheet payload is invalid")
+            .map(|_| ()),
         PICTURE_BLOCK_TYPE => validate_picture_payload(payload),
         _ => Err("unsupported preserved metadata block type"),
     }
@@ -602,20 +626,22 @@ fn validate_preserved_block_payload(block_type: u8, payload: &[u8]) -> std::resu
 fn validate_picture_payload(payload: &[u8]) -> std::result::Result<(), &'static str> {
     let mut cursor = 0usize;
     let _picture_type = read_u32_le(payload, &mut cursor).ok_or("picture type is truncated")?;
-    let mime_len = read_u32_le(payload, &mut cursor).ok_or("picture MIME length is truncated")? as usize;
-    let _mime = read_bytes(payload, &mut cursor, mime_len).ok_or("picture MIME bytes are truncated")?;
-    let description_len =
-        read_u32_le(payload, &mut cursor).ok_or("picture description length is truncated")? as usize;
-    let _description =
-        read_bytes(payload, &mut cursor, description_len).ok_or("picture description bytes are truncated")?;
+    let mime_len =
+        read_u32_le(payload, &mut cursor).ok_or("picture MIME length is truncated")? as usize;
+    let _mime =
+        read_bytes(payload, &mut cursor, mime_len).ok_or("picture MIME bytes are truncated")?;
+    let description_len = read_u32_le(payload, &mut cursor)
+        .ok_or("picture description length is truncated")? as usize;
+    let _description = read_bytes(payload, &mut cursor, description_len)
+        .ok_or("picture description bytes are truncated")?;
     let _width = read_u32_le(payload, &mut cursor).ok_or("picture width is truncated")?;
     let _height = read_u32_le(payload, &mut cursor).ok_or("picture height is truncated")?;
     let _depth = read_u32_le(payload, &mut cursor).ok_or("picture depth is truncated")?;
     let _colors = read_u32_le(payload, &mut cursor).ok_or("picture color count is truncated")?;
     let picture_data_len =
         read_u32_le(payload, &mut cursor).ok_or("picture data length is truncated")? as usize;
-    let _picture_data =
-        read_bytes(payload, &mut cursor, picture_data_len).ok_or("picture data bytes are truncated")?;
+    let _picture_data = read_bytes(payload, &mut cursor, picture_data_len)
+        .ok_or("picture data bytes are truncated")?;
     if cursor != payload.len() {
         return Err("picture payload has trailing bytes");
     }
@@ -692,7 +718,6 @@ impl CueSheetBlock {
     fn payload(&self) -> Vec<u8> {
         self.raw_payload.clone()
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,9 +774,10 @@ impl MetadataDraft {
         &mut self,
         chunk_id: [u8; 4],
         payload: &[u8],
+        fxmd_policy: FxmdChunkPolicy,
     ) -> crate::error::Result<()> {
         if chunk_id == FXMD_CHUNK_ID {
-            self.ingest_fxmd_chunk(payload)?;
+            self.ingest_fxmd_chunk(payload, fxmd_policy)?;
             return Ok(());
         }
 
@@ -862,13 +888,31 @@ impl MetadataDraft {
         }
     }
 
-    fn ingest_fxmd_chunk(&mut self, payload: &[u8]) -> crate::error::Result<()> {
-        if self.preserved.is_some() {
-            return Err(crate::error::Error::InvalidWav(
-                "duplicate fxmd chunk is not allowed",
-            ));
+    fn ingest_fxmd_chunk(
+        &mut self,
+        payload: &[u8],
+        fxmd_policy: FxmdChunkPolicy,
+    ) -> crate::error::Result<()> {
+        if !fxmd_policy.capture {
+            return Ok(());
         }
-        self.preserved = Some(PreservedMetadataBundle::from_fxmd_payload(payload)?);
+
+        if self.preserved.is_some() {
+            if fxmd_policy.strict {
+                return Err(crate::error::Error::InvalidWav(
+                    "duplicate fxmd chunk is not allowed",
+                ));
+            }
+            return Ok(());
+        }
+
+        match PreservedMetadataBundle::from_fxmd_payload(payload) {
+            Ok(bundle) => {
+                self.preserved = Some(bundle);
+            }
+            Err(error) if fxmd_policy.strict => return Err(error),
+            Err(_) => {}
+        }
         Ok(())
     }
 }
@@ -1214,10 +1258,9 @@ fn append_chunk_payload(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FlacMetadataBlock, MetadataDraft,
+        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FlacMetadataBlock, FxmdChunkPolicy, MetadataDraft,
         SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, SeekPoint, WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
-        WavMetadata,
-        parse_cuesheet_tracks, validate_seektable_payload,
+        WavMetadata, parse_cuesheet_tracks, validate_seektable_payload,
     };
 
     fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
@@ -1312,6 +1355,7 @@ mod tests {
                     (*b"IZZZ", b"ignored"),
                     (*b"IART", b"Guest Artist"),
                 ]),
+                FxmdChunkPolicy::IGNORE,
             )
             .unwrap();
 
@@ -1338,6 +1382,7 @@ mod tests {
             .ingest_chunk(
                 *b"LIST",
                 &info_list_chunk(&[(*b"IART", &[0xff, 0xfe, 0xfd])]),
+                FxmdChunkPolicy::IGNORE,
             )
             .unwrap();
 
@@ -1348,7 +1393,11 @@ mod tests {
     fn normalizes_representable_cue_points_into_cuesheet_tracks() {
         let mut draft = MetadataDraft::default();
         draft
-            .ingest_chunk(*b"cue ", &cue_chunk(&[4_000, 1_000, 4_000]))
+            .ingest_chunk(
+                *b"cue ",
+                &cue_chunk(&[4_000, 1_000, 4_000]),
+                FxmdChunkPolicy::IGNORE,
+            )
             .unwrap();
 
         let blocks = draft.finish(6_000).flac_blocks();
@@ -1365,7 +1414,9 @@ mod tests {
     #[test]
     fn drops_cue_points_that_cannot_be_represented() {
         let mut draft = MetadataDraft::default();
-        draft.ingest_chunk(*b"cue ", &cue_chunk(&[4_000])).unwrap();
+        draft
+            .ingest_chunk(*b"cue ", &cue_chunk(&[4_000]), FxmdChunkPolicy::IGNORE)
+            .unwrap();
 
         assert!(draft.finish(4_000).flac_blocks().is_empty());
     }
@@ -1431,7 +1482,11 @@ mod tests {
     fn emits_channel_mask_comment_for_non_ordinary_layouts() {
         let mut draft = MetadataDraft::default();
         draft
-            .ingest_chunk(*b"LIST", &info_list_chunk(&[(*b"INAM", b"Example Title")]))
+            .ingest_chunk(
+                *b"LIST",
+                &info_list_chunk(&[(*b"INAM", b"Example Title")]),
+                FxmdChunkPolicy::IGNORE,
+            )
             .unwrap();
         let mut metadata = draft.finish(4_096);
         metadata.set_channel_mask(4, 0x0001_2104);

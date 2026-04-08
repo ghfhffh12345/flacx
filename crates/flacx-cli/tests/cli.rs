@@ -11,8 +11,9 @@ use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 mod support;
 
 use support::{
-    extensible_pcm_wav_bytes, pcm_wav_bytes, raw_seektable_block, replace_flac_optional_metadata,
-    sample_fixture, unique_temp_path, vorbis_comment_block, wav_data_bytes,
+    cuesheet_block, extensible_pcm_wav_bytes, pcm_wav_bytes, raw_seektable_block,
+    replace_flac_optional_metadata, sample_fixture, unique_temp_path, vorbis_comment_block,
+    wav_chunk_payloads, wav_data_bytes,
 };
 
 fn flacx_bin() -> &'static str {
@@ -108,9 +109,13 @@ fn decode_help_lists_output_depth_and_threads() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("-o, --output <OUTPUT>"));
     assert!(stdout.contains("--depth <DEPTH>"));
+    assert!(stdout.contains("--mode <MODE>"));
     assert!(stdout.contains("--threads <THREADS>"));
-    assert!(stdout.contains("--strict-channel-mask-provenance"));
-    assert!(stdout.contains("--strict-seektable-validation"));
+    assert!(stdout.contains("loose"));
+    assert!(stdout.contains("default"));
+    assert!(stdout.contains("strict"));
+    assert!(!stdout.contains("--strict-channel-mask-provenance"));
+    assert!(!stdout.contains("--strict-seektable-validation"));
 }
 
 #[test]
@@ -618,11 +623,7 @@ fn decode_command_keeps_ordinary_files_green_with_strict_mode() {
     let output_path = unique_temp_path("wav");
     fs::write(&input_path, &flac).unwrap();
 
-    let output = decode_cli_output(
-        &input_path,
-        &output_path,
-        &["--strict-channel-mask-provenance"],
-    );
+    let output = decode_cli_output(&input_path, &output_path, &["--mode", "strict"]);
 
     assert!(
         output.status.success(),
@@ -633,6 +634,41 @@ fn decode_command_keeps_ordinary_files_green_with_strict_mode() {
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn decode_command_loose_omits_fxmd_output_while_default_preserves_it() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(&flac, &[cuesheet_block(&[0], 2_048)]);
+    let input_path = unique_temp_path("flac");
+    let default_output_path = unique_temp_path("wav");
+    let loose_output_path = unique_temp_path("wav");
+    fs::write(&input_path, &flac).unwrap();
+
+    let default_output = decode_cli_output(&input_path, &default_output_path, &[]);
+    assert!(
+        default_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&default_output.stderr)
+    );
+    let default_wav = fs::read(&default_output_path).unwrap();
+    assert_eq!(wav_chunk_payloads(&default_wav, *b"fxmd").len(), 1);
+
+    let loose_output = decode_cli_output(&input_path, &loose_output_path, &["--mode", "loose"]);
+    assert!(
+        loose_output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&loose_output.stderr)
+    );
+    let loose_wav = fs::read(&loose_output_path).unwrap();
+    assert_eq!(wav_chunk_payloads(&loose_wav, *b"fxmd").len(), 0);
+    assert_wav_audio_eq(&default_wav, &wav);
+    assert_wav_audio_eq(&loose_wav, &wav);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(default_output_path);
+    let _ = fs::remove_file(loose_output_path);
 }
 
 #[test]
@@ -706,11 +742,7 @@ fn decode_command_fails_on_missing_provenance_marker_for_non_ordinary_layout() {
     let output_path = unique_temp_path("wav");
     fs::write(&input_path, &flac).unwrap();
 
-    let output = decode_cli_output(
-        &input_path,
-        &output_path,
-        &["--strict-channel-mask-provenance"],
-    );
+    let output = decode_cli_output(&input_path, &output_path, &["--mode", "strict"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -730,11 +762,7 @@ fn decode_command_fails_on_invalid_seektable_when_strict_validation_is_enabled()
     let output_path = unique_temp_path("wav");
     fs::write(&input_path, &flac).unwrap();
 
-    let output = decode_cli_output(
-        &input_path,
-        &output_path,
-        &["--strict-seektable-validation"],
-    );
+    let output = decode_cli_output(&input_path, &output_path, &["--mode", "strict"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);

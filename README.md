@@ -74,14 +74,15 @@ Run `flacx` from `target/release/` or after adding that directory to your
 flacx encode input.wav -o output.flac --level 8 --threads 4
 flacx encode album-dir -o encoded-album --depth 0
 flacx decode input.flac -o output.wav --threads 4
+flacx decode input.flac --mode strict
 flacx decode encoded-album -o decoded-album --depth 0
 ```
 
 The command surface is:
 
 ```text
-flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <n>] [--depth <n>]
-flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--depth <n>] [--strict-channel-mask-provenance] [--strict-seektable-validation]
+flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <n>] [--mode <loose|default|strict>] [--depth <n>]
+flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--mode <loose|default|strict>] [--depth <n>]
 ```
 
 Common behavior:
@@ -95,6 +96,7 @@ Common behavior:
 - `--depth` applies only to directory input and uses `0` for unlimited
   traversal
 - encode defaults to `--threads 8`
+- both commands default `--mode` to `default`
 - decode defaults to the library's decode configuration when `--threads` is
   omitted
 - interactive terminals show live progress for both encode and decode

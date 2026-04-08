@@ -17,12 +17,12 @@
 //!   - `--level`
 //!   - `--threads`
 //!   - `--block-size`
+//!   - `--mode`
 //!   - `--depth` (directory input only)
 //! - decode-only flags:
 //!   - `--output`
 //!   - `--threads`
-//!   - `--strict-channel-mask-provenance`
-//!   - `--strict-seektable-validation`
+//!   - `--mode`
 //!   - `--depth` (directory input only)
 
 use std::{

@@ -19,6 +19,17 @@ const PCM_SUBFORMAT_GUID: [u8; 16] = [
 ];
 const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WavMetadataWriteOptions {
+    pub(crate) emit_fxmd: bool,
+}
+
+impl Default for WavMetadataWriteOptions {
+    fn default() -> Self {
+        Self { emit_fxmd: true }
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn write_wav<W: Write>(writer: &mut W, spec: WavSpec, samples: &[i32]) -> Result<()> {
     write_wav_with_metadata(writer, spec, samples, &WavMetadata::default())
@@ -30,14 +41,22 @@ pub(crate) fn write_wav_with_metadata<W: Write>(
     samples: &[i32],
     metadata: &WavMetadata,
 ) -> Result<()> {
-    write_wav_with_metadata_and_md5(writer, spec, samples, metadata).map(|_| ())
+    write_wav_with_metadata_and_md5_with_options(
+        writer,
+        spec,
+        samples,
+        metadata,
+        WavMetadataWriteOptions::default(),
+    )
+    .map(|_| ())
 }
 
-pub(crate) fn write_wav_with_metadata_and_md5<W: Write>(
+pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
     writer: &mut W,
     spec: WavSpec,
     samples: &[i32],
     metadata: &WavMetadata,
+    options: WavMetadataWriteOptions,
 ) -> Result<[u8; 16]> {
     if !(1..=8).contains(&spec.channels) {
         return Err(Error::UnsupportedWav(format!(
@@ -101,7 +120,7 @@ pub(crate) fn write_wav_with_metadata_and_md5<W: Write>(
 
     let block_align = usize::from(spec.channels) * usize::from(container_bits_per_sample / 8);
     let data_bytes = samples.len() * usize::from(container_bits_per_sample / 8);
-    let metadata_bytes = wav_metadata_bytes(metadata);
+    let metadata_bytes = wav_metadata_bytes(metadata, options);
     let riff_size = 4 + (8 + fmt_chunk_size as usize) + metadata_bytes.len() + (8 + data_bytes);
 
     writer.write_all(b"RIFF")?;
@@ -141,12 +160,14 @@ fn is_supported_channel_mask(channels: u16, mask: u32) -> bool {
     mask.count_ones() <= u32::from(channels)
 }
 
-fn wav_metadata_bytes(metadata: &WavMetadata) -> Vec<u8> {
+fn wav_metadata_bytes(metadata: &WavMetadata, options: WavMetadataWriteOptions) -> Vec<u8> {
     if metadata.is_empty() {
         return Vec::new();
     }
     let mut bytes = Vec::new();
-    if let Some(payload) = metadata.unified_chunk_payload() {
+    if options.emit_fxmd
+        && let Some(payload) = metadata.unified_chunk_payload()
+    {
         append_wav_chunk(&mut bytes, &FXMD_CHUNK_ID, &payload);
     }
     if let Some(payload) = metadata.list_info_chunk_payload() {
@@ -216,7 +237,10 @@ mod tests {
         metadata::WavMetadata,
     };
 
-    use super::{write_wav, write_wav_with_metadata};
+    use super::{
+        WavMetadataWriteOptions, write_wav, write_wav_with_metadata,
+        write_wav_with_metadata_and_md5_with_options,
+    };
 
     fn parse_chunk_layout(wav: &[u8]) -> Vec<([u8; 4], u32)> {
         assert_eq!(&wav[..4], b"RIFF");
@@ -370,6 +394,52 @@ mod tests {
         assert_eq!(list_size, 16);
         let padded_byte = wav[list_index + 8 + list_size as usize - 1];
         assert_eq!(padded_byte, 0);
+    }
+
+    #[test]
+    fn metadata_output_can_omit_fxmd_while_preserving_other_chunks() {
+        let spec = WavSpec {
+            sample_rate: 44_100,
+            channels: 1,
+            bits_per_sample: 16,
+            total_samples: 2,
+            bytes_per_sample: 2,
+            channel_mask: ordinary_channel_mask(1u16).unwrap(),
+        };
+        let samples = [1, -2];
+        let mut metadata = WavMetadata::default();
+        metadata
+            .ingest_flac_metadata_block(
+                4,
+                &[
+                    0, 0, 0, 0, // vendor len
+                    1, 0, 0, 0, // comments
+                    9, 0, 0, 0, // len
+                    b'T', b'I', b'T', b'L', b'E', b'=', b'O', b'd', b'd',
+                ],
+                2,
+                1,
+            )
+            .unwrap();
+        metadata
+            .ingest_flac_metadata_block(5, &synthetic_cuesheet_payload(&[0], 2), 2, 1)
+            .unwrap();
+
+        let mut wav = Vec::new();
+        write_wav_with_metadata_and_md5_with_options(
+            &mut wav,
+            spec,
+            &samples,
+            &metadata,
+            WavMetadataWriteOptions { emit_fxmd: false },
+        )
+        .unwrap();
+
+        let chunks = parse_chunk_layout(&wav);
+        assert_eq!(
+            chunks.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![*b"fmt ", *b"LIST", *b"cue ", *b"data"]
+        );
     }
 
     #[test]
