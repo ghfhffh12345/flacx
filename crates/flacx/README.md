@@ -149,6 +149,24 @@ These helpers are useful when you are:
 - piping data through a higher-level application buffer
 - avoiding temporary output files in a prototype
 
+## Metadata round-trip behavior
+
+When `Decoder` writes WAV output, flacx preserves otherwise-non-roundtrippable
+FLAC metadata in a private canonical WAV chunk so a later WAV -> FLAC encode can
+reconstruct the original FLAC metadata ordering and payloads. Where WAV has
+native compatibility surfaces, flacx also emits derived mirrors such as
+`LIST/INFO` and `cue `.
+
+This means decoded WAV output may contain extra metadata chunks compared with a
+minimal PCM-only WAV, even when the audio samples are unchanged.
+
+Compatibility note:
+
+- the current crate recognizes only the unified private `fxmd` preservation
+  chunk at runtime
+- older split private chunks such as `fxvc` / `fxcs` are intentionally no
+  longer imported and are treated like unknown WAV chunks
+
 ## Sample inspection helpers
 
 `inspect_wav_total_samples` and `inspect_flac_total_samples` are lightweight

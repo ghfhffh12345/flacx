@@ -42,7 +42,14 @@ impl<W: Seek + Write> FlacWriter<W> {
         metadata_blocks: &[FlacMetadataBlock],
         total_frames: usize,
     ) -> io::Result<Self> {
-        let seektable_selection = SeekTableSelection::for_total_frames(total_frames);
+        let has_explicit_seektable = metadata_blocks
+            .iter()
+            .any(|block| matches!(block, FlacMetadataBlock::SeekTable(_)));
+        let seektable_selection = if has_explicit_seektable {
+            None
+        } else {
+            SeekTableSelection::for_total_frames(total_frames)
+        };
         writer.write_all(b"fLaC")?;
         writer.write_all(&metadata_block_header(
             0,

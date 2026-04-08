@@ -24,7 +24,7 @@ fn keeps_existing_mono_and_stereo_pcm_round_trips_green() {
             .unwrap();
         let decoded = decode_bytes(&flac).unwrap();
 
-        assert_eq!(decoded, wav);
+        assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
         let format = parse_wav_format(&decoded);
         assert_eq!(format.format_tag, 1);
         assert_eq!(format.channels, channels);
@@ -126,7 +126,7 @@ fn round_trips_representative_multichannel_independent_only_envelopes() {
         let header = parse_first_flac_frame_header(&flac);
         let format = parse_wav_format(&decoded);
 
-        assert_eq!(decoded, wav);
+        assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
         assert_eq!(header.channel_assignment_bits, (channels - 1) as u8);
         assert_eq!(header.sample_size_bits, expected_sample_size_bits);
         assert_eq!(format.format_tag, 0xFFFE);
@@ -164,7 +164,7 @@ fn round_trips_non_ordinary_channel_masks_via_rfc_vorbis_comment() {
             .any(|(key, value)| { key == "FLACX_CHANNEL_LAYOUT_PROVENANCE" && value == "1" })
     );
     assert_eq!(decoded_format.channel_mask, Some(mask));
-    assert_eq!(wav_chunk_payloads(&decoded, *b"fxvc").len(), 1);
+    assert_eq!(wav_chunk_payloads(&decoded, *b"fxmd").len(), 1);
 }
 
 #[test]
@@ -193,5 +193,5 @@ fn round_trips_zero_channel_mask_via_rfc_vorbis_comment() {
     );
     assert_eq!(decoded_format.format_tag, 0xFFFE);
     assert_eq!(decoded_format.channel_mask, Some(0));
-    assert_eq!(wav_chunk_payloads(&decoded, *b"fxvc").len(), 1);
+    assert_eq!(wav_chunk_payloads(&decoded, *b"fxmd").len(), 1);
 }

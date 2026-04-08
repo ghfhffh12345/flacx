@@ -12,7 +12,7 @@ mod support;
 
 use support::{
     extensible_pcm_wav_bytes, pcm_wav_bytes, raw_seektable_block, replace_flac_optional_metadata,
-    sample_fixture, unique_temp_path, vorbis_comment_block,
+    sample_fixture, unique_temp_path, vorbis_comment_block, wav_data_bytes,
 };
 
 fn flacx_bin() -> &'static str {
@@ -42,6 +42,10 @@ fn write_flac_file(path: &Path, channels: u16, frames: usize) -> (Vec<u8>, Vec<u
     }
     fs::write(path, &flac).unwrap();
     (wav, flac)
+}
+
+fn assert_wav_audio_eq(actual: &[u8], expected: &[u8]) {
+    assert_eq!(wav_data_bytes(actual), wav_data_bytes(expected));
 }
 
 fn final_progress_frame_lines(stderr: &str) -> Vec<&str> {
@@ -596,7 +600,7 @@ fn decode_command_accepts_threads_and_round_trips_exact_wav_bytes() {
             !String::from_utf8_lossy(&output.stderr).contains('\r'),
             "decode should not emit progress output"
         );
-        assert_eq!(fs::read(&output_path).unwrap(), wav);
+        assert_wav_audio_eq(&fs::read(&output_path).unwrap(), &wav);
 
         let _ = fs::remove_file(input_path);
         let _ = fs::remove_file(output_path);
@@ -625,7 +629,7 @@ fn decode_command_keeps_ordinary_files_green_with_strict_mode() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(fs::read(&output_path).unwrap(), wav);
+    assert_wav_audio_eq(&fs::read(&output_path).unwrap(), &wav);
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
@@ -650,7 +654,7 @@ fn decode_command_function_passes_strict_channel_mask_provenance_into_config() {
     decode_command(&command, false, &mut stderr).unwrap();
 
     assert!(stderr.is_empty());
-    assert_eq!(fs::read(&output_path).unwrap(), wav);
+    assert_wav_audio_eq(&fs::read(&output_path).unwrap(), &wav);
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
@@ -765,7 +769,7 @@ fn decode_command_function_renders_filename_elapsed_and_progress_when_interactiv
     assert!(stderr.contains("ETA"));
     assert!(stderr.contains("Rate"));
     assert!(stderr.contains("100.0%"));
-    assert_eq!(fs::read(&output_path).unwrap(), wav);
+    assert_wav_audio_eq(&fs::read(&output_path).unwrap(), &wav);
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
@@ -875,7 +879,7 @@ fn decode_command_function_is_silent_when_non_interactive() {
 
     decode_command(&command, false, &mut stderr).unwrap();
     assert!(stderr.is_empty());
-    assert_eq!(fs::read(&output_path).unwrap(), wav);
+    assert_wav_audio_eq(&fs::read(&output_path).unwrap(), &wav);
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
@@ -923,7 +927,7 @@ fn decode_command_without_output_writes_sibling_wav() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(fs::read(&output_path).unwrap(), wav);
+    assert_wav_audio_eq(&fs::read(&output_path).unwrap(), &wav);
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -970,9 +974,9 @@ fn decode_directory_with_output_root_preserves_relative_subpaths_and_creates_par
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(
-        fs::read(output_dir.join("disc1").join("set").join("song.wav")).unwrap(),
-        wav
+    assert_wav_audio_eq(
+        &fs::read(output_dir.join("disc1").join("set").join("song.wav")).unwrap(),
+        &wav,
     );
 
     let _ = fs::remove_dir_all(input_dir);

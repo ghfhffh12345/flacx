@@ -7,7 +7,7 @@ use flacx::{
 
 mod support;
 
-use support::{pcm_wav_bytes, sample_fixture, unique_temp_path};
+use support::{parse_wav_format, pcm_wav_bytes, sample_fixture, unique_temp_path, wav_data_bytes};
 
 #[test]
 fn top_level_encode_bytes_matches_default_encoder() {
@@ -78,9 +78,13 @@ fn top_level_decode_bytes_matches_default_decoder() {
 
     let via_function = decode_bytes(&flac).unwrap();
     let via_decoder = Decoder::default().decode_bytes(&flac).unwrap();
+    let format = parse_wav_format(&via_decoder);
 
     assert_eq!(via_function, via_decoder);
-    assert_eq!(via_decoder, wav);
+    assert_eq!(wav_data_bytes(&via_decoder), wav_data_bytes(&wav));
+    assert_eq!(format.channels, 1);
+    assert_eq!(format.sample_rate, 44_100);
+    assert_eq!(format.bits_per_sample, 16);
 }
 
 #[test]
@@ -108,7 +112,12 @@ fn decode_api_accepts_seekable_readers_and_returns_summary() {
             bits_per_sample: 24,
         }
     );
-    assert_eq!(output.into_inner(), wav);
+    let decoded = output.into_inner();
+    let format = parse_wav_format(&decoded);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+    assert_eq!(format.channels, 2);
+    assert_eq!(format.sample_rate, 48_000);
+    assert_eq!(format.bits_per_sample, 24);
 }
 
 #[test]
