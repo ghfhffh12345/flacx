@@ -149,6 +149,9 @@ fn wav_metadata_bytes(metadata: &WavMetadata) -> Vec<u8> {
     if let Some(payload) = metadata.fxvc_chunk_payload() {
         append_wav_chunk(&mut bytes, b"fxvc", &payload);
     }
+    if let Some(payload) = metadata.fxcs_chunk_payload() {
+        append_wav_chunk(&mut bytes, b"fxcs", &payload);
+    }
     if let Some(payload) = metadata.list_info_chunk_payload() {
         append_wav_chunk(&mut bytes, b"LIST", &payload);
     }
@@ -234,7 +237,7 @@ mod tests {
             );
             chunks.push((id, size));
             offset += 8 + size as usize;
-            if size % 2 != 0 {
+            if !size.is_multiple_of(2) {
                 offset += 1;
             }
         }
@@ -347,10 +350,25 @@ mod tests {
         let chunks = parse_chunk_layout(&wav);
         assert_eq!(
             chunks.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![*b"fmt ", *b"fxvc", *b"LIST", *b"cue ", *b"data"]
+            vec![*b"fmt ", *b"fxvc", *b"fxcs", *b"LIST", *b"cue ", *b"data"]
         );
 
-        let list_index = 12 + 8 + 16 + 8 + 25 + 1;
+        let mut list_index = None;
+        let mut offset = 12usize;
+        while offset + 8 <= wav.len() {
+            let id: [u8; 4] = wav[offset..offset + 4].try_into().unwrap();
+            let size = u32::from_le_bytes(wav[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            if id == *b"LIST" {
+                list_index = Some(offset);
+                break;
+            }
+            offset += 8 + size;
+            if !size.is_multiple_of(2) {
+                offset += 1;
+            }
+        }
+
+        let list_index = list_index.expect("list chunk present");
         let list_size = u32::from_le_bytes(wav[list_index + 4..list_index + 8].try_into().unwrap());
         assert_eq!(list_size, 16);
         let padded_byte = wav[list_index + 8 + list_size as usize - 1];

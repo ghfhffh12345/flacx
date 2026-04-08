@@ -10,9 +10,10 @@ use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
     cuesheet_block, extensible_pcm_wav_bytes, flac_frames, flac_metadata_blocks, info_list_chunk,
-    ordinary_channel_mask, parse_first_flac_frame_header, parse_fxvc_chunk_payload,
-    parse_wav_format, pcm_wav_bytes, raw_seektable_block, replace_flac_optional_metadata,
-    rewrite_streaminfo_md5, sample_fixture, seektable_block, streaminfo_md5, truncate_bytes,
+    ordinary_channel_mask, parse_first_flac_frame_header, parse_fxcs_chunk_payload,
+    parse_fxvc_chunk_payload, parse_wav_format, pcm_wav_bytes, raw_cuesheet_block,
+    raw_seektable_block, replace_flac_optional_metadata, rewrite_streaminfo_md5,
+    rich_cuesheet_payload, sample_fixture, seektable_block, streaminfo_md5, truncate_bytes,
     unique_temp_path, vorbis_comment_block, wav_chunk_payloads, wav_cue_points, wav_info_entries,
     wav_with_chunks,
 };
@@ -378,6 +379,54 @@ fn restores_cuesheet_metadata_from_arbitrary_flac_input() {
     let decoded = decode_bytes_with_threads(&flac, 4);
 
     assert_eq!(wav_cue_points(&decoded), vec![0, 2_048]);
+}
+
+#[test]
+fn decode_emits_authoritative_fxcs_chunk_for_flac_cuesheet() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let raw_cuesheet = rich_cuesheet_payload();
+    let flac = replace_flac_optional_metadata(&flac, &[raw_cuesheet_block(&raw_cuesheet)]);
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+    let fxcs_payloads = wav_chunk_payloads(&decoded, *b"fxcs");
+
+    assert_eq!(fxcs_payloads.len(), 1);
+    assert_eq!(parse_fxcs_chunk_payload(&fxcs_payloads[0]).version, 1);
+    assert_eq!(
+        parse_fxcs_chunk_payload(&fxcs_payloads[0]).raw_payload,
+        raw_cuesheet
+    );
+    assert_eq!(wav_cue_points(&decoded), vec![0, 2_048]);
+}
+
+#[test]
+fn decode_keeps_riff_cue_mirroring_when_cuesheet_is_representable() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = replace_flac_optional_metadata(&flac, &[cuesheet_block(&[0, 2_048], 4_096)]);
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+
+    assert_eq!(wav_chunk_payloads(&decoded, *b"fxcs").len(), 1);
+    assert_eq!(wav_cue_points(&decoded), vec![0, 2_048]);
+}
+
+#[test]
+fn decode_preserves_exact_cuesheet_even_when_riff_cue_is_partial() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let raw_cuesheet = rich_cuesheet_payload();
+    let flac = replace_flac_optional_metadata(&flac, &[raw_cuesheet_block(&raw_cuesheet)]);
+
+    let decoded = decode_bytes_with_threads(&flac, 2);
+    let fxcs_payloads = wav_chunk_payloads(&decoded, *b"fxcs");
+
+    assert_eq!(fxcs_payloads.len(), 1);
+    assert_eq!(
+        parse_fxcs_chunk_payload(&fxcs_payloads[0]).raw_payload,
+        raw_cuesheet
+    );
 }
 
 #[test]

@@ -12,7 +12,9 @@ const CUESHEET_HEADER_LEN: usize = 396;
 const CUESHEET_TRACK_HEADER_LEN: usize = 36;
 const CUESHEET_INDEX_LEN: usize = 12;
 pub(crate) const FXVC_CHUNK_ID: [u8; 4] = *b"fxvc";
+pub(crate) const FXCS_CHUNK_ID: [u8; 4] = *b"fxcs";
 const FXVC_VERSION: u32 = 1;
+const FXCS_VERSION: u32 = 1;
 const WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY: &str = "WAVEFORMATEXTENSIBLE_CHANNEL_MASK";
 pub(crate) const FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY: &str = "FLACX_CHANNEL_LAYOUT_PROVENANCE";
 const FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE: &str = "1";
@@ -22,7 +24,7 @@ const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 pub(crate) struct EncodeMetadata {
     vorbis_comment: Option<VorbisCommentBlock>,
     authoritative_vorbis_comment: bool,
-    cuesheet: Option<CueSheet>,
+    cuesheet: Option<CueSheetBlock>,
     channel_mask: Option<u32>,
     channel_layout_provenance: bool,
 }
@@ -89,6 +91,7 @@ impl EncodeMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct WavMetadata {
     vorbis_comment: Option<VorbisCommentBlock>,
+    cuesheet: Option<CueSheetBlock>,
     info_entries: Vec<WavInfoEntry>,
     cue_points: Vec<u32>,
     channel_mask: Option<u32>,
@@ -97,7 +100,10 @@ pub(crate) struct WavMetadata {
 
 impl WavMetadata {
     pub(crate) fn is_empty(&self) -> bool {
-        self.vorbis_comment.is_none() && self.info_entries.is_empty() && self.cue_points.is_empty()
+        self.vorbis_comment.is_none()
+            && self.cuesheet.is_none()
+            && self.info_entries.is_empty()
+            && self.cue_points.is_empty()
     }
 
     pub(crate) fn channel_mask(&self) -> Option<u32> {
@@ -139,6 +145,10 @@ impl WavMetadata {
         self.vorbis_comment
             .as_ref()
             .map(VorbisCommentBlock::fxvc_payload)
+    }
+
+    pub(crate) fn fxcs_chunk_payload(&self) -> Option<Vec<u8>> {
+        self.cuesheet.as_ref().map(CueSheetBlock::fxcs_payload)
     }
 
     pub(crate) fn cue_chunk_payload(&self) -> Option<Vec<u8>> {
@@ -196,55 +206,8 @@ impl WavMetadata {
     }
 
     fn ingest_cuesheet_payload(&mut self, payload: &[u8], total_samples: u64) {
-        if payload.len() < CUESHEET_HEADER_LEN {
-            return;
-        }
-
-        let track_count = payload[CUESHEET_HEADER_LEN - 1] as usize;
-        let mut cursor = CUESHEET_HEADER_LEN;
-        for _ in 0..track_count {
-            if cursor + CUESHEET_TRACK_HEADER_LEN > payload.len() {
-                return;
-            }
-
-            let track_offset = u64::from_be_bytes(
-                payload[cursor..cursor + 8]
-                    .try_into()
-                    .expect("fixed cuesheet track offset slice"),
-            );
-            let track_number = payload[cursor + 8];
-            let index_count = payload[cursor + 35] as usize;
-            cursor += CUESHEET_TRACK_HEADER_LEN;
-
-            let mut index01_offset = None;
-            for _ in 0..index_count {
-                if cursor + CUESHEET_INDEX_LEN > payload.len() {
-                    return;
-                }
-                let index_offset = u64::from_be_bytes(
-                    payload[cursor..cursor + 8]
-                        .try_into()
-                        .expect("fixed cuesheet index offset slice"),
-                );
-                let index_number = payload[cursor + 8];
-                if index_number == 1 && index01_offset.is_none() {
-                    index01_offset = Some(index_offset);
-                }
-                cursor += CUESHEET_INDEX_LEN;
-            }
-
-            if track_number == CUESHEET_LEADOUT_TRACK_NUMBER {
-                continue;
-            }
-
-            let cue_offset = track_offset + index01_offset.unwrap_or(0);
-            let Some(cue_offset) = normalize_cue_offset(cue_offset, total_samples) else {
-                continue;
-            };
-            if !self.cue_points.contains(&cue_offset) {
-                self.cue_points.push(cue_offset);
-            }
-        }
+        self.cuesheet = Some(CueSheetBlock::from_raw_payload(payload));
+        self.cue_points = cue_points_from_cuesheet_payload(payload, total_samples);
     }
 }
 
@@ -317,7 +280,7 @@ pub(crate) fn validate_seektable_payload(payload: &[u8]) -> crate::error::Result
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FlacMetadataBlock {
     VorbisComment(VorbisCommentBlock),
-    CueSheet(CueSheet),
+    CueSheet(CueSheetBlock),
 }
 
 impl FlacMetadataBlock {
@@ -389,11 +352,9 @@ impl VorbisCommentBlock {
             read_u32_le_strict(payload, &mut cursor, "fxvc comment count is truncated")? as usize;
         let mut entries = Vec::with_capacity(comment_count);
         for _ in 0..comment_count {
-            let entry_len = read_u32_le_strict(
-                payload,
-                &mut cursor,
-                "fxvc comment length is truncated",
-            )? as usize;
+            let entry_len =
+                read_u32_le_strict(payload, &mut cursor, "fxvc comment length is truncated")?
+                    as usize;
             let entry = read_utf8_entry_strict(
                 payload,
                 &mut cursor,
@@ -446,6 +407,73 @@ impl VorbisCommentBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CueSheetBlock {
+    raw_payload: Vec<u8>,
+}
+
+impl CueSheetBlock {
+    fn from_raw_payload(payload: &[u8]) -> Self {
+        Self {
+            raw_payload: payload.to_vec(),
+        }
+    }
+
+    fn from_projection(cuesheet: &CueSheet) -> Self {
+        Self {
+            raw_payload: cuesheet.payload(),
+        }
+    }
+
+    fn from_fxcs_payload(payload: &[u8]) -> crate::error::Result<Self> {
+        if payload.is_empty() {
+            return Err(crate::error::Error::InvalidWav("fxcs payload is empty"));
+        }
+
+        let mut cursor = 0usize;
+        let version = read_u32_le_strict(payload, &mut cursor, "fxcs payload header is truncated")?;
+        if version != FXCS_VERSION {
+            return Err(crate::error::Error::InvalidWav(
+                "fxcs payload version is unsupported",
+            ));
+        }
+
+        let raw_len =
+            read_u32_le_strict(payload, &mut cursor, "fxcs raw payload length is truncated")?
+                as usize;
+        if raw_len == 0 {
+            return Err(crate::error::Error::InvalidWav("fxcs raw payload is empty"));
+        }
+
+        let raw_payload = read_bytes_strict(
+            payload,
+            &mut cursor,
+            raw_len,
+            "fxcs raw payload bytes are truncated",
+        )?;
+        if cursor != payload.len() {
+            return Err(crate::error::Error::InvalidWav(
+                "fxcs payload has trailing bytes",
+            ));
+        }
+
+        parse_cuesheet_tracks(&raw_payload)?;
+        Ok(Self { raw_payload })
+    }
+
+    fn payload(&self) -> Vec<u8> {
+        self.raw_payload.clone()
+    }
+
+    fn fxcs_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::new();
+        append_u32_le(&mut payload, FXCS_VERSION);
+        append_u32_le(&mut payload, self.raw_payload.len() as u32);
+        payload.extend_from_slice(&self.raw_payload);
+        payload
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CueSheet {
     track_offsets: Vec<u64>,
     lead_out_offset: u64,
@@ -491,6 +519,7 @@ fn write_leadout_track(payload: &mut Vec<u8>, offset: u64) {
 pub(crate) struct MetadataDraft {
     comments_by_key: BTreeMap<String, Vec<String>>,
     authoritative_vorbis_comment: Option<VorbisCommentBlock>,
+    authoritative_cuesheet: Option<CueSheetBlock>,
     cue_points: Vec<u64>,
 }
 
@@ -504,6 +533,7 @@ impl MetadataDraft {
             b"LIST" => self.ingest_list_chunk(payload),
             b"cue " => self.ingest_cue_chunk(payload),
             &FXVC_CHUNK_ID => self.ingest_fxvc_chunk(payload)?,
+            &FXCS_CHUNK_ID => self.ingest_fxcs_chunk(payload)?,
             _ => {}
         }
         Ok(())
@@ -528,7 +558,10 @@ impl MetadataDraft {
         EncodeMetadata {
             vorbis_comment,
             authoritative_vorbis_comment,
-            cuesheet: normalize_cuesheet(self.cue_points, total_samples),
+            cuesheet: self.authoritative_cuesheet.or_else(|| {
+                normalize_cuesheet(self.cue_points, total_samples)
+                    .map(|cuesheet| CueSheetBlock::from_projection(&cuesheet))
+            }),
             channel_mask: None,
             channel_layout_provenance: false,
         }
@@ -605,6 +638,16 @@ impl MetadataDraft {
         self.authoritative_vorbis_comment = Some(VorbisCommentBlock::from_fxvc_payload(payload)?);
         Ok(())
     }
+
+    fn ingest_fxcs_chunk(&mut self, payload: &[u8]) -> crate::error::Result<()> {
+        if self.authoritative_cuesheet.is_some() {
+            return Err(crate::error::Error::InvalidWav(
+                "duplicate fxcs chunk is not allowed",
+            ));
+        }
+        self.authoritative_cuesheet = Some(CueSheetBlock::from_fxcs_payload(payload)?);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,6 +694,152 @@ fn decode_text_payload(payload: &[u8]) -> Option<String> {
         .unwrap_or(payload.len());
     let value = String::from_utf8(payload[..end].to_vec()).ok()?;
     if value.is_empty() { None } else { Some(value) }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CueSheetIndexPoint {
+    offset: u64,
+    number: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CueSheetTrackProjection {
+    offset: u64,
+    number: u8,
+    is_lead_out: bool,
+    index_points: Vec<CueSheetIndexPoint>,
+}
+
+fn parse_cuesheet_tracks(payload: &[u8]) -> crate::error::Result<Vec<CueSheetTrackProjection>> {
+    if payload.len() < CUESHEET_HEADER_LEN {
+        return Err(crate::error::Error::InvalidWav(
+            "cuesheet payload header is truncated",
+        ));
+    }
+
+    let track_count = payload[CUESHEET_HEADER_LEN - 1] as usize;
+    if track_count == 0 {
+        return Err(crate::error::Error::InvalidWav(
+            "cuesheet payload must include a lead-out track",
+        ));
+    }
+
+    let mut cursor = CUESHEET_HEADER_LEN;
+    let mut tracks = Vec::with_capacity(track_count);
+    for track_index in 0..track_count {
+        if cursor + CUESHEET_TRACK_HEADER_LEN > payload.len() {
+            return Err(crate::error::Error::InvalidWav(
+                "cuesheet track header is truncated",
+            ));
+        }
+
+        let track_offset = u64::from_be_bytes(
+            payload[cursor..cursor + 8]
+                .try_into()
+                .expect("fixed cuesheet track offset slice"),
+        );
+        let track_number = payload[cursor + 8];
+        if track_number == 0 {
+            return Err(crate::error::Error::InvalidWav(
+                "cuesheet track number must be non-zero",
+            ));
+        }
+        if tracks
+            .iter()
+            .any(|track: &CueSheetTrackProjection| track.number == track_number)
+        {
+            return Err(crate::error::Error::InvalidWav(
+                "cuesheet track numbers must be unique",
+            ));
+        }
+
+        let is_lead_out = track_index + 1 == track_count;
+        let index_count = payload[cursor + 35] as usize;
+        cursor += CUESHEET_TRACK_HEADER_LEN;
+
+        if is_lead_out {
+            if !matches!(track_number, CUESHEET_LEADOUT_TRACK_NUMBER | 255) {
+                return Err(crate::error::Error::InvalidWav(
+                    "cuesheet lead-out track number is invalid",
+                ));
+            }
+            if index_count != 0 {
+                return Err(crate::error::Error::InvalidWav(
+                    "cuesheet lead-out track must not contain index points",
+                ));
+            }
+        }
+
+        let mut index_points: Vec<CueSheetIndexPoint> = Vec::with_capacity(index_count);
+        for index_position in 0..index_count {
+            if cursor + CUESHEET_INDEX_LEN > payload.len() {
+                return Err(crate::error::Error::InvalidWav(
+                    "cuesheet index point is truncated",
+                ));
+            }
+
+            let index_offset = u64::from_be_bytes(
+                payload[cursor..cursor + 8]
+                    .try_into()
+                    .expect("fixed cuesheet index offset slice"),
+            );
+            let index_number = payload[cursor + 8];
+            if index_position == 0 && !matches!(index_number, 0 | 1) {
+                return Err(crate::error::Error::InvalidWav(
+                    "cuesheet track must start at index 0 or 1",
+                ));
+            }
+            if let Some(previous) = index_points.last()
+                && index_number <= previous.number
+            {
+                return Err(crate::error::Error::InvalidWav(
+                    "cuesheet index numbers must be strictly increasing",
+                ));
+            }
+            index_points.push(CueSheetIndexPoint {
+                offset: index_offset,
+                number: index_number,
+            });
+            cursor += CUESHEET_INDEX_LEN;
+        }
+
+        tracks.push(CueSheetTrackProjection {
+            offset: track_offset,
+            number: track_number,
+            is_lead_out,
+            index_points,
+        });
+    }
+
+    if cursor != payload.len() {
+        return Err(crate::error::Error::InvalidWav(
+            "cuesheet payload has trailing bytes",
+        ));
+    }
+
+    Ok(tracks)
+}
+
+fn cue_points_from_cuesheet_payload(payload: &[u8], total_samples: u64) -> Vec<u32> {
+    let Ok(tracks) = parse_cuesheet_tracks(payload) else {
+        return Vec::new();
+    };
+
+    let mut cue_points = Vec::new();
+    for track in tracks.into_iter().filter(|track| !track.is_lead_out) {
+        let cue_offset = track
+            .index_points
+            .iter()
+            .find(|index| index.number == 1)
+            .map_or(track.offset, |index| track.offset + index.offset);
+        let Some(cue_offset) = normalize_cue_offset(cue_offset, total_samples) else {
+            continue;
+        };
+        if !cue_points.contains(&cue_offset) {
+            cue_points.push(cue_offset);
+        }
+    }
+    cue_points
 }
 
 fn normalize_cuesheet(mut cue_points: Vec<u64>, total_samples: u64) -> Option<CueSheet> {
@@ -759,6 +948,23 @@ fn read_utf8_entry(bytes: &[u8], cursor: &mut usize, len: usize) -> Option<Strin
     Some(entry)
 }
 
+fn read_bytes_strict(
+    bytes: &[u8],
+    cursor: &mut usize,
+    len: usize,
+    truncated_message: &'static str,
+) -> crate::error::Result<Vec<u8>> {
+    let end = cursor
+        .checked_add(len)
+        .ok_or(crate::error::Error::InvalidWav(truncated_message))?;
+    if end > bytes.len() {
+        return Err(crate::error::Error::InvalidWav(truncated_message));
+    }
+    let entry = bytes[*cursor..end].to_vec();
+    *cursor = end;
+    Ok(entry)
+}
+
 fn read_utf8_entry_strict(
     bytes: &[u8],
     cursor: &mut usize,
@@ -794,9 +1000,10 @@ fn append_chunk_payload(buffer: &mut Vec<u8>, id: &[u8; 4], payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FXVC_CHUNK_ID, FlacMetadataBlock, MetadataDraft,
-        SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, SeekPoint, WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
-        VorbisCommentBlock, WavMetadata, validate_seektable_payload,
+        CueSheetBlock, FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FXCS_CHUNK_ID, FXVC_CHUNK_ID,
+        FlacMetadataBlock, MetadataDraft, SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, SeekPoint,
+        VorbisCommentBlock, WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY, WavMetadata,
+        parse_cuesheet_tracks, validate_seektable_payload,
     };
 
     fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
@@ -879,6 +1086,14 @@ mod tests {
         payload
     }
 
+    fn fxcs_payload(raw_payload: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&(raw_payload.len() as u32).to_le_bytes());
+        payload.extend_from_slice(raw_payload);
+        payload
+    }
+
     fn seektable_payload(entries: &[(u64, u64, u16)]) -> Vec<u8> {
         SeekPoint::payload(
             &entries
@@ -895,16 +1110,17 @@ mod tests {
     #[test]
     fn normalizes_info_chunks_into_stable_vorbis_comments() {
         let mut draft = MetadataDraft::default();
-        draft.ingest_chunk(
-            *b"LIST",
-            &info_list_chunk(&[
-                (*b"IART", b"Example Artist"),
-                (*b"INAM", b"Song Title"),
-                (*b"IZZZ", b"ignored"),
-                (*b"IART", b"Guest Artist"),
-            ]),
-        )
-        .unwrap();
+        draft
+            .ingest_chunk(
+                *b"LIST",
+                &info_list_chunk(&[
+                    (*b"IART", b"Example Artist"),
+                    (*b"INAM", b"Song Title"),
+                    (*b"IZZZ", b"ignored"),
+                    (*b"IART", b"Guest Artist"),
+                ]),
+            )
+            .unwrap();
 
         let blocks = draft.finish(8_000).flac_blocks();
         let FlacMetadataBlock::VorbisComment(block) = &blocks[0] else {
@@ -925,11 +1141,12 @@ mod tests {
     #[test]
     fn drops_invalid_utf8_text_metadata() {
         let mut draft = MetadataDraft::default();
-        draft.ingest_chunk(
-            *b"LIST",
-            &info_list_chunk(&[(*b"IART", &[0xff, 0xfe, 0xfd])]),
-        )
-        .unwrap();
+        draft
+            .ingest_chunk(
+                *b"LIST",
+                &info_list_chunk(&[(*b"IART", &[0xff, 0xfe, 0xfd])]),
+            )
+            .unwrap();
 
         assert!(draft.finish(8_000).flac_blocks().is_empty());
     }
@@ -937,15 +1154,19 @@ mod tests {
     #[test]
     fn normalizes_representable_cue_points_into_cuesheet_tracks() {
         let mut draft = MetadataDraft::default();
-        draft.ingest_chunk(*b"cue ", &cue_chunk(&[4_000, 1_000, 4_000]))
+        draft
+            .ingest_chunk(*b"cue ", &cue_chunk(&[4_000, 1_000, 4_000]))
             .unwrap();
 
         let blocks = draft.finish(6_000).flac_blocks();
         let FlacMetadataBlock::CueSheet(cuesheet) = &blocks[0] else {
             panic!("expected cuesheet block");
         };
-        assert_eq!(cuesheet.track_offsets, vec![1_000, 4_000]);
-        assert_eq!(cuesheet.lead_out_offset, 6_000);
+        let tracks = parse_cuesheet_tracks(&cuesheet.payload()).unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].offset, 1_000);
+        assert_eq!(tracks[1].offset, 4_000);
+        assert!(tracks[2].is_lead_out);
     }
 
     #[test]
@@ -1031,7 +1252,11 @@ mod tests {
         payload.push(0);
         let error = VorbisCommentBlock::from_fxvc_payload(&payload).unwrap_err();
 
-        assert!(error.to_string().contains("fxvc payload has trailing bytes"));
+        assert!(
+            error
+                .to_string()
+                .contains("fxvc payload has trailing bytes")
+        );
     }
 
     #[test]
@@ -1057,6 +1282,67 @@ mod tests {
                 "TITLE=Exact Title".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn emits_exact_cuesheet_block_from_authoritative_fxcs_chunk() {
+        let raw_payload = cuesheet_payload(&[(&[(10, 0), (20, 1)], 1_000), (&[], 4_000)], 8_000);
+        let mut draft = MetadataDraft::default();
+        draft
+            .ingest_chunk(FXCS_CHUNK_ID, &fxcs_payload(&raw_payload))
+            .unwrap();
+        draft.ingest_chunk(*b"cue ", &cue_chunk(&[999])).unwrap();
+
+        let blocks = draft.finish(8_000).flac_blocks();
+        let FlacMetadataBlock::CueSheet(block) = &blocks[0] else {
+            panic!("expected cuesheet block");
+        };
+
+        assert_eq!(block.payload(), raw_payload);
+    }
+
+    #[test]
+    fn rejects_duplicate_fxcs_chunks() {
+        let raw_payload = cuesheet_payload(&[(&[(0, 1)], 1_000), (&[], 4_000)], 8_000);
+        let mut draft = MetadataDraft::default();
+        draft
+            .ingest_chunk(FXCS_CHUNK_ID, &fxcs_payload(&raw_payload))
+            .unwrap();
+        let error = draft
+            .ingest_chunk(FXCS_CHUNK_ID, &fxcs_payload(&raw_payload))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("duplicate fxcs chunk"));
+    }
+
+    #[test]
+    fn rejects_fxcs_payload_with_trailing_bytes() {
+        let mut payload = fxcs_payload(&cuesheet_payload(
+            &[(&[(0, 1)], 1_000), (&[], 4_000)],
+            8_000,
+        ));
+        payload.push(0);
+        let error = CueSheetBlock::from_fxcs_payload(&payload).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("fxcs payload has trailing bytes")
+        );
+    }
+
+    #[test]
+    fn restores_fxcs_chunk_payload_for_exact_round_trip() {
+        let raw_payload = cuesheet_payload(&[(&[(10, 0), (20, 1)], 1_000), (&[], 4_000)], 8_000);
+        let mut metadata = WavMetadata::default();
+        metadata
+            .ingest_flac_metadata_block(5, &raw_payload, 8_000, 1)
+            .unwrap();
+
+        let payload = metadata.fxcs_chunk_payload().unwrap();
+        let restored = CueSheetBlock::from_fxcs_payload(&payload).unwrap();
+
+        assert_eq!(restored.payload(), raw_payload);
     }
 
     #[test]

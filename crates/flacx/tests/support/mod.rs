@@ -293,6 +293,12 @@ pub struct ParsedFxvcChunk {
     pub entries: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedFxcsChunk {
+    pub version: u32,
+    pub raw_payload: Vec<u8>,
+}
+
 pub fn fxvc_chunk_payload(vendor: &str, entries: &[&str]) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&1u32.to_le_bytes());
@@ -331,6 +337,30 @@ pub fn parse_fxvc_chunk_payload(payload: &[u8]) -> ParsedFxvcChunk {
         version,
         vendor,
         entries,
+    }
+}
+
+pub fn fxcs_chunk_payload(raw_payload: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&(raw_payload.len() as u32).to_le_bytes());
+    payload.extend_from_slice(raw_payload);
+    payload
+}
+
+pub fn parse_fxcs_chunk_payload(payload: &[u8]) -> ParsedFxcsChunk {
+    assert!(payload.len() >= 8, "fxcs payload too short");
+    let mut offset = 0usize;
+    let version = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+    offset += 4;
+    let raw_len = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
+    let raw_payload = payload[offset..offset + raw_len].to_vec();
+    offset += raw_len;
+    assert_eq!(offset, payload.len(), "fxcs payload trailing bytes");
+    ParsedFxcsChunk {
+        version,
+        raw_payload,
     }
 }
 
@@ -446,6 +476,23 @@ pub fn cuesheet_block(track_offsets: &[u64], lead_out_offset: u64) -> ParsedMeta
         is_last: false,
         block_type: 5,
         payload,
+    }
+}
+
+pub fn rich_cuesheet_payload() -> Vec<u8> {
+    let mut payload = cuesheet_block(&[0, 2_048], 4_096).payload;
+    payload[..13].copy_from_slice(b"1234567890123");
+    payload[128..136].copy_from_slice(&1_176u64.to_be_bytes());
+    payload[136] = 0x80;
+    payload[405..417].copy_from_slice(b"ABCDEFGHIJKL");
+    payload
+}
+
+pub fn raw_cuesheet_block(payload: &[u8]) -> ParsedMetadataBlock {
+    ParsedMetadataBlock {
+        is_last: false,
+        block_type: 5,
+        payload: payload.to_vec(),
     }
 }
 
