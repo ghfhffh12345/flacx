@@ -70,10 +70,12 @@ use flacx::{Decoder, Encoder, level::Level};
 let encoder_config = Encoder::builder()
     .level(Level::Level6)
     .threads(8)
+    .strict_fxmd_validation(false)
     .build();
 
 let decoder_config = Decoder::builder()
     .threads(4)
+    .emit_fxmd(true)
     .strict_channel_mask_provenance(true)
     .build();
 
@@ -89,6 +91,8 @@ let _decoder = Decoder::new(decoder_config);
 - `threads` sets the worker count
 - `block_size` sets a fixed block size
 - `block_schedule` enables a custom block-size schedule for advanced use
+- `capture_fxmd` controls whether encode-side WAV ingestion imports the private `fxmd` chunk
+- `strict_fxmd_validation` controls whether malformed or duplicate `fxmd` chunks are rejected during encode-side ingestion
 
 `EncoderConfig::default()` uses `Level::Level8` and a thread count derived from
 the current machine’s available parallelism.
@@ -96,6 +100,7 @@ the current machine’s available parallelism.
 `DecodeConfig` controls FLAC-to-WAV decoding:
 
 - `threads` sets the worker count
+- `emit_fxmd` controls whether decode output writes the private `fxmd` preservation chunk
 - `strict_channel_mask_provenance` requires explicit provenance before the
   decoder restores non-ordinary channel masks
 - `strict_seektable_validation` turns malformed `SEEKTABLE` metadata from a
@@ -110,10 +115,12 @@ use flacx::{DecodeConfig, EncoderConfig, level::Level};
 let encoder_config = EncoderConfig::default()
     .with_level(Level::Level4)
     .with_threads(2)
-    .with_block_size(1024);
+    .with_block_size(1024)
+    .with_strict_fxmd_validation(false);
 
 let decoder_config = DecodeConfig::default()
     .with_threads(4)
+    .with_emit_fxmd(false)
     .with_strict_channel_mask_provenance(true)
     .with_strict_seektable_validation(true);
 

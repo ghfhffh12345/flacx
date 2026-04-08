@@ -9,7 +9,7 @@ use std::{
     process::ExitCode,
 };
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use flacx::{DecodeConfig, EncoderConfig, level::Level};
 use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 
@@ -35,6 +35,13 @@ enum Commands {
     Decode(DecodeArgs),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ModePreset {
+    Loose,
+    Default,
+    Strict,
+}
+
 #[derive(Debug, Args)]
 struct EncodeArgs {
     /// Input WAV path.
@@ -51,6 +58,9 @@ struct EncodeArgs {
     /// Override the FLAC block size.
     #[arg(long)]
     block_size: Option<u16>,
+    /// Policy preset for fxmd handling and relaxable validation.
+    #[arg(long, value_enum, default_value_t = ModePreset::Default)]
+    mode: ModePreset,
     /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
     #[arg(long, default_value_t = 1usize)]
     depth: usize,
@@ -66,12 +76,9 @@ struct DecodeArgs {
     /// Number of decoding threads.
     #[arg(long)]
     threads: Option<usize>,
-    /// Require FLACX provenance for preserved non-ordinary channel-mask restoration.
-    #[arg(long)]
-    strict_channel_mask_provenance: bool,
-    /// Require RFC 9639 SEEKTABLE validation during decode.
-    #[arg(long)]
-    strict_seektable_validation: bool,
+    /// Policy preset for fxmd handling and relaxable validation.
+    #[arg(long, value_enum, default_value_t = ModePreset::Default)]
+    mode: ModePreset,
     /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
     #[arg(long, default_value_t = 1usize)]
     depth: usize,
@@ -102,6 +109,7 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(block_size) = args.block_size {
         config = config.with_block_size(block_size);
     }
+    config = apply_encode_mode(config, args.mode);
 
     let interactive = io::stderr().is_terminal();
     enforce_interactive_mode(interactive, interactive_required())?;
@@ -117,9 +125,7 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = DecodeConfig::default()
-        .with_strict_channel_mask_provenance(args.strict_channel_mask_provenance)
-        .with_strict_seektable_validation(args.strict_seektable_validation);
+    let mut config = apply_decode_mode(DecodeConfig::default(), args.mode);
     if let Some(threads) = args.threads {
         config = config.with_threads(threads);
     }
@@ -135,6 +141,37 @@ fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
     decode_command(&command, interactive, &mut stderr)?;
     Ok(())
+}
+
+fn apply_encode_mode(config: EncoderConfig, mode: ModePreset) -> EncoderConfig {
+    match mode {
+        ModePreset::Loose => config
+            .with_capture_fxmd(false)
+            .with_strict_fxmd_validation(false),
+        ModePreset::Default => config
+            .with_capture_fxmd(true)
+            .with_strict_fxmd_validation(false),
+        ModePreset::Strict => config
+            .with_capture_fxmd(true)
+            .with_strict_fxmd_validation(true),
+    }
+}
+
+fn apply_decode_mode(config: DecodeConfig, mode: ModePreset) -> DecodeConfig {
+    match mode {
+        ModePreset::Loose => config
+            .with_emit_fxmd(false)
+            .with_strict_channel_mask_provenance(false)
+            .with_strict_seektable_validation(false),
+        ModePreset::Default => config
+            .with_emit_fxmd(true)
+            .with_strict_channel_mask_provenance(false)
+            .with_strict_seektable_validation(false),
+        ModePreset::Strict => config
+            .with_emit_fxmd(true)
+            .with_strict_channel_mask_provenance(true)
+            .with_strict_seektable_validation(true),
+    }
 }
 
 fn interactive_required() -> bool {
@@ -153,7 +190,9 @@ fn enforce_interactive_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, enforce_interactive_mode};
+    use super::{
+        Cli, Commands, ModePreset, apply_decode_mode, apply_encode_mode, enforce_interactive_mode,
+    };
     use clap::Parser;
 
     #[test]
@@ -165,6 +204,7 @@ mod tests {
                 assert_eq!(args.input, std::path::PathBuf::from("input.wav"));
                 assert_eq!(args.output, None);
                 assert_eq!(args.threads, 8);
+                assert_eq!(args.mode, ModePreset::Default);
                 assert_eq!(args.depth, 1);
             }
             _ => panic!("expected encode command"),
@@ -179,6 +219,8 @@ mod tests {
             "input-dir",
             "-o",
             "out-dir",
+            "--mode",
+            "strict",
             "--depth",
             "0",
         ]);
@@ -187,6 +229,7 @@ mod tests {
             Commands::Encode(args) => {
                 assert_eq!(args.input, std::path::PathBuf::from("input-dir"));
                 assert_eq!(args.output, Some(std::path::PathBuf::from("out-dir")));
+                assert_eq!(args.mode, ModePreset::Strict);
                 assert_eq!(args.depth, 0);
             }
             _ => panic!("expected encode command"),
@@ -218,15 +261,14 @@ mod tests {
             "0",
             "--threads",
             "4",
-            "--strict-channel-mask-provenance",
-            "--strict-seektable-validation",
+            "--mode",
+            "loose",
         ]);
 
         match cli.command {
             Commands::Decode(args) => {
                 assert_eq!(args.threads, Some(4));
-                assert!(args.strict_channel_mask_provenance);
-                assert!(args.strict_seektable_validation);
+                assert_eq!(args.mode, ModePreset::Loose);
                 assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
                 assert_eq!(args.output, Some(std::path::PathBuf::from("out-dir")));
                 assert_eq!(args.depth, 0);
@@ -243,12 +285,28 @@ mod tests {
             Commands::Decode(args) => {
                 assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
                 assert_eq!(args.output, None);
-                assert!(!args.strict_channel_mask_provenance);
-                assert!(!args.strict_seektable_validation);
+                assert_eq!(args.mode, ModePreset::Default);
                 assert_eq!(args.depth, 1);
             }
             _ => panic!("expected decode command"),
         }
+    }
+
+    #[test]
+    fn preset_mapping_matches_cli_contract() {
+        let encode_default =
+            apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Default);
+        assert!(encode_default.capture_fxmd);
+        assert!(!encode_default.strict_fxmd_validation);
+
+        let encode_loose = apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Loose);
+        assert!(!encode_loose.capture_fxmd);
+        assert!(!encode_loose.strict_fxmd_validation);
+
+        let decode_strict = apply_decode_mode(flacx::DecodeConfig::default(), ModePreset::Strict);
+        assert!(decode_strict.emit_fxmd);
+        assert!(decode_strict.strict_channel_mask_provenance);
+        assert!(decode_strict.strict_seektable_validation);
     }
 
     #[test]

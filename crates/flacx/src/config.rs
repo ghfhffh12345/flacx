@@ -32,6 +32,10 @@ pub struct EncoderConfig {
     pub block_size: u16,
     /// Optional sequence of block sizes to use instead of a single block size.
     pub block_schedule: Option<Vec<u16>>,
+    /// Whether to import the private `fxmd` WAV chunk during encode-side metadata capture.
+    pub capture_fxmd: bool,
+    /// Whether invalid or duplicate `fxmd` chunks should fail encode-side metadata capture.
+    pub strict_fxmd_validation: bool,
 }
 
 impl Default for EncoderConfig {
@@ -45,6 +49,8 @@ impl Default for EncoderConfig {
                 .unwrap_or(1),
             block_size: profile.block_size,
             block_schedule: None,
+            capture_fxmd: true,
+            strict_fxmd_validation: true,
         }
     }
 }
@@ -110,6 +116,20 @@ impl EncoderConfig {
         self.block_schedule = Some(block_schedule);
         self
     }
+
+    /// Enable or disable `fxmd` import during encode-side WAV metadata capture.
+    #[must_use]
+    pub fn with_capture_fxmd(mut self, capture: bool) -> Self {
+        self.capture_fxmd = capture;
+        self
+    }
+
+    /// Enable or disable strict `fxmd` validation during encode-side WAV metadata capture.
+    #[must_use]
+    pub fn with_strict_fxmd_validation(mut self, strict: bool) -> Self {
+        self.strict_fxmd_validation = strict;
+        self
+    }
 }
 
 /// Fluent builder for [`EncoderConfig`].
@@ -156,6 +176,20 @@ impl EncoderBuilder {
         self
     }
 
+    /// Enable or disable `fxmd` import during encode-side WAV metadata capture.
+    #[must_use]
+    pub fn capture_fxmd(mut self, capture: bool) -> Self {
+        self.config = self.config.with_capture_fxmd(capture);
+        self
+    }
+
+    /// Enable or disable strict `fxmd` validation during encode-side WAV metadata capture.
+    #[must_use]
+    pub fn strict_fxmd_validation(mut self, strict: bool) -> Self {
+        self.config = self.config.with_strict_fxmd_validation(strict);
+        self
+    }
+
     /// Finish building the configuration.
     #[must_use]
     pub fn build(self) -> EncoderConfig {
@@ -172,6 +206,8 @@ impl EncoderBuilder {
 pub struct DecodeConfig {
     /// Number of worker threads the decoder may use.
     pub threads: usize,
+    /// Whether to emit the private `fxmd` WAV chunk when metadata is preserved during decode.
+    pub emit_fxmd: bool,
     /// Require channel-layout provenance metadata before restoring a non-ordinary mask.
     pub strict_channel_mask_provenance: bool,
     /// Require RFC 9639 seektable validation instead of tolerating malformed tables.
@@ -184,6 +220,7 @@ impl Default for DecodeConfig {
             threads: std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1),
+            emit_fxmd: true,
             strict_channel_mask_provenance: false,
             strict_seektable_validation: false,
         }
@@ -220,6 +257,13 @@ impl DecodeConfig {
     #[must_use]
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
+        self
+    }
+
+    /// Enable or disable `fxmd` emission in decoded WAV output.
+    #[must_use]
+    pub fn with_emit_fxmd(mut self, emit: bool) -> Self {
+        self.emit_fxmd = emit;
         self
     }
 
@@ -261,6 +305,13 @@ impl DecodeBuilder {
     #[must_use]
     pub fn threads(mut self, threads: usize) -> Self {
         self.config = self.config.with_threads(threads);
+        self
+    }
+
+    /// Enable or disable `fxmd` emission in decoded WAV output.
+    #[must_use]
+    pub fn emit_fxmd(mut self, emit: bool) -> Self {
+        self.config = self.config.with_emit_fxmd(emit);
         self
     }
 
@@ -309,6 +360,8 @@ mod tests {
             .level(Level::Level4)
             .threads(2)
             .block_size(1024)
+            .capture_fxmd(false)
+            .strict_fxmd_validation(false)
             .build();
 
         assert_eq!(
@@ -317,6 +370,8 @@ mod tests {
                 .with_level(Level::Level4)
                 .with_threads(2)
                 .with_block_size(1024)
+                .with_capture_fxmd(false)
+                .with_strict_fxmd_validation(false)
         );
     }
 
@@ -365,6 +420,7 @@ mod tests {
     fn decode_builder_matches_fluent_config() {
         let built = DecodeConfig::builder()
             .threads(4)
+            .emit_fxmd(false)
             .strict_channel_mask_provenance(true)
             .strict_seektable_validation(true)
             .build();
@@ -373,8 +429,24 @@ mod tests {
             built,
             DecodeConfig::default()
                 .with_threads(4)
+                .with_emit_fxmd(false)
                 .with_strict_channel_mask_provenance(true)
                 .with_strict_seektable_validation(true)
         );
+    }
+
+    #[test]
+    fn encoder_default_preserves_fxmd_with_strict_validation() {
+        let config = EncoderConfig::default();
+        assert!(config.capture_fxmd);
+        assert!(config.strict_fxmd_validation);
+    }
+
+    #[test]
+    fn decode_default_emits_fxmd_without_extra_validation() {
+        let config = DecodeConfig::default();
+        assert!(config.emit_fxmd);
+        assert!(!config.strict_channel_mask_provenance);
+        assert!(!config.strict_seektable_validation);
     }
 }

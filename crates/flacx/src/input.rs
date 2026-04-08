@@ -4,7 +4,8 @@ use std::{
     thread,
 };
 
-use crate::metadata::{EncodeMetadata, FXMD_CHUNK_ID, MetadataDraft};
+use crate::config::EncoderConfig;
+use crate::metadata::{EncodeMetadata, FXMD_CHUNK_ID, FxmdChunkPolicy, MetadataDraft};
 use crate::{
     error::{Error, Result},
     md5::digest_bytes,
@@ -77,7 +78,7 @@ pub(crate) fn ordinary_channel_mask(channels: u16) -> Option<u32> {
 
 #[allow(dead_code)]
 pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
-    Ok(read_wav_internal(&mut reader, false)?.wav)
+    Ok(read_wav_internal(&mut reader, false, FxmdChunkPolicy::IGNORE)?.wav)
 }
 
 /// Inspect a WAV stream and return its total sample count.
@@ -95,11 +96,21 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
 /// assert!(total_samples > 0);
 /// ```
 pub fn inspect_wav_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64> {
-    Ok(parse_wav_layout(&mut reader, false)?.total_samples)
+    Ok(parse_wav_layout(&mut reader, false, FxmdChunkPolicy::IGNORE)?.total_samples)
 }
 
-pub(crate) fn read_wav_for_encode<R: Read + Seek>(mut reader: R) -> Result<EncodeWavData> {
-    read_wav_internal(&mut reader, true)
+pub(crate) fn read_wav_for_encode_with_config<R: Read + Seek>(
+    mut reader: R,
+    config: &EncoderConfig,
+) -> Result<EncodeWavData> {
+    read_wav_internal(
+        &mut reader,
+        true,
+        FxmdChunkPolicy {
+            capture: config.capture_fxmd,
+            strict: config.strict_fxmd_validation,
+        },
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +126,7 @@ struct ParsedWavLayout {
 fn parse_wav_layout<R: Read + Seek>(
     reader: &mut R,
     capture_metadata: bool,
+    fxmd_policy: FxmdChunkPolicy,
 ) -> Result<ParsedWavLayout> {
     let mut chunk_id = [0u8; 4];
     reader.read_exact(&mut chunk_id)?;
@@ -162,7 +174,7 @@ fn parse_wav_layout<R: Read + Seek>(
             }
             id if capture_metadata && is_captured_metadata_chunk(*id) => {
                 let payload = read_chunk_payload(reader, chunk_size)?;
-                metadata_draft.ingest_chunk(chunk_id, &payload)?;
+                metadata_draft.ingest_chunk(chunk_id, &payload, fxmd_policy)?;
             }
             _ => {
                 reader.seek(SeekFrom::Current(chunk_size as i64))?;
@@ -217,8 +229,9 @@ fn parse_wav_layout<R: Read + Seek>(
 fn read_wav_internal<R: Read + Seek>(
     reader: &mut R,
     capture_metadata: bool,
+    fxmd_policy: FxmdChunkPolicy,
 ) -> Result<EncodeWavData> {
-    let layout = parse_wav_layout(reader, capture_metadata)?;
+    let layout = parse_wav_layout(reader, capture_metadata, fxmd_policy)?;
     reader.seek(SeekFrom::Start(layout.data_offset))?;
     let mut data = vec![0u8; layout.data_size as usize];
     reader.read_exact(&mut data)?;
@@ -567,9 +580,11 @@ fn read_u32_le<R: Read>(reader: &mut R) -> Result<u32> {
 mod tests {
     use std::io::Cursor;
 
-    use crate::metadata::FlacMetadataBlock;
+    use crate::{config::EncoderConfig, metadata::FlacMetadataBlock};
 
-    use super::{WavData, WavSpec, ordinary_channel_mask, read_wav, read_wav_for_encode};
+    use super::{
+        WavData, WavSpec, ordinary_channel_mask, read_wav, read_wav_for_encode_with_config,
+    };
 
     fn pcm_wav_bytes(
         bits_per_sample: u16,
@@ -726,6 +741,10 @@ mod tests {
         payload
     }
 
+    fn invalid_fxmd_chunk() -> Vec<u8> {
+        vec![0x66, 0x78, 0x6d]
+    }
+
     #[test]
     fn parses_16bit_pcm_wav() {
         let samples = [0, -1_000, 1_000, -2_000];
@@ -855,7 +874,8 @@ mod tests {
             ],
         );
 
-        let parsed = read_wav_for_encode(Cursor::new(wav)).unwrap();
+        let parsed =
+            read_wav_for_encode_with_config(Cursor::new(wav), &EncoderConfig::default()).unwrap();
         let blocks = parsed.metadata.flac_blocks();
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
@@ -873,8 +893,55 @@ mod tests {
             &[(*b"LIST", malformed_list)],
         );
 
-        let parsed = read_wav_for_encode(Cursor::new(wav)).unwrap();
+        let parsed =
+            read_wav_for_encode_with_config(Cursor::new(wav), &EncoderConfig::default()).unwrap();
         assert!(parsed.metadata.flac_blocks().is_empty());
         assert_eq!(parsed.wav.samples, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn read_wav_for_encode_leniently_ignores_invalid_fxmd_chunks() {
+        let wav = with_chunks(
+            pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
+            &[
+                (*b"fxmd", invalid_fxmd_chunk()),
+                (*b"LIST", info_list_chunk(&[(*b"IART", b"Example Artist")])),
+                (*b"cue ", cue_chunk(&[0, 2])),
+            ],
+        );
+
+        let parsed = read_wav_for_encode_with_config(
+            Cursor::new(wav),
+            &EncoderConfig::default().with_strict_fxmd_validation(false),
+        )
+        .unwrap();
+        let blocks = parsed.metadata.flac_blocks();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
+        assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
+    }
+
+    #[test]
+    fn read_wav_for_encode_can_ignore_fxmd_chunks_entirely() {
+        let wav = with_chunks(
+            pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
+            &[
+                (*b"fxmd", invalid_fxmd_chunk()),
+                (*b"LIST", info_list_chunk(&[(*b"IART", b"Example Artist")])),
+                (*b"cue ", cue_chunk(&[0, 2])),
+            ],
+        );
+
+        let parsed = read_wav_for_encode_with_config(
+            Cursor::new(wav),
+            &EncoderConfig::default()
+                .with_capture_fxmd(false)
+                .with_strict_fxmd_validation(false),
+        )
+        .unwrap();
+        let blocks = parsed.metadata.flac_blocks();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
+        assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
     }
 }

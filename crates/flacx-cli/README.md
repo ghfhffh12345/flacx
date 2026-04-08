@@ -30,6 +30,7 @@ Common direct examples:
 target/release/flacx encode input.wav -o output.flac --level 8 --threads 4
 target/release/flacx encode album-dir -o encoded-album --depth 0
 target/release/flacx decode input.flac -o output.wav --threads 4
+target/release/flacx decode input.flac --mode strict
 target/release/flacx decode encoded-album -o decoded-album --depth 0
 ```
 
@@ -37,8 +38,8 @@ target/release/flacx decode encoded-album -o decoded-album --depth 0
 
 The CLI exposes two top-level commands:
 
-- `flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <samples>] [--depth <n>]`
-- `flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--strict-channel-mask-provenance] [--strict-seektable-validation] [--depth <n>]`
+- `flacx encode <input> [-o <output-or-dir>] [--level <0-8>] [--threads <n>] [--block-size <samples>] [--mode <loose|default|strict>] [--depth <n>]`
+- `flacx decode <input> [-o <output-or-dir>] [--threads <n>] [--mode <loose|default|strict>] [--depth <n>]`
 
 The input can be either a single file or a directory tree.
 Directory traversal is controlled by `--depth`.
@@ -51,6 +52,7 @@ Directory traversal is controlled by `--depth`.
 - `--level <0-8>`
 - `--threads <n>`
 - `--block-size <samples>`
+- `--mode <loose|default|strict>`
 - `--depth <n>`
 
 ### Defaults and behavior
@@ -58,6 +60,7 @@ Directory traversal is controlled by `--depth`.
 - `--level` defaults to `8`.
 - `--threads` defaults to `8`.
 - `--block-size` is optional; when omitted, the block size comes from the selected compression level.
+- `--mode` defaults to `default`.
 - `--depth` defaults to `1`.
 - `--depth` only affects directory input.
 - Use `--depth 0` for unlimited recursive traversal.
@@ -82,16 +85,14 @@ flacx encode album-dir -o encoded-album --depth 0
 
 - `-o, --output <path>`
 - `--threads <n>`
-- `--strict-channel-mask-provenance`
-- `--strict-seektable-validation`
+- `--mode <loose|default|strict>`
 - `--depth <n>`
 
 ### Defaults and behavior
 
 - `--threads` is optional.
 - When omitted, the decode path uses the library default thread count.
-- `--strict-channel-mask-provenance` is off by default.
-- `--strict-seektable-validation` is off by default.
+- `--mode` defaults to `default`.
 - `--depth` defaults to `1`.
 - `--depth` only affects directory input.
 - Use `--depth 0` for unlimited recursive traversal.
@@ -99,8 +100,9 @@ flacx encode album-dir -o encoded-album --depth 0
 - Single-file input with `-o <path>` writes to that exact file path.
 - Directory input with no `-o` writes `.wav` siblings next to each discovered FLAC.
 - Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
-- `--strict-channel-mask-provenance` asks decode to require FLACX provenance before restoring non-ordinary channel masks.
-- `--strict-seektable-validation` asks decode to reject malformed FLAC `SEEKTABLE` metadata instead of validating and discarding it.
+- `--mode loose` treats `fxmd` as unknown in both directions and disables relaxable validation.
+- `--mode default` preserves current `fxmd` behavior without enabling extra validation.
+- `--mode strict` preserves current `fxmd` behavior and enables the relaxable validation set.
 - For single-file input, `-o` must be a file path.
 - For directory input, `-o` must be a directory path.
 
@@ -110,8 +112,8 @@ flacx encode album-dir -o encoded-album --depth 0
 flacx decode input.flac
 flacx decode input.flac -o output.wav --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
-flacx decode input.flac --strict-channel-mask-provenance
-flacx decode input.flac --strict-seektable-validation
+flacx decode input.flac --mode loose
+flacx decode input.flac --mode strict
 ```
 
 ## Output layout summary

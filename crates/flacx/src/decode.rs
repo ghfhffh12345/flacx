@@ -18,7 +18,7 @@ use crate::{
     progress::{NoProgress, ProgressSink},
     read::read_flac_for_decode,
     stream_info::StreamInfo,
-    wav_output::write_wav_with_metadata_and_md5,
+    wav_output::{WavMetadataWriteOptions, write_wav_with_metadata_and_md5_with_options},
 };
 
 #[cfg(feature = "progress")]
@@ -242,11 +242,14 @@ impl Decoder {
         P: ProgressSink,
     {
         let decoded = read_flac_for_decode(input, self.config, progress)?;
-        let streaminfo_md5 = write_wav_with_metadata_and_md5(
+        let streaminfo_md5 = write_wav_with_metadata_and_md5_with_options(
             &mut output,
             decoded.wav.spec,
             &decoded.wav.samples,
             &decoded.metadata,
+            WavMetadataWriteOptions {
+                emit_fxmd: self.config.emit_fxmd,
+            },
         )?;
         verify_streaminfo_digest(streaminfo_md5, decoded.stream_info.md5)?;
         output.flush()?;
