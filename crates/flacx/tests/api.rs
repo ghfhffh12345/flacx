@@ -1,13 +1,16 @@
 use std::{fs, io::Cursor};
 
 use flacx::{
-    DecodeSummary, Decoder, Encoder, EncoderConfig, decode_bytes, encode_bytes, encode_file,
-    level::Level,
+    DecodeSummary, Decoder, Encoder, EncoderConfig, RawPcmByteOrder, RawPcmDescriptor,
+    decode_bytes, encode_bytes, encode_file, inspect_raw_pcm_total_samples, level::Level,
 };
 
 mod support;
 
-use support::{parse_wav_format, pcm_wav_bytes, sample_fixture, unique_temp_path, wav_data_bytes};
+use support::{
+    parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
+    wav_data_bytes,
+};
 
 #[test]
 fn top_level_encode_bytes_matches_default_encoder() {
@@ -133,4 +136,47 @@ fn decode_builder_supports_strict_channel_mask_provenance() {
             .with_threads(2)
             .with_strict_channel_mask_provenance(true)
     );
+}
+
+#[test]
+fn raw_api_round_trips_with_explicit_descriptor() {
+    let samples = sample_fixture(2, 1_024);
+    let (raw_bytes, descriptor) = raw_pcm_fixture(
+        44_100,
+        2,
+        16,
+        16,
+        RawPcmByteOrder::LittleEndian,
+        None,
+        &samples,
+    );
+    let mut output = Cursor::new(Vec::new());
+    let summary = Encoder::default()
+        .encode_raw(Cursor::new(&raw_bytes), &mut output, descriptor)
+        .unwrap();
+    let flac = output.into_inner();
+    let decoded = decode_bytes(&flac).unwrap();
+    let expected = pcm_wav_bytes(16, 2, 44_100, &samples);
+
+    assert_eq!(summary.total_samples, 1_024);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&expected));
+    assert_eq!(parse_wav_format(&decoded).channels, 2);
+    assert_eq!(
+        inspect_raw_pcm_total_samples(Cursor::new(&raw_bytes), descriptor).unwrap(),
+        1_024
+    );
+}
+
+#[test]
+fn raw_api_rejects_missing_multichannel_channel_mask() {
+    let descriptor = RawPcmDescriptor {
+        sample_rate: 48_000,
+        channels: 4,
+        valid_bits_per_sample: 16,
+        container_bits_per_sample: 16,
+        byte_order: RawPcmByteOrder::LittleEndian,
+        channel_mask: None,
+    };
+    let error = inspect_raw_pcm_total_samples(Cursor::new(vec![0u8; 16]), descriptor).unwrap_err();
+    assert!(error.to_string().contains("channel mask"));
 }

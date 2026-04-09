@@ -1,6 +1,6 @@
 //! Command-line support utilities for the `flacx-cli` crate.
 //!
-//! `flacx-cli` provides the command-line interface for WAV/FLAC conversion in
+//! `flacx-cli` provides the command-line interface for PCM-container/FLAC conversion in
 //! this workspace. It stays separate from the publishable `flacx` library
 //! crate while reusing the same encode/decode pipeline and workspace version.
 //!
@@ -43,9 +43,9 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, Decoder, Encoder, EncoderConfig, Error, ProgressSnapshot, RecompressConfig,
-    RecompressPhase, RecompressProgress, Recompressor, Result, inspect_flac_total_samples,
-    inspect_wav_total_samples,
+    DecodeConfig, Decoder, Encoder, EncoderConfig, Error, ProgressSnapshot, RawPcmDescriptor,
+    RecompressConfig, RecompressPhase, RecompressProgress, Recompressor, Result,
+    inspect_flac_total_samples, inspect_raw_pcm_total_samples, inspect_wav_total_samples,
 };
 use walkdir::WalkDir;
 
@@ -61,6 +61,7 @@ pub struct EncodeCommand {
     pub output: Option<PathBuf>,
     pub depth: usize,
     pub config: EncoderConfig,
+    pub raw_descriptor: Option<RawPcmDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +99,7 @@ impl CommandKind {
 
     fn source_extensions(self) -> &'static [&'static str] {
         match self {
-            Self::Encode => &["wav", "rf64", "w64"],
+            Self::Encode => &["wav", "rf64", "w64", "aif", "aiff", "aifc", "caf"],
             Self::Decode | Self::Recompress => &["flac"],
         }
     }
@@ -265,14 +266,26 @@ pub fn encode_command(
             item.phase_total_samples,
             item.overall_total_samples,
         );
-        let result = Encoder::new(command.config.clone()).encode_file_with_progress(
-            &item.input,
-            &item.output,
-            |update| {
-                progress.observe(update)?;
-                Ok(())
-            },
-        );
+        let result = if let Some(raw_descriptor) = command.raw_descriptor {
+            Encoder::new(command.config.clone()).encode_raw_file_with_progress(
+                &item.input,
+                &item.output,
+                raw_descriptor,
+                |update| {
+                    progress.observe(update)?;
+                    Ok(())
+                },
+            )
+        } else {
+            Encoder::new(command.config.clone()).encode_file_with_progress(
+                &item.input,
+                &item.output,
+                |update| {
+                    progress.observe(update)?;
+                    Ok(())
+                },
+            )
+        };
 
         match result {
             Ok(_) => progress.finish_current_file()?,
@@ -383,13 +396,52 @@ pub fn recompress_command(
 }
 
 fn plan_encode_worklist(command: &EncodeCommand) -> Result<PlannedWorklist> {
+    if let Some(raw_descriptor) = command.raw_descriptor {
+        return plan_raw_encode_worklist(command, raw_descriptor);
+    }
     plan_worklist(
         CommandKind::Encode,
         &command.input,
         command.output.as_deref(),
         command.depth,
-        inspect_wav_file_total_samples,
+        inspect_pcm_file_total_samples,
     )
+}
+
+fn plan_raw_encode_worklist(
+    command: &EncodeCommand,
+    raw_descriptor: RawPcmDescriptor,
+) -> Result<PlannedWorklist> {
+    if command.input.is_dir() {
+        return Err(CommandKind::Encode
+            .planning_error("raw PCM encode does not support directory input in Stage 3"));
+    }
+
+    let total_samples = inspect_raw_pcm_total_samples(File::open(&command.input)?, raw_descriptor)?;
+    let output = match command.output.as_deref() {
+        Some(output) => {
+            if output.is_dir() {
+                return Err(CommandKind::Encode
+                    .planning_error(CommandKind::Encode.single_file_output_error(output)));
+            }
+            output.to_path_buf()
+        }
+        None => CommandKind::Encode.default_output_path(&command.input),
+    };
+    let item = ConversionWorkItem {
+        input: command.input.clone(),
+        output,
+        display_name: file_display_name(&command.input),
+        ensure_parent_dirs: false,
+        input_bytes: input_file_size(&command.input)?,
+        phase_total_samples: total_samples,
+        overall_total_samples: total_samples,
+    };
+    Ok(PlannedWorklist {
+        total_samples: item.overall_total_samples,
+        items: vec![item],
+        is_directory: false,
+    })
 }
 
 fn plan_decode_worklist(command: &DecodeCommand) -> Result<PlannedWorklist> {
@@ -530,7 +582,9 @@ fn collect_directory_work_items(
     for entry in walker {
         let entry =
             entry.map_err(|error| kind.planning_error(kind.traversal_error(input_root, &error)))?;
-        if !entry.file_type().is_file() || !has_any_extension(entry.path(), kind.source_extensions()) {
+        if !entry.file_type().is_file()
+            || !has_any_extension(entry.path(), kind.source_extensions())
+        {
             continue;
         }
 
@@ -681,7 +735,7 @@ fn plan_recompress_directory_worklist(command: &RecompressCommand) -> Result<Pla
     })
 }
 
-fn inspect_wav_file_total_samples(path: &Path) -> Result<u64> {
+fn inspect_pcm_file_total_samples(path: &Path) -> Result<u64> {
     inspect_wav_total_samples(File::open(path)?)
 }
 
@@ -703,7 +757,11 @@ fn ensure_output_parent_dirs(output: &Path) -> Result<()> {
 fn has_any_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| extensions.iter().any(|candidate| ext.eq_ignore_ascii_case(candidate)))
+        .is_some_and(|ext| {
+            extensions
+                .iter()
+                .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+        })
 }
 
 fn file_display_name(path: &Path) -> String {

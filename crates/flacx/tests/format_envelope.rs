@@ -3,10 +3,12 @@ use flacx::{Encoder, EncoderConfig, decode_bytes};
 mod support;
 
 use support::{
-    extensible_pcm_wav_bytes, flac_metadata_blocks, ordinary_channel_mask,
-    parse_first_flac_frame_header, parse_vorbis_comment_entries, parse_wav_format, pcm_wav_bytes,
-    rf64_extensible_pcm_wav_bytes, rf64_from_wav_bytes, rf64_pcm_wav_bytes, sample_fixture,
-    w64_extensible_pcm_wav_bytes, w64_pcm_wav_bytes, wav_chunk_payloads, wav_data_bytes,
+    aifc_pcm_bytes, aiff_pcm_bytes, caf_bytes_with_options, caf_lpcm_bytes,
+    caf_lpcm_bytes_with_channel_bitmap, extensible_pcm_wav_bytes, flac_metadata_blocks,
+    ordinary_channel_mask, parse_first_flac_frame_header, parse_vorbis_comment_entries,
+    parse_wav_format, pcm_wav_bytes, rf64_extensible_pcm_wav_bytes, rf64_from_wav_bytes,
+    rf64_pcm_wav_bytes, sample_fixture, w64_extensible_pcm_wav_bytes, w64_pcm_wav_bytes,
+    wav_chunk_payloads, wav_data_bytes,
 };
 
 #[test]
@@ -195,6 +197,237 @@ fn round_trips_zero_channel_mask_via_rfc_vorbis_comment() {
     assert_eq!(decoded_format.format_tag, 0xFFFE);
     assert_eq!(decoded_format.channel_mask, Some(0));
     assert_eq!(wav_chunk_payloads(&decoded, *b"fxmd").len(), 1);
+}
+
+#[test]
+fn round_trips_stage_two_aiff_and_aifc_inputs_through_existing_encode_path() {
+    let cases = [
+        (
+            aiff_pcm_bytes(24, 3, 48_000, &sample_fixture(3, 512)),
+            extensible_pcm_wav_bytes(
+                24,
+                24,
+                3,
+                48_000,
+                ordinary_channel_mask(3).unwrap(),
+                &sample_fixture(3, 512),
+            ),
+            24u16,
+            3u16,
+        ),
+        (
+            aiff_pcm_bytes(32, 1, 44_100, &sample_fixture(1, 1_024)),
+            pcm_wav_bytes(32, 1, 44_100, &sample_fixture(1, 1_024)),
+            32u16,
+            1u16,
+        ),
+        (
+            aifc_pcm_bytes(*b"NONE", 20, 4, 96_000, &sample_fixture(4, 256)),
+            extensible_pcm_wav_bytes(
+                20,
+                24,
+                4,
+                96_000,
+                ordinary_channel_mask(4).unwrap(),
+                &sample_fixture(4, 256),
+            ),
+            20u16,
+            4u16,
+        ),
+        (
+            aifc_pcm_bytes(*b"sowt", 16, 2, 44_100, &sample_fixture(2, 1_024)),
+            pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024)),
+            16u16,
+            2u16,
+        ),
+    ];
+
+    for (input, reference_wav, expected_valid_bits, expected_channels) in cases {
+        let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+            .encode_bytes(&input)
+            .unwrap();
+        let decoded = decode_bytes(&flac).unwrap();
+        let format = parse_wav_format(&decoded);
+
+        assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&reference_wav));
+        assert_eq!(format.channels, expected_channels);
+        assert_eq!(
+            format.sample_rate,
+            parse_wav_format(&reference_wav).sample_rate
+        );
+        assert_eq!(
+            format
+                .valid_bits_per_sample
+                .unwrap_or(format.bits_per_sample),
+            expected_valid_bits
+        );
+    }
+}
+
+#[test]
+fn rejects_stage_two_aifc_inputs_outside_the_exact_allowlist() {
+    let reject_cases = [
+        aifc_pcm_bytes(*b"ACE2", 16, 1, 44_100, &sample_fixture(1, 8)),
+        aifc_pcm_bytes(*b"ACE8", 16, 1, 44_100, &sample_fixture(1, 8)),
+        aifc_pcm_bytes(*b"MAC3", 16, 1, 44_100, &sample_fixture(1, 8)),
+        aifc_pcm_bytes(*b"MAC6", 16, 1, 44_100, &sample_fixture(1, 8)),
+        aifc_pcm_bytes(*b"fl32", 32, 1, 44_100, &sample_fixture(1, 8)),
+        aifc_pcm_bytes(*b"sowt", 24, 1, 44_100, &sample_fixture(1, 8)),
+        aifc_pcm_bytes(*b"????", 16, 1, 44_100, &sample_fixture(1, 8)),
+    ];
+
+    for input in reject_cases {
+        let error = Encoder::default().encode_bytes(&input).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("AIFC") || message.contains("float"),
+            "unexpected error: {message}"
+        );
+    }
+}
+
+#[test]
+fn round_trips_stage_three_caf_lpcm_inputs_through_existing_encode_path() {
+    let cases = [
+        (
+            caf_lpcm_bytes(16, 16, 1, 44_100, false, &sample_fixture(1, 1_024)),
+            pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024)),
+        ),
+        (
+            caf_lpcm_bytes(24, 24, 2, 48_000, true, &sample_fixture(2, 512)),
+            pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 512)),
+        ),
+        (
+            caf_lpcm_bytes(24, 32, 2, 96_000, false, &sample_fixture(2, 256)),
+            pcm_wav_bytes(24, 2, 96_000, &sample_fixture(2, 256)),
+        ),
+        (
+            caf_lpcm_bytes_with_channel_bitmap(
+                16,
+                16,
+                4,
+                48_000,
+                true,
+                ordinary_channel_mask(4).unwrap(),
+                &sample_fixture(4, 256),
+            ),
+            extensible_pcm_wav_bytes(
+                16,
+                16,
+                4,
+                48_000,
+                ordinary_channel_mask(4).unwrap(),
+                &sample_fixture(4, 256),
+            ),
+        ),
+    ];
+
+    for (input, reference_wav) in cases {
+        let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+            .encode_bytes(&input)
+            .unwrap();
+        let decoded = decode_bytes(&flac).unwrap();
+
+        assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&reference_wav));
+        assert_eq!(
+            parse_wav_format(&decoded).sample_rate,
+            parse_wav_format(&reference_wav).sample_rate
+        );
+    }
+}
+
+#[test]
+fn rejects_stage_three_caf_inputs_outside_the_allowlist() {
+    let reject_cases = [
+        caf_bytes_with_options(
+            *b"alac",
+            0,
+            16,
+            16,
+            2,
+            44_100,
+            &sample_fixture(2, 8),
+            false,
+            false,
+            true,
+            true,
+        ),
+        caf_bytes_with_options(
+            *b"lpcm",
+            1,
+            32,
+            32,
+            2,
+            44_100,
+            &sample_fixture(2, 8),
+            false,
+            false,
+            true,
+            true,
+        ),
+        caf_bytes_with_options(
+            *b"lpcm",
+            0,
+            16,
+            16,
+            2,
+            44_100,
+            &sample_fixture(2, 8),
+            true,
+            false,
+            true,
+            true,
+        ),
+        caf_bytes_with_options(
+            *b"lpcm",
+            0,
+            16,
+            16,
+            2,
+            44_100,
+            &sample_fixture(2, 8),
+            false,
+            true,
+            true,
+            true,
+        ),
+        caf_lpcm_bytes(16, 16, 4, 48_000, true, &sample_fixture(4, 8)),
+        caf_bytes_with_options(
+            *b"lpcm",
+            0,
+            16,
+            16,
+            2,
+            44_100,
+            &sample_fixture(2, 8),
+            false,
+            false,
+            false,
+            true,
+        ),
+        caf_bytes_with_options(
+            *b"lpcm",
+            0,
+            16,
+            16,
+            2,
+            44_100,
+            &sample_fixture(2, 8),
+            false,
+            false,
+            true,
+            false,
+        ),
+    ];
+
+    for input in reject_cases {
+        let error = Encoder::default().encode_bytes(&input).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("CAF") || message.contains("channel layout"),
+            "unexpected error: {message}"
+        );
+    }
 }
 
 #[test]

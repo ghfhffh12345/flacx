@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+use flacx::{RawPcmByteOrder, RawPcmDescriptor};
 use std::{
     env, fs,
     path::PathBuf,
@@ -21,6 +22,11 @@ const W64_RIFF_GUID: [u8; 16] = [
 const W64_CHUNK_GUID_SUFFIX: [u8; 12] = [
     0xf3, 0xac, 0xd3, 0x11, 0x8c, 0xd1, 0x00, 0xc0, 0x4f, 0x8e, 0xdb, 0x8a,
 ];
+const AIFF_FORM_TYPE: [u8; 4] = *b"AIFF";
+const AIFC_FORM_TYPE: [u8; 4] = *b"AIFC";
+const AIFC_NONE: [u8; 4] = *b"NONE";
+const AIFC_SOWT: [u8; 4] = *b"sowt";
+const CAF_MAGIC: [u8; 4] = *b"caff";
 
 pub fn pcm_wav_bytes(
     bits_per_sample: u16,
@@ -236,6 +242,185 @@ pub fn w64_extensible_pcm_wav_bytes(
         channel_mask,
         samples,
     ))
+}
+
+pub fn aiff_pcm_bytes(
+    valid_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    aiff_like_bytes(
+        AIFF_FORM_TYPE,
+        None,
+        valid_bits_per_sample,
+        channels,
+        sample_rate,
+        samples,
+    )
+}
+
+pub fn aifc_pcm_bytes(
+    compression_id: [u8; 4],
+    valid_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    aiff_like_bytes(
+        AIFC_FORM_TYPE,
+        Some(compression_id),
+        valid_bits_per_sample,
+        channels,
+        sample_rate,
+        samples,
+    )
+}
+
+pub fn caf_lpcm_bytes(
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    little_endian: bool,
+    samples: &[i32],
+) -> Vec<u8> {
+    caf_bytes_with_options(
+        *b"lpcm",
+        u32::from(little_endian) << 1,
+        valid_bits_per_sample,
+        container_bits_per_sample,
+        channels,
+        sample_rate,
+        samples,
+        false,
+        false,
+        true,
+        true,
+    )
+}
+
+pub fn caf_lpcm_bytes_with_channel_bitmap(
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    little_endian: bool,
+    channel_bitmap: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    let mut bytes = caf_lpcm_bytes(
+        valid_bits_per_sample,
+        container_bits_per_sample,
+        channels,
+        sample_rate,
+        little_endian,
+        samples,
+    );
+    let mut chan = Vec::new();
+    chan.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    chan.extend_from_slice(&channel_bitmap.to_be_bytes());
+    chan.extend_from_slice(&0u32.to_be_bytes());
+    append_caf_chunk(&mut bytes, *b"chan", &chan, false);
+    bytes
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn caf_bytes_with_options(
+    format_id: [u8; 4],
+    format_flags: u32,
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+    include_packet_table: bool,
+    unknown_size_data_chunk: bool,
+    include_desc_chunk: bool,
+    include_data_chunk: bool,
+) -> Vec<u8> {
+    let bytes_per_sample = u32::from(container_bits_per_sample / 8);
+    let bytes_per_packet = u32::from(channels) * bytes_per_sample;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&CAF_MAGIC);
+    bytes.extend_from_slice(&1u16.to_be_bytes());
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+
+    if include_desc_chunk {
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&(sample_rate as f64).to_bits().to_be_bytes());
+        desc.extend_from_slice(&format_id);
+        desc.extend_from_slice(&format_flags.to_be_bytes());
+        desc.extend_from_slice(&bytes_per_packet.to_be_bytes());
+        desc.extend_from_slice(&1u32.to_be_bytes());
+        desc.extend_from_slice(&u32::from(channels).to_be_bytes());
+        desc.extend_from_slice(&u32::from(valid_bits_per_sample).to_be_bytes());
+        append_caf_chunk(&mut bytes, *b"desc", &desc, false);
+    }
+
+    if include_packet_table {
+        append_caf_chunk(&mut bytes, *b"pakt", &[0; 24], false);
+    }
+
+    if include_data_chunk {
+        let little_endian = format_flags & (1 << 1) != 0;
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u32.to_be_bytes());
+        write_aiff_samples(
+            &mut data,
+            container_bits_per_sample,
+            valid_bits_per_sample,
+            samples,
+            little_endian,
+        );
+        append_caf_chunk(&mut bytes, *b"data", &data, unknown_size_data_chunk);
+    }
+
+    bytes
+}
+
+pub fn raw_pcm_bytes(
+    valid_bits_per_sample: u8,
+    container_bits_per_sample: u8,
+    byte_order: RawPcmByteOrder,
+    samples: &[i32],
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_raw_pcm_samples(
+        &mut bytes,
+        container_bits_per_sample,
+        valid_bits_per_sample,
+        samples,
+        byte_order,
+    );
+    bytes
+}
+
+pub fn raw_pcm_fixture(
+    sample_rate: u32,
+    channels: u8,
+    valid_bits_per_sample: u8,
+    container_bits_per_sample: u8,
+    byte_order: RawPcmByteOrder,
+    channel_mask: Option<u32>,
+    samples: &[i32],
+) -> (Vec<u8>, RawPcmDescriptor) {
+    (
+        raw_pcm_bytes(
+            valid_bits_per_sample,
+            container_bits_per_sample,
+            byte_order,
+            samples,
+        ),
+        RawPcmDescriptor {
+            sample_rate,
+            channels,
+            valid_bits_per_sample,
+            container_bits_per_sample,
+            byte_order,
+            channel_mask,
+        },
+    )
 }
 
 fn w64_chunk_guid(chunk_id: [u8; 4]) -> [u8; 16] {
@@ -1141,6 +1326,76 @@ fn bytes_per_sample(bits_per_sample: u16) -> usize {
     }
 }
 
+fn container_bits_from_valid_bits(valid_bits: u16) -> u16 {
+    match valid_bits {
+        0..=8 => 8,
+        9..=16 => 16,
+        17..=24 => 24,
+        25..=32 => 32,
+        _ => valid_bits.div_ceil(8) * 8,
+    }
+}
+
+fn encode_extended_u32(value: u32) -> [u8; 10] {
+    assert!(value > 0, "AIFF sample rate must be non-zero");
+    let exponent = 31 - value.leading_zeros();
+    let biased_exponent = (16_383 + exponent as u16).to_be_bytes();
+    let mantissa = u64::from(value) << (63 - exponent);
+    let mut bytes = [0u8; 10];
+    bytes[..2].copy_from_slice(&biased_exponent);
+    bytes[2..].copy_from_slice(&mantissa.to_be_bytes());
+    bytes
+}
+
+fn aiff_like_bytes(
+    form_type: [u8; 4],
+    compression_id: Option<[u8; 4]>,
+    valid_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    assert!(channels > 0, "AIFF channels must be non-zero");
+    assert!(samples.len().is_multiple_of(usize::from(channels)));
+
+    let container_bits_per_sample = match compression_id {
+        Some(AIFC_SOWT) if valid_bits_per_sample == 16 => 16,
+        _ => container_bits_from_valid_bits(valid_bits_per_sample),
+    };
+    let sample_frames = (samples.len() / usize::from(channels)) as u32;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"FORM");
+    bytes.extend_from_slice(&0u32.to_be_bytes());
+    bytes.extend_from_slice(&form_type);
+
+    let mut comm = Vec::new();
+    comm.extend_from_slice(&channels.to_be_bytes());
+    comm.extend_from_slice(&sample_frames.to_be_bytes());
+    comm.extend_from_slice(&valid_bits_per_sample.to_be_bytes());
+    comm.extend_from_slice(&encode_extended_u32(sample_rate));
+    if let Some(compression_id) = compression_id {
+        comm.extend_from_slice(&compression_id);
+        comm.push(0);
+    }
+    append_aiff_chunk(&mut bytes, *b"COMM", &comm);
+
+    let mut ssnd = Vec::new();
+    ssnd.extend_from_slice(&0u32.to_be_bytes());
+    ssnd.extend_from_slice(&0u32.to_be_bytes());
+    write_aiff_samples(
+        &mut ssnd,
+        container_bits_per_sample,
+        valid_bits_per_sample,
+        samples,
+        compression_id == Some(AIFC_SOWT),
+    );
+    append_aiff_chunk(&mut bytes, *b"SSND", &ssnd);
+
+    let form_size = (bytes.len() - 8) as u32;
+    bytes[4..8].copy_from_slice(&form_size.to_be_bytes());
+    bytes
+}
+
 fn write_pcm_samples(bytes: &mut Vec<u8>, bits_per_sample: u16, samples: &[i32]) {
     for &sample in samples {
         match bits_per_sample {
@@ -1184,4 +1439,125 @@ fn write_left_aligned_samples(
             _ => unreachable!("unsupported container bits per sample: {container_bits_per_sample}"),
         }
     }
+}
+
+fn write_aiff_samples(
+    bytes: &mut Vec<u8>,
+    container_bits_per_sample: u16,
+    valid_bits_per_sample: u16,
+    samples: &[i32],
+    little_endian: bool,
+) {
+    let shift = container_bits_per_sample - valid_bits_per_sample;
+    for &sample in samples {
+        let shifted = if shift == 0 { sample } else { sample << shift };
+        match container_bits_per_sample {
+            8 => bytes.push(i8::try_from(shifted).unwrap() as u8),
+            16 => {
+                let value = i16::try_from(shifted).unwrap();
+                if little_endian {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                } else {
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                }
+            }
+            24 => {
+                let value = shifted as u32;
+                let chunk = if little_endian {
+                    [
+                        (value & 0xff) as u8,
+                        ((value >> 8) & 0xff) as u8,
+                        ((value >> 16) & 0xff) as u8,
+                    ]
+                } else {
+                    [
+                        ((value >> 16) & 0xff) as u8,
+                        ((value >> 8) & 0xff) as u8,
+                        (value & 0xff) as u8,
+                    ]
+                };
+                bytes.extend_from_slice(&chunk);
+            }
+            32 => {
+                if little_endian {
+                    bytes.extend_from_slice(&shifted.to_le_bytes());
+                } else {
+                    bytes.extend_from_slice(&shifted.to_be_bytes());
+                }
+            }
+            _ => unreachable!(
+                "unsupported AIFF container bits per sample: {container_bits_per_sample}"
+            ),
+        }
+    }
+}
+
+fn write_raw_pcm_samples(
+    bytes: &mut Vec<u8>,
+    container_bits_per_sample: u8,
+    valid_bits_per_sample: u8,
+    samples: &[i32],
+    byte_order: RawPcmByteOrder,
+) {
+    let shift = container_bits_per_sample - valid_bits_per_sample;
+    for &sample in samples {
+        let shifted = if shift == 0 {
+            sample
+        } else {
+            sample << u32::from(shift)
+        };
+        match container_bits_per_sample {
+            8 => bytes.push(i8::try_from(shifted).unwrap() as u8),
+            16 => {
+                let value = i16::try_from(shifted).unwrap();
+                match byte_order {
+                    RawPcmByteOrder::LittleEndian => bytes.extend_from_slice(&value.to_le_bytes()),
+                    RawPcmByteOrder::BigEndian => bytes.extend_from_slice(&value.to_be_bytes()),
+                }
+            }
+            24 => {
+                let value = shifted as u32;
+                let chunk = match byte_order {
+                    RawPcmByteOrder::LittleEndian => [
+                        (value & 0xff) as u8,
+                        ((value >> 8) & 0xff) as u8,
+                        ((value >> 16) & 0xff) as u8,
+                    ],
+                    RawPcmByteOrder::BigEndian => [
+                        ((value >> 16) & 0xff) as u8,
+                        ((value >> 8) & 0xff) as u8,
+                        (value & 0xff) as u8,
+                    ],
+                };
+                bytes.extend_from_slice(&chunk);
+            }
+            32 => match byte_order {
+                RawPcmByteOrder::LittleEndian => bytes.extend_from_slice(&shifted.to_le_bytes()),
+                RawPcmByteOrder::BigEndian => bytes.extend_from_slice(&shifted.to_be_bytes()),
+            },
+            _ => unreachable!(
+                "unsupported raw container bits per sample: {container_bits_per_sample}"
+            ),
+        }
+    }
+}
+
+fn append_aiff_chunk(bytes: &mut Vec<u8>, id: [u8; 4], payload: &[u8]) {
+    bytes.extend_from_slice(&id);
+    bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(payload);
+    if !payload.len().is_multiple_of(2) {
+        bytes.push(0);
+    }
+}
+
+fn append_caf_chunk(bytes: &mut Vec<u8>, id: [u8; 4], payload: &[u8], unknown_size: bool) {
+    bytes.extend_from_slice(&id);
+    let size = if unknown_size {
+        -1i64
+    } else {
+        payload.len() as i64
+    };
+    bytes.extend_from_slice(&size.to_be_bytes());
+    bytes.extend_from_slice(payload);
 }

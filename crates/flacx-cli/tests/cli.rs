@@ -17,9 +17,10 @@ use flacx_cli::{
 mod support;
 
 use support::{
-    cuesheet_block, extensible_pcm_wav_bytes, pcm_wav_bytes, raw_seektable_block,
-    replace_flac_optional_metadata, rf64_pcm_wav_bytes, sample_fixture, unique_temp_path,
-    vorbis_comment_block, w64_pcm_wav_bytes, wav_chunk_payloads, wav_data_bytes,
+    aifc_pcm_bytes, aiff_pcm_bytes, caf_lpcm_bytes, cuesheet_block, extensible_pcm_wav_bytes,
+    pcm_wav_bytes, raw_pcm_bytes, raw_seektable_block, replace_flac_optional_metadata,
+    rf64_pcm_wav_bytes, sample_fixture, unique_temp_path, vorbis_comment_block, w64_pcm_wav_bytes,
+    wav_chunk_payloads, wav_data_bytes,
 };
 
 fn flacx_bin() -> &'static str {
@@ -75,6 +76,18 @@ fn final_progress_frame_lines(stderr: &str) -> Vec<&str> {
 
 fn decode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
     let mut command_args = vec!["decode"];
+    command_args.extend_from_slice(args);
+    command_args.push(input_path.to_str().unwrap());
+    command_args.push("-o");
+    command_args.push(output_path.to_str().unwrap());
+    Command::new(flacx_bin())
+        .args(command_args)
+        .output()
+        .unwrap()
+}
+
+fn encode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
+    let mut command_args = vec!["encode"];
     command_args.extend_from_slice(args);
     command_args.push(input_path.to_str().unwrap());
     command_args.push("-o");
@@ -507,6 +520,7 @@ fn encode_command_renders_filename_elapsed_and_progress_when_interactive() {
             .with_level(Level::Level0)
             .with_threads(1)
             .with_block_size(576),
+        raw_descriptor: None,
     };
     let mut stderr = Vec::new();
 
@@ -541,6 +555,7 @@ fn encode_directory_progress_shows_overall_and_file_progress() {
         output: None,
         depth: 0,
         config: EncoderConfig::default().with_threads(1),
+        raw_descriptor: None,
     };
     let mut stderr = Vec::new();
 
@@ -575,6 +590,7 @@ fn encode_single_file_directory_still_uses_batch_progress_layout() {
         output: None,
         depth: 0,
         config: EncoderConfig::default().with_threads(1),
+        raw_descriptor: None,
     };
     let mut stderr = Vec::new();
 
@@ -600,6 +616,7 @@ fn encode_single_match_folder_still_uses_batch_progress_layout() {
         output: None,
         depth: 0,
         config: EncoderConfig::default().with_threads(1),
+        raw_descriptor: None,
     };
     let mut stderr = Vec::new();
 
@@ -787,8 +804,10 @@ fn encode_directory_skips_non_wav_files() {
     let input_dir = unique_temp_dir();
     let wav_path = input_dir.join("keep.wav");
     let txt_path = input_dir.join("ignore.txt");
+    let raw_path = input_dir.join("ignore.raw");
     write_wav_file(&wav_path, 1, 2_048);
     fs::write(&txt_path, b"not audio").unwrap();
+    fs::write(&raw_path, [0u8; 8]).unwrap();
 
     let output = Command::new(flacx_bin())
         .args(["encode", input_dir.to_str().unwrap(), "--threads", "1"])
@@ -798,6 +817,7 @@ fn encode_directory_skips_non_wav_files() {
     assert!(output.status.success());
     assert!(input_dir.join("keep.flac").exists());
     assert!(!input_dir.join("ignore.flac").exists());
+    assert!(!input_dir.join("ignore.raw.flac").exists());
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -824,6 +844,214 @@ fn encode_directory_accepts_rf64_and_w64_inputs() {
     assert!(output.status.success());
     assert!(input_dir.join("keep-rf64.flac").exists());
     assert!(input_dir.join("keep-w64.flac").exists());
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn encode_directory_accepts_aif_aiff_and_aifc_inputs() {
+    let input_dir = unique_temp_dir();
+    write_bytes_file(
+        &input_dir.join("keep-aif.aif"),
+        &aiff_pcm_bytes(16, 1, 44_100, &sample_fixture(1, 1_024)),
+    );
+    write_bytes_file(
+        &input_dir.join("keep-aiff.aiff"),
+        &aiff_pcm_bytes(24, 2, 48_000, &sample_fixture(2, 512)),
+    );
+    write_bytes_file(
+        &input_dir.join("keep-aifc.aifc"),
+        &aifc_pcm_bytes(*b"NONE", 20, 4, 96_000, &sample_fixture(4, 256)),
+    );
+
+    let output = Command::new(flacx_bin())
+        .args(["encode", input_dir.to_str().unwrap(), "--threads", "1"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(input_dir.join("keep-aif.flac").exists());
+    assert!(input_dir.join("keep-aiff.flac").exists());
+    assert!(input_dir.join("keep-aifc.flac").exists());
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn encode_directory_accepts_caf_inputs() {
+    let input_dir = unique_temp_dir();
+    write_bytes_file(
+        &input_dir.join("keep-caf.caf"),
+        &caf_lpcm_bytes(16, 16, 2, 44_100, true, &sample_fixture(2, 1_024)),
+    );
+
+    let output = Command::new(flacx_bin())
+        .args(["encode", input_dir.to_str().unwrap(), "--threads", "1"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(input_dir.join("keep-caf.flac").exists());
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn encode_command_rejects_unsupported_aifc_variants() {
+    let cases = [
+        (
+            "ace2",
+            aifc_pcm_bytes(*b"ACE2", 16, 1, 44_100, &sample_fixture(1, 8)),
+        ),
+        (
+            "ace8",
+            aifc_pcm_bytes(*b"ACE8", 16, 1, 44_100, &sample_fixture(1, 8)),
+        ),
+        (
+            "mac3",
+            aifc_pcm_bytes(*b"MAC3", 16, 1, 44_100, &sample_fixture(1, 8)),
+        ),
+        (
+            "mac6",
+            aifc_pcm_bytes(*b"MAC6", 16, 1, 44_100, &sample_fixture(1, 8)),
+        ),
+        (
+            "float",
+            aifc_pcm_bytes(*b"fl32", 32, 1, 44_100, &sample_fixture(1, 8)),
+        ),
+        (
+            "bad-sowt",
+            aifc_pcm_bytes(*b"sowt", 24, 1, 44_100, &sample_fixture(1, 8)),
+        ),
+        (
+            "unknown",
+            aifc_pcm_bytes(*b"????", 16, 1, 44_100, &sample_fixture(1, 8)),
+        ),
+    ];
+
+    for (label, bytes) in cases {
+        let input_path = unique_temp_path("aifc");
+        let output_path = unique_temp_path("flac");
+        fs::write(&input_path, &bytes).unwrap();
+
+        let output = Command::new(flacx_bin())
+            .args([
+                "encode",
+                input_path.to_str().unwrap(),
+                "-o",
+                output_path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+
+        assert!(
+            !output.status.success(),
+            "{label} should fail but succeeded"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("AIFC") || stderr.contains("float") || stderr.contains("16-bit"),
+            "unexpected stderr for {label}: {stderr}"
+        );
+
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+    }
+}
+
+#[test]
+fn encode_command_accepts_raw_pcm_with_explicit_flags() {
+    let input_path = unique_temp_path("pcm");
+    let output_path = unique_temp_path("flac");
+    let samples = sample_fixture(2, 1_024);
+    fs::write(
+        &input_path,
+        raw_pcm_bytes(16, 16, flacx::RawPcmByteOrder::LittleEndian, &samples),
+    )
+    .unwrap();
+
+    let output = encode_cli_output(
+        &input_path,
+        &output_path,
+        &[
+            "--raw",
+            "--sample-rate",
+            "44100",
+            "--channels",
+            "2",
+            "--bits-per-sample",
+            "16",
+            "--container-bits",
+            "16",
+            "--byte-order",
+            "le",
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists());
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn encode_command_rejects_raw_mode_without_required_descriptor_flags() {
+    let input_path = unique_temp_path("pcm");
+    let output_path = unique_temp_path("flac");
+    fs::write(&input_path, [0u8; 8]).unwrap();
+
+    let output = encode_cli_output(
+        &input_path,
+        &output_path,
+        &["--raw", "--sample-rate", "44100"],
+    );
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--raw requires --channels"));
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn encode_command_rejects_raw_directory_input() {
+    let input_dir = unique_temp_dir();
+    fs::write(input_dir.join("input.raw"), [0u8; 8]).unwrap();
+    let output = Command::new(flacx_bin())
+        .args([
+            "encode",
+            input_dir.to_str().unwrap(),
+            "--raw",
+            "--sample-rate",
+            "44100",
+            "--channels",
+            "2",
+            "--bits-per-sample",
+            "16",
+            "--container-bits",
+            "16",
+            "--byte-order",
+            "le",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("raw PCM encode does not support directory input")
+    );
+
     let _ = fs::remove_dir_all(input_dir);
 }
 

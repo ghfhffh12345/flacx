@@ -70,7 +70,7 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
     Ok(read_wav_internal(&mut reader, false, FxmdChunkPolicy::IGNORE)?.wav)
 }
 
-/// Inspect a WAV stream and return its total sample count.
+/// Inspect a supported PCM-container stream and return its total sample count.
 ///
 /// This helper reads only the container metadata needed for sample counts.
 /// It is useful for preflight checks and progress planning.
@@ -81,25 +81,68 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
 /// use flacx::inspect_wav_total_samples;
 /// use std::fs::File;
 ///
-/// let total_samples = inspect_wav_total_samples(File::open("input.wav").unwrap()).unwrap();
+/// let total_samples = inspect_wav_total_samples(File::open("input.aiff").unwrap()).unwrap();
 /// assert!(total_samples > 0);
 /// ```
 pub fn inspect_wav_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64> {
-    Ok(parse_wav_layout(&mut reader, false, FxmdChunkPolicy::IGNORE)?.total_samples)
+    inspect_pcm_total_samples(&mut reader)
 }
 
+pub(crate) fn inspect_pcm_total_samples<R: Read + Seek>(reader: &mut R) -> Result<u64> {
+    match sniff_pcm_input_kind(reader)? {
+        PcmInputKind::AiffLike => crate::aiff::inspect_aiff_total_samples(reader),
+        PcmInputKind::Caf => crate::caf::inspect_caf_total_samples(reader),
+        PcmInputKind::RiffLike => {
+            Ok(parse_wav_layout(reader, false, FxmdChunkPolicy::IGNORE)?.total_samples)
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_wav_for_encode_with_config<R: Read + Seek>(
     mut reader: R,
     config: &EncoderConfig,
 ) -> Result<EncodeWavData> {
-    read_wav_internal(
-        &mut reader,
-        true,
-        FxmdChunkPolicy {
-            capture: config.capture_fxmd,
-            strict: config.strict_fxmd_validation,
-        },
-    )
+    read_pcm_for_encode_with_config(&mut reader, config)
+}
+
+pub(crate) fn read_pcm_for_encode_with_config<R: Read + Seek>(
+    reader: &mut R,
+    config: &EncoderConfig,
+) -> Result<EncodeWavData> {
+    match sniff_pcm_input_kind(reader)? {
+        PcmInputKind::AiffLike => crate::aiff::read_aiff_for_encode(reader),
+        PcmInputKind::Caf => crate::caf::read_caf_for_encode(reader),
+        PcmInputKind::RiffLike => read_wav_internal(
+            reader,
+            true,
+            FxmdChunkPolicy {
+                capture: config.capture_fxmd,
+                strict: config.strict_fxmd_validation,
+            },
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PcmInputKind {
+    RiffLike,
+    AiffLike,
+    Caf,
+}
+
+fn sniff_pcm_input_kind<R: Read + Seek>(reader: &mut R) -> Result<PcmInputKind> {
+    let start = reader.stream_position()?;
+    let mut magic = [0u8; 4];
+    let kind = match reader.read_exact(&mut magic) {
+        Ok(()) if magic == *b"FORM" => PcmInputKind::AiffLike,
+        Ok(()) if magic == *b"caff" => PcmInputKind::Caf,
+        Ok(()) => PcmInputKind::RiffLike,
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => PcmInputKind::RiffLike,
+        Err(error) => return Err(error.into()),
+    };
+    reader.seek(SeekFrom::Start(start))?;
+    Ok(kind)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

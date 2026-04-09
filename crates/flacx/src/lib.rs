@@ -1,4 +1,4 @@
-//! High-performance WAV/FLAC conversion and recompression for Rust.
+//! High-performance PCM-container/FLAC conversion and recompression for Rust.
 //!
 //! The `flacx` crate is the reusable library layer in this workspace. It
 //! exposes compact encode and decode façades, builder-backed configuration
@@ -13,6 +13,8 @@
 //!   façades.
 //! - [`encode_file`], [`encode_bytes`], [`decode_file`], and [`decode_bytes`]
 //!   offer convenience entry points for one-off use.
+//! - [`RawPcmDescriptor`] and [`inspect_raw_pcm_total_samples`] cover explicit
+//!   raw signed-integer PCM ingest.
 //! - [`recompress_file`] and [`recompress_bytes`] provide convenience
 //!   FLAC-to-FLAC entry points.
 //! - [`inspect_wav_total_samples`] and [`inspect_flac_total_samples`] let you
@@ -23,7 +25,7 @@
 //!
 //! ## Quick start
 //!
-//! Encode a WAV file to FLAC with the default level and a custom thread count:
+//! Encode a supported PCM container to FLAC with the default level and a custom thread count:
 //!
 //! ```no_run
 //! use flacx::{Encoder, EncoderConfig, level::Level};
@@ -38,7 +40,7 @@
 //!     .unwrap();
 //! ```
 //!
-//! Decode a FLAC file back to WAV:
+//! Decode a FLAC file back to a supported RIFF-family PCM container:
 //!
 //! ```no_run
 //! use flacx::Decoder;
@@ -77,9 +79,11 @@
 //!
 //! ```no_run
 //! use std::io::Cursor;
-//! use flacx::{decode_bytes, encode_bytes, inspect_flac_total_samples, inspect_wav_total_samples};
+//! use flacx::{
+//!     decode_bytes, encode_bytes, inspect_flac_total_samples, inspect_wav_total_samples,
+//! };
 //!
-//! let wav_bytes = std::fs::read("input.wav").unwrap();
+//! let wav_bytes = std::fs::read("input.aiff").unwrap();
 //! let total_samples = inspect_wav_total_samples(Cursor::new(&wav_bytes)).unwrap();
 //! let flac_bytes = encode_bytes(&wav_bytes).unwrap();
 //! let flac_total_samples = inspect_flac_total_samples(Cursor::new(&flac_bytes)).unwrap();
@@ -130,6 +134,8 @@
 //! intentionally stays aligned with the exported API so that docs.rs readers
 //! can use it as the canonical reference.
 
+mod aiff;
+mod caf;
 mod config;
 mod crc;
 mod decode;
@@ -142,6 +148,7 @@ mod model;
 mod pcm;
 mod plan;
 mod progress;
+mod raw;
 mod read;
 mod recompress;
 mod reconstruct;
@@ -157,15 +164,17 @@ pub use decode::{DecodeSummary, Decoder, decode_bytes, decode_file};
 pub use encoder::{EncodeSummary, Encoder, encode_bytes, encode_file};
 pub use error::{Error, Result};
 pub use pcm::PcmContainer;
+pub use raw::{RawPcmByteOrder, RawPcmDescriptor, inspect_raw_pcm_total_samples};
 pub use recompress::{
     RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress,
     Recompressor, recompress_bytes, recompress_file,
 };
 
-/// Inspect a WAV stream and return its total sample count without decoding it.
+/// Inspect a supported PCM-container stream and return its total sample count without decoding it.
 ///
-/// This helper is useful when you want to report progress or preflight an
-/// encode job before you start writing FLAC output.
+/// This WAV-named helper remains the stable public inspection API for encode
+/// preflight and currently accepts RIFF/WAVE, RF64, Wave64, AIFF, the Stage 2
+/// AIFC allowlist, and the Stage 3 CAF allowlist.
 pub use input::inspect_wav_total_samples;
 
 /// Inspect a FLAC stream and return the total sample count recorded in its

@@ -109,6 +109,7 @@ impl DirectoryParityCorpus {
             config: EncoderConfig::default()
                 .with_level(Level::Level8)
                 .with_threads(self.threads),
+            raw_descriptor: None,
         };
         let mut stderr = Vec::new();
         encode_command(&command, false, &mut stderr)?;

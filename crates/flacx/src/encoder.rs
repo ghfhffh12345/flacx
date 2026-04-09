@@ -1,4 +1,4 @@
-//! WAV-to-FLAC encoding primitives used by the `flacx` crate.
+//! PCM-container-to-FLAC encoding primitives used by the `flacx` crate.
 //!
 //! The main façade is [`Encoder`]. Pair it with [`EncoderConfig`] or
 //! [`Encoder::builder`] to choose the compression level, thread count, and
@@ -20,10 +20,11 @@ use std::{
 use crate::{
     config::{EncoderBuilder, EncoderConfig},
     error::{Error, Result},
-    input::read_wav_for_encode_with_config,
+    input::read_pcm_for_encode_with_config,
     model::encode_frame,
     plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
     progress::{NoProgress, ProgressSink, ProgressSnapshot},
+    raw::{RawPcmDescriptor, read_raw_for_encode},
     write::{EncodedFrame, FlacWriter, FrameHeaderNumber},
 };
 
@@ -61,7 +62,7 @@ pub struct EncodeSummary {
     pub bits_per_sample: u8,
 }
 
-/// Primary library façade for WAV-to-FLAC conversion.
+/// Primary library façade for PCM-container-to-FLAC conversion.
 ///
 /// Construct an encoder from [`EncoderConfig`] and call one of the encode
 /// methods depending on your input shape:
@@ -69,6 +70,8 @@ pub struct EncodeSummary {
 /// - [`Encoder::encode`] for generic `Read + Seek` sources
 /// - [`Encoder::encode_file`] for file paths
 /// - [`Encoder::encode_bytes`] for in-memory input
+/// - [`Encoder::encode_raw`] / [`Encoder::encode_raw_file`] for explicit raw
+///   PCM descriptors
 ///
 /// The encoder itself is cheap to clone and holds only its configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -113,7 +116,7 @@ impl Encoder {
         Self::new(self.config.with_block_size(block_size))
     }
 
-    /// Encode a WAV reader into FLAC output.
+    /// Encode a supported PCM-container reader into FLAC output.
     ///
     /// # Example
     ///
@@ -130,13 +133,14 @@ impl Encoder {
         R: Read + Seek,
         W: Write + Seek,
     {
-        let input = read_wav_for_encode_with_config(input, &self.config)?;
+        let mut input = input;
+        let input = read_pcm_for_encode_with_config(&mut input, &self.config)?;
         let mut progress = NoProgress;
         self.encode_wav_data(input, output, &mut progress)
     }
 
     #[cfg(feature = "progress")]
-    /// Encode a WAV reader into FLAC output while reporting progress.
+    /// Encode a supported PCM-container reader into FLAC output while reporting progress.
     ///
     /// The callback receives a [`ProgressSnapshot`] after each frame is
     /// written.
@@ -168,7 +172,45 @@ impl Encoder {
         W: Write + Seek,
         F: FnMut(ProgressSnapshot) -> Result<()>,
     {
-        let input = read_wav_for_encode_with_config(input, &self.config)?;
+        let mut input = input;
+        let input = read_pcm_for_encode_with_config(&mut input, &self.config)?;
+        let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
+        self.encode_wav_data(input, output, &mut progress)
+    }
+
+    /// Encode raw signed-integer PCM from a seekable reader into FLAC output.
+    pub fn encode_raw<R, W>(
+        &self,
+        input: R,
+        output: W,
+        descriptor: RawPcmDescriptor,
+    ) -> Result<EncodeSummary>
+    where
+        R: Read + Seek,
+        W: Write + Seek,
+    {
+        let mut input = input;
+        let input = read_raw_for_encode(&mut input, descriptor)?;
+        let mut progress = NoProgress;
+        self.encode_wav_data(input, output, &mut progress)
+    }
+
+    #[cfg(feature = "progress")]
+    /// Encode raw signed-integer PCM into FLAC output while reporting progress.
+    pub fn encode_raw_with_progress<R, W, F>(
+        &self,
+        input: R,
+        output: W,
+        descriptor: RawPcmDescriptor,
+        mut on_progress: F,
+    ) -> Result<EncodeSummary>
+    where
+        R: Read + Seek,
+        W: Write + Seek,
+        F: FnMut(ProgressSnapshot) -> Result<()>,
+    {
+        let mut input = input;
+        let input = read_raw_for_encode(&mut input, descriptor)?;
         let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
         self.encode_wav_data(input, output, &mut progress)
     }
@@ -190,6 +232,24 @@ impl Encoder {
         Q: AsRef<Path>,
     {
         self.encode(File::open(input_path)?, File::create(output_path)?)
+    }
+
+    /// Encode raw signed-integer PCM from one file path to another.
+    pub fn encode_raw_file<P, Q>(
+        &self,
+        input_path: P,
+        output_path: Q,
+        descriptor: RawPcmDescriptor,
+    ) -> Result<EncodeSummary>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        self.encode_raw(
+            File::open(input_path)?,
+            File::create(output_path)?,
+            descriptor,
+        )
     }
 
     #[cfg(feature = "progress")]
@@ -228,7 +288,30 @@ impl Encoder {
         )
     }
 
-    /// Encode an in-memory WAV buffer and return the FLAC bytes.
+    #[cfg(feature = "progress")]
+    /// Encode raw signed-integer PCM from one file path to another while
+    /// reporting progress.
+    pub fn encode_raw_file_with_progress<P, Q, F>(
+        &self,
+        input_path: P,
+        output_path: Q,
+        descriptor: RawPcmDescriptor,
+        on_progress: F,
+    ) -> Result<EncodeSummary>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+        F: FnMut(ProgressSnapshot) -> Result<()>,
+    {
+        self.encode_raw_with_progress(
+            File::open(input_path)?,
+            File::create(output_path)?,
+            descriptor,
+            on_progress,
+        )
+    }
+
+    /// Encode an in-memory supported PCM-container buffer and return the FLAC bytes.
     ///
     /// # Example
     ///
