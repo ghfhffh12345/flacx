@@ -445,13 +445,16 @@ fn plan_raw_encode_worklist(
 }
 
 fn plan_decode_worklist(command: &DecodeCommand) -> Result<PlannedWorklist> {
-    plan_worklist(
-        CommandKind::Decode,
-        &command.input,
-        command.output.as_deref(),
-        command.depth,
-        inspect_flac_file_total_samples,
-    )
+    if command.input.is_dir() {
+        plan_decode_directory_worklist(command)
+    } else {
+        let item = plan_decode_single_file_work_item(command)?;
+        Ok(PlannedWorklist {
+            total_samples: item.overall_total_samples,
+            items: vec![item],
+            is_directory: false,
+        })
+    }
 }
 
 fn plan_recompress_worklist(command: &RecompressCommand) -> Result<PlannedWorklist> {
@@ -464,6 +467,107 @@ fn plan_recompress_worklist(command: &RecompressCommand) -> Result<PlannedWorkli
             items: vec![item],
             is_directory: false,
         })
+    }
+}
+
+fn plan_decode_single_file_work_item(command: &DecodeCommand) -> Result<ConversionWorkItem> {
+    let input = &command.input;
+    let total_samples = inspect_flac_file_total_samples(input)?;
+    let output = match command.output.as_deref() {
+        Some(output) => {
+            if output.is_dir() {
+                return Err(CommandKind::Decode
+                    .planning_error(CommandKind::Decode.single_file_output_error(output)));
+            }
+            output.to_path_buf()
+        }
+        None => input.with_extension(decode_target_extension(command.config.output_container)),
+    };
+
+    Ok(ConversionWorkItem {
+        input: input.to_path_buf(),
+        output,
+        display_name: file_display_name(input),
+        ensure_parent_dirs: false,
+        input_bytes: input_file_size(input)?,
+        phase_total_samples: total_samples,
+        overall_total_samples: total_samples,
+    })
+}
+
+fn plan_decode_directory_worklist(command: &DecodeCommand) -> Result<PlannedWorklist> {
+    let output_root = match command.output.as_deref() {
+        Some(output_root) => Some(validate_or_create_output_root(
+            CommandKind::Decode,
+            output_root,
+        )?),
+        None => None,
+    };
+    let target_extension = decode_target_extension(command.config.output_container);
+
+    let mut walker = WalkDir::new(&command.input)
+        .follow_links(false)
+        .min_depth(1);
+    if command.depth != 0 {
+        walker = walker.max_depth(command.depth);
+    }
+
+    let mut items = Vec::new();
+    let mut total_samples = 0u64;
+    for entry in walker {
+        let entry = entry.map_err(|error| {
+            CommandKind::Decode
+                .planning_error(CommandKind::Decode.traversal_error(&command.input, &error))
+        })?;
+        if !entry.file_type().is_file() || !has_any_extension(entry.path(), &["flac"]) {
+            continue;
+        }
+
+        let input = entry.path().to_path_buf();
+        let relative = input.strip_prefix(&command.input).map_err(|_| {
+            CommandKind::Decode.planning_error("failed to derive relative input path")
+        })?;
+        let total_for_file = inspect_flac_file_total_samples(&input)?;
+        total_samples = total_samples.checked_add(total_for_file).ok_or_else(|| {
+            CommandKind::Decode
+                .planning_error("total sample count overflowed batch progress accounting")
+        })?;
+        let display_name = relative_display_name(relative);
+        let (output, ensure_parent_dirs) = match output_root.as_deref() {
+            Some(output_root) => (
+                output_root.join(relative).with_extension(target_extension),
+                true,
+            ),
+            None => (input.with_extension(target_extension), false),
+        };
+
+        items.push(ConversionWorkItem {
+            input,
+            output,
+            display_name,
+            ensure_parent_dirs,
+            input_bytes: input_file_size(entry.path())?,
+            phase_total_samples: total_for_file,
+            overall_total_samples: total_for_file,
+        });
+    }
+
+    items.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    Ok(PlannedWorklist {
+        items,
+        total_samples,
+        is_directory: true,
+    })
+}
+
+fn decode_target_extension(container: flacx::PcmContainer) -> &'static str {
+    match container {
+        flacx::PcmContainer::Rf64 => "rf64",
+        flacx::PcmContainer::Wave64 => "w64",
+        flacx::PcmContainer::Aiff => "aiff",
+        flacx::PcmContainer::Aifc => "aifc",
+        flacx::PcmContainer::Caf => "caf",
+        flacx::PcmContainer::Auto | flacx::PcmContainer::Wave => "wav",
     }
 }
 

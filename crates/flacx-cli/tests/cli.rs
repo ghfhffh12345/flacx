@@ -147,6 +147,7 @@ fn decode_help_lists_output_depth_and_threads() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("-o, --output <OUTPUT>"));
+    assert!(stdout.contains("--output-family <OUTPUT_FAMILY>"));
     assert!(stdout.contains("--depth <DEPTH>"));
     assert!(stdout.contains("--mode <MODE>"));
     assert!(stdout.contains("--threads <THREADS>"));
@@ -1531,6 +1532,118 @@ fn decode_directory_without_output_writes_sibling_wavs_at_default_depth() {
     assert!(!input_dir.join("nested").join("deep.wav").exists());
 
     let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_directory_output_family_selector_uses_requested_extension() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_path("outdir");
+    let flac_path = input_dir.join("disc1").join("song.flac");
+    let (wav, _) = write_flac_file(&flac_path, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--output-family",
+            "aiff",
+            "--depth",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_path = output_dir.join("disc1").join("song.aiff");
+    assert!(output_path.exists());
+    let decoded = fs::read(&output_path).unwrap();
+    let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
+    let round_tripped = decode_bytes(&reencoded).unwrap();
+    assert_wav_audio_eq(&round_tripped, &wav);
+
+    let _ = fs::remove_dir_all(input_dir);
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn decode_directory_output_family_selector_without_output_root_uses_sibling_requested_extension() {
+    let input_dir = unique_temp_dir();
+    let flac_path = input_dir.join("disc1").join("song.flac");
+    let (wav, _) = write_flac_file(&flac_path, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "--output-family",
+            "caf",
+            "--depth",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_path = input_dir.join("disc1").join("song.caf");
+    assert!(output_path.exists());
+    let decoded = fs::read(&output_path).unwrap();
+    let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
+    let round_tripped = decode_bytes(&reencoded).unwrap();
+    assert_wav_audio_eq(&round_tripped, &wav);
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_command_rejects_output_family_for_single_file_input() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("song.flac");
+    write_flac_file(&input_path, 1, 1_024);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_path.to_str().unwrap(),
+            "--output-family",
+            "caf",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--output-family is only supported for directory decode")
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_command_rejects_unsupported_output_extension() {
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("raw");
+    write_flac_file(&input_path, 1, 1_024);
+
+    let output = decode_cli_output(&input_path, &output_path, &[]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unsupported decode output extension")
+    );
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
 }
 
 #[test]

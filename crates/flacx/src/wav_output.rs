@@ -1,6 +1,8 @@
 use std::{io::Write, sync::mpsc, thread};
 
 use crate::{
+    aiff_output::{AiffContainer, write_aiff_with_metadata_and_md5},
+    caf_output::write_caf,
     error::{Error, Result},
     input::{
         PcmEnvelope, WavSpec, append_encoded_sample, container_bits_from_valid_bits,
@@ -69,6 +71,31 @@ pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
     metadata: &WavMetadata,
     options: WavMetadataWriteOptions,
 ) -> Result<[u8; 16]> {
+    match options.container {
+        PcmContainer::Aiff => {
+            return write_aiff_with_metadata_and_md5(
+                writer,
+                spec,
+                samples,
+                metadata,
+                AiffContainer::Aiff,
+            );
+        }
+        PcmContainer::Aifc => {
+            return write_aiff_with_metadata_and_md5(
+                writer,
+                spec,
+                samples,
+                metadata,
+                AiffContainer::AifcNone,
+            );
+        }
+        PcmContainer::Caf => {
+            return write_caf(writer, spec, samples, metadata);
+        }
+        _ => {}
+    }
+
     if !(1..=8).contains(&spec.channels) {
         return Err(Error::UnsupportedWav(format!(
             "only the ordinary 1..8 channel envelope is supported, found {} channels",
@@ -164,6 +191,11 @@ pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
             }
             md5
         }
+        PcmContainer::Aiff | PcmContainer::Aifc | PcmContainer::Caf => {
+            unreachable!(
+                "non-RIFF containers should have been dispatched before RIFF writer resolution"
+            )
+        }
         PcmContainer::Auto => unreachable!("auto container should resolve before writing"),
     };
 
@@ -250,6 +282,9 @@ fn resolve_pcm_container(
         }
         PcmContainer::Rf64 => Ok(PcmContainer::Rf64),
         PcmContainer::Wave64 => Ok(PcmContainer::Wave64),
+        PcmContainer::Aiff => Ok(PcmContainer::Aiff),
+        PcmContainer::Aifc => Ok(PcmContainer::Aifc),
+        PcmContainer::Caf => Ok(PcmContainer::Caf),
     }
 }
 

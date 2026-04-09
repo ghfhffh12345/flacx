@@ -434,6 +434,18 @@ pub fn is_w64_bytes(bytes: &[u8]) -> bool {
     bytes.len() >= W64_RIFF_GUID.len() && bytes[..W64_RIFF_GUID.len()] == W64_RIFF_GUID
 }
 
+pub fn is_aiff_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[..4] == b"FORM" && &bytes[8..12] == b"AIFF"
+}
+
+pub fn is_aifc_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[..4] == b"FORM" && &bytes[8..12] == b"AIFC"
+}
+
+pub fn is_caf_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && &bytes[..4] == b"caff"
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsedWavFormat {
     pub format_tag: u16,

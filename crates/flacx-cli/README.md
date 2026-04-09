@@ -20,7 +20,7 @@ Then run `flacx` directly from `target/release/` (or after adding that directory
 ```bash
 flacx encode input.wav -o output.flac --level 8 --threads 4
 flacx encode album-dir -o encoded-album --depth 0
-flacx decode input.flac -o output.wav --threads 4
+flacx decode input.flac -o output.aifc --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
 ```
 
@@ -40,6 +40,7 @@ Directory traversal is controlled by `--depth`.
 ### Flags
 
 - `-o, --output <path>`
+- `--output-family <wave|rf64|w64|aiff|aifc|caf>` (directory decode only)
 - `--level <0-8>`
 - `--threads <n>`
 - `--block-size <samples>`
@@ -95,6 +96,8 @@ flacx encode album-dir -o encoded-album --depth 0
 - Single-file input with `-o <path>` writes to that exact file path.
 - Directory input with no `-o` writes `.wav` siblings next to each discovered FLAC.
 - Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
+- Explicit decode output paths may target `.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, or `.caf`.
+- `--output-family` applies only to directory decode and changes the batch output extension uniformly.
 - `--mode loose` disables `fxmd` capture/emission and disables relaxable validation.
 - `--mode default` preserves the canonical `fxmd v1` behavior and rejects malformed or duplicate `fxmd` payloads.
 - `--mode strict` preserves the canonical `fxmd v1` behavior, enables the relaxable validation set, and rejects malformed or duplicate `fxmd` payloads.
@@ -106,6 +109,8 @@ flacx encode album-dir -o encoded-album --depth 0
 ```bash
 flacx decode input.flac
 flacx decode input.flac -o output.w64 --threads 4
+flacx decode input.flac -o output.caf --threads 4
+flacx decode album-dir -o decoded-album --output-family aiff --depth 0
 flacx decode encoded-album -o decoded-album --depth 0
 flacx decode input.flac --mode loose
 flacx decode input.flac --mode strict

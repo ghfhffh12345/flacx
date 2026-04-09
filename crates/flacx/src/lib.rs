@@ -40,13 +40,13 @@
 //!     .unwrap();
 //! ```
 //!
-//! Decode a FLAC file back to a supported RIFF-family PCM container:
+//! Decode a FLAC file back to a supported PCM container:
 //!
 //! ```no_run
 //! use flacx::Decoder;
 //!
 //! Decoder::default()
-//!     .decode_file("input.flac", "output.wav")
+//!     .decode_file("input.flac", "output.aiff")
 //!     .unwrap();
 //! ```
 //!
@@ -129,13 +129,15 @@
 //!
 //! ## Supported scope
 //!
-//! This crate focuses on the current WAV <-> FLAC conversion and FLAC -> FLAC
-//! recompression surface used by the workspace. The crate documentation
+//! This crate focuses on the current PCM-container <-> FLAC conversion and
+//! FLAC -> FLAC recompression surface used by the workspace. The crate documentation
 //! intentionally stays aligned with the exported API so that docs.rs readers
 //! can use it as the canonical reference.
 
 mod aiff;
+mod aiff_output;
 mod caf;
+mod caf_output;
 mod config;
 mod crc;
 mod decode;

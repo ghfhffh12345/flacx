@@ -1,8 +1,8 @@
-//! FLAC-to-WAV decoding primitives used by the `flacx` crate.
+//! FLAC-to-PCM-container decoding primitives used by the `flacx` crate.
 //!
 //! The main façade is [`Decoder`]. Pair it with [`DecodeConfig`] or
-//! [`Decoder::builder`] to choose worker-thread count and channel-mask
-//! provenance handling before decoding.
+//! [`Decoder::builder`] to choose worker-thread count, output-family, and
+//! channel-mask provenance handling before decoding.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -28,7 +28,7 @@ use crate::progress::CallbackProgress;
 static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Summary of the WAV stream produced by a decode operation.
+/// Summary of the PCM stream produced by a decode operation.
 ///
 /// The values mirror the stream information recovered from the FLAC input.
 pub struct DecodeSummary {
@@ -291,7 +291,7 @@ impl Decoder {
         let output_path = output_path.as_ref();
         let (temp_path, temp_file) = open_temp_output(output_path)?;
         let output_container =
-            output_container_from_path(output_path).unwrap_or(self.config.output_container);
+            output_container_from_path(output_path)?.unwrap_or(self.config.output_container);
 
         let result = (|| {
             let input = File::open(input_path)?;
@@ -314,12 +314,19 @@ impl Decoder {
     }
 }
 
-fn output_container_from_path(path: &Path) -> Option<PcmContainer> {
+fn output_container_from_path(path: &Path) -> Result<Option<PcmContainer>> {
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("rf64") => Some(PcmContainer::Rf64),
-        Some(ext) if ext.eq_ignore_ascii_case("w64") => Some(PcmContainer::Wave64),
-        Some(ext) if ext.eq_ignore_ascii_case("wav") => Some(PcmContainer::Wave),
-        _ => None,
+        Some(ext) if ext.eq_ignore_ascii_case("rf64") => Ok(Some(PcmContainer::Rf64)),
+        Some(ext) if ext.eq_ignore_ascii_case("w64") => Ok(Some(PcmContainer::Wave64)),
+        Some(ext) if ext.eq_ignore_ascii_case("aif") => Ok(Some(PcmContainer::Aiff)),
+        Some(ext) if ext.eq_ignore_ascii_case("aiff") => Ok(Some(PcmContainer::Aiff)),
+        Some(ext) if ext.eq_ignore_ascii_case("aifc") => Ok(Some(PcmContainer::Aifc)),
+        Some(ext) if ext.eq_ignore_ascii_case("caf") => Ok(Some(PcmContainer::Caf)),
+        Some(ext) if ext.eq_ignore_ascii_case("wav") => Ok(Some(PcmContainer::Wave)),
+        Some(ext) => Err(Error::Decode(format!(
+            "unsupported decode output extension '.{ext}'"
+        ))),
+        None => Ok(None),
     }
 }
 
