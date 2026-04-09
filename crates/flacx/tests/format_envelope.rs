@@ -5,7 +5,8 @@ mod support;
 use support::{
     extensible_pcm_wav_bytes, flac_metadata_blocks, ordinary_channel_mask,
     parse_first_flac_frame_header, parse_vorbis_comment_entries, parse_wav_format, pcm_wav_bytes,
-    sample_fixture, wav_chunk_payloads, wav_data_bytes,
+    rf64_extensible_pcm_wav_bytes, rf64_from_wav_bytes, rf64_pcm_wav_bytes, sample_fixture,
+    w64_extensible_pcm_wav_bytes, w64_pcm_wav_bytes, wav_chunk_payloads, wav_data_bytes,
 };
 
 #[test]
@@ -194,4 +195,90 @@ fn round_trips_zero_channel_mask_via_rfc_vorbis_comment() {
     assert_eq!(decoded_format.format_tag, 0xFFFE);
     assert_eq!(decoded_format.channel_mask, Some(0));
     assert_eq!(wav_chunk_payloads(&decoded, *b"fxmd").len(), 1);
+}
+
+#[test]
+fn round_trips_rf64_pcm_input_through_existing_encode_path() {
+    let samples = sample_fixture(2, 2_048);
+    let rf64 = rf64_pcm_wav_bytes(16, 2, 44_100, &samples);
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&rf64)
+        .unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+    let decoded_format = parse_wav_format(&decoded);
+
+    assert_eq!(
+        wav_data_bytes(&decoded),
+        wav_data_bytes(&pcm_wav_bytes(16, 2, 44_100, &samples))
+    );
+    assert_eq!(decoded_format.format_tag, 1);
+    assert_eq!(decoded_format.channels, 2);
+    assert_eq!(decoded_format.bits_per_sample, 16);
+}
+
+#[test]
+fn round_trips_rf64_extensible_multichannel_pcm() {
+    let samples = sample_fixture(4, 1_024);
+    let mask = ordinary_channel_mask(4).unwrap();
+    let rf64 = rf64_extensible_pcm_wav_bytes(20, 24, 4, 48_000, mask, &samples);
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&rf64)
+        .unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+    let decoded_format = parse_wav_format(&decoded);
+
+    assert_eq!(
+        wav_data_bytes(&decoded),
+        wav_data_bytes(&extensible_pcm_wav_bytes(20, 24, 4, 48_000, mask, &samples))
+    );
+    assert_eq!(decoded_format.format_tag, 0xFFFE);
+    assert_eq!(decoded_format.channels, 4);
+    assert_eq!(decoded_format.valid_bits_per_sample, Some(20));
+    assert_eq!(decoded_format.channel_mask, Some(mask));
+}
+
+#[test]
+fn rejects_malformed_rf64_missing_ds64() {
+    let samples = sample_fixture(2, 256);
+    let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
+    let mut rf64 = rf64_from_wav_bytes(&wav, 256);
+    rf64.drain(12..48);
+
+    let error = Encoder::default().encode_bytes(&rf64).unwrap_err();
+    assert!(error.to_string().contains("ds64"));
+}
+
+#[test]
+fn round_trips_w64_pcm_input_through_existing_encode_path() {
+    let samples = sample_fixture(2, 2_048);
+    let w64 = w64_pcm_wav_bytes(16, 2, 44_100, &samples);
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&w64)
+        .unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+
+    assert_eq!(
+        wav_data_bytes(&decoded),
+        wav_data_bytes(&pcm_wav_bytes(16, 2, 44_100, &samples))
+    );
+}
+
+#[test]
+fn round_trips_w64_extensible_multichannel_pcm() {
+    let samples = sample_fixture(3, 1_024);
+    let mask = ordinary_channel_mask(3).unwrap();
+    let w64 = w64_extensible_pcm_wav_bytes(20, 24, 3, 48_000, mask, &samples);
+    let flac = Encoder::new(EncoderConfig::default().with_threads(2))
+        .encode_bytes(&w64)
+        .unwrap();
+    let decoded = decode_bytes(&flac).unwrap();
+    let decoded_format = parse_wav_format(&decoded);
+
+    assert_eq!(
+        wav_data_bytes(&decoded),
+        wav_data_bytes(&extensible_pcm_wav_bytes(20, 24, 3, 48_000, mask, &samples))
+    );
+    assert_eq!(decoded_format.format_tag, 0xFFFE);
+    assert_eq!(decoded_format.channels, 3);
+    assert_eq!(decoded_format.valid_bits_per_sample, Some(20));
 }

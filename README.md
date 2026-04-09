@@ -1,6 +1,6 @@
 # flacx workspace
 
-High-performance WAV/FLAC conversion and FLAC recompression in Rust.
+High-performance PCM-container/FLAC conversion and FLAC recompression in Rust.
 
 > Warning: flacx is still experimental; APIs, CLI flags, and metadata details may change without notice.
 
@@ -33,7 +33,7 @@ Add the library crate to your project:
 flacx = "0.8.2"
 ```
 
-Then encode WAV to FLAC from Rust:
+Then encode a supported PCM container to FLAC from Rust:
 
 ```rust
 use flacx::{Encoder, EncoderConfig, level::Level};
@@ -48,7 +48,7 @@ Encoder::new(config)
     .unwrap();
 ```
 
-And decode FLAC back to WAV:
+And decode FLAC back to a supported PCM container:
 
 ```rust
 use flacx::Decoder;
@@ -94,8 +94,8 @@ Supported CLI shape:
 
 Encode/decode defaults and folder behavior:
 
-- single-file input with no `-o` writes a sibling `.flac` next to the source WAV
-- folder input with no `-o` writes `.flac` siblings next to each discovered WAV
+- single-file input with no `-o` writes a sibling `.flac` next to the source PCM container
+- folder input with no `-o` writes `.flac` siblings next to each discovered `.wav`, `.rf64`, or `.w64`
 - folder input with `-o <dir>` preserves relative subpaths under the destination root
 - decode single-file input with no `-o` writes a sibling `.wav` next to the source FLAC
 - decode folder input with no `-o` writes `.wav` siblings next to each discovered FLAC

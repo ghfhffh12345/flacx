@@ -33,9 +33,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Encode a supported WAV file to FLAC.
+    /// Encode a supported PCM container (`.wav`, `.rf64`, `.w64`) to FLAC.
     Encode(EncodeArgs),
-    /// Decode a supported FLAC file to WAV.
+    /// Decode a supported FLAC file to `.wav`, `.rf64`, or `.w64`.
     Decode(DecodeArgs),
     /// Recompress a supported FLAC file to a new FLAC.
     Recompress(RecompressArgs),
@@ -50,7 +50,7 @@ enum ModePreset {
 
 #[derive(Debug, Args)]
 struct EncodeArgs {
-    /// Input WAV path.
+    /// Input PCM-container path (`.wav`, `.rf64`, or `.w64`).
     input: std::path::PathBuf,
     /// Output FLAC path for a single file, or destination directory for a folder input.
     #[arg(short, long)]
@@ -76,7 +76,7 @@ struct EncodeArgs {
 struct DecodeArgs {
     /// Input FLAC path.
     input: std::path::PathBuf,
-    /// Output WAV path for a single file, or destination directory for a folder input.
+    /// Output PCM-container path for a single file, or destination directory for a folder input.
     #[arg(short, long)]
     output: Option<std::path::PathBuf>,
     /// Number of decoding threads.

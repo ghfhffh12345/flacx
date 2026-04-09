@@ -139,6 +139,7 @@ mod input;
 mod md5;
 mod metadata;
 mod model;
+mod pcm;
 mod plan;
 mod progress;
 mod read;
@@ -155,6 +156,7 @@ pub use config::{DecodeBuilder, DecodeConfig, EncoderBuilder, EncoderConfig};
 pub use decode::{DecodeSummary, Decoder, decode_bytes, decode_file};
 pub use encoder::{EncodeSummary, Encoder, encode_bytes, encode_file};
 pub use error::{Error, Result};
+pub use pcm::PcmContainer;
 pub use recompress::{
     RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress,
     Recompressor, recompress_bytes, recompress_file,

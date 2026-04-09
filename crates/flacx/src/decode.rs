@@ -15,6 +15,7 @@ use crate::{
     config::{DecodeBuilder, DecodeConfig},
     error::{Error, Result},
     md5::verify_streaminfo_digest,
+    pcm::PcmContainer,
     progress::{NoProgress, ProgressSink},
     read::read_flac_for_decode,
     stream_info::StreamInfo,
@@ -241,14 +242,30 @@ impl Decoder {
         W: Write + Seek,
         P: ProgressSink,
     {
+        self.decode_into_with_container(input, &mut output, progress, self.config.output_container)
+    }
+
+    fn decode_into_with_container<R, W, P>(
+        &self,
+        input: R,
+        output: &mut W,
+        progress: &mut P,
+        output_container: PcmContainer,
+    ) -> Result<DecodeSummary>
+    where
+        R: Read + Seek,
+        W: Write + Seek,
+        P: ProgressSink,
+    {
         let decoded = read_flac_for_decode(input, self.config, progress)?;
         let streaminfo_md5 = write_wav_with_metadata_and_md5_with_options(
-            &mut output,
+            output,
             decoded.wav.spec,
             &decoded.wav.samples,
             &decoded.metadata,
             WavMetadataWriteOptions {
                 emit_fxmd: self.config.emit_fxmd,
+                container: output_container,
             },
         )?;
         verify_streaminfo_digest(streaminfo_md5, decoded.stream_info.md5)?;
@@ -273,10 +290,13 @@ impl Decoder {
         let input_path = input_path.as_ref();
         let output_path = output_path.as_ref();
         let (temp_path, temp_file) = open_temp_output(output_path)?;
+        let output_container = output_container_from_path(output_path)
+            .unwrap_or(self.config.output_container);
 
         let result = (|| {
             let input = File::open(input_path)?;
-            self.decode_into(input, temp_file, progress)
+            let mut temp_file = temp_file;
+            self.decode_into_with_container(input, &mut temp_file, progress, output_container)
         })();
         match result {
             Ok(summary) => {
@@ -291,6 +311,15 @@ impl Decoder {
                 Err(error)
             }
         }
+    }
+}
+
+fn output_container_from_path(path: &Path) -> Option<PcmContainer> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("rf64") => Some(PcmContainer::Rf64),
+        Some(ext) if ext.eq_ignore_ascii_case("w64") => Some(PcmContainer::Wave64),
+        Some(ext) if ext.eq_ignore_ascii_case("wav") => Some(PcmContainer::Wave),
+        _ => None,
     }
 }
 

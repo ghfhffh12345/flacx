@@ -4,7 +4,10 @@ use std::{
     process::{Command, Output},
 };
 
-use flacx::{DecodeConfig, Encoder, EncoderConfig, RecompressConfig, Recompressor, level::Level};
+use flacx::{
+    DecodeConfig, Encoder, EncoderConfig, RecompressConfig, Recompressor, decode_bytes,
+    level::Level,
+};
 use flacx_cli::{
     DecodeCommand, EncodeCommand, RecompressCommand, decode_command, encode_command,
     recompress_command,
@@ -15,8 +18,8 @@ mod support;
 
 use support::{
     cuesheet_block, extensible_pcm_wav_bytes, pcm_wav_bytes, raw_seektable_block,
-    replace_flac_optional_metadata, sample_fixture, unique_temp_path, vorbis_comment_block,
-    wav_chunk_payloads, wav_data_bytes,
+    replace_flac_optional_metadata, rf64_pcm_wav_bytes, sample_fixture, unique_temp_path,
+    vorbis_comment_block, w64_pcm_wav_bytes, wav_chunk_payloads, wav_data_bytes,
 };
 
 fn flacx_bin() -> &'static str {
@@ -36,6 +39,13 @@ fn write_wav_file(path: &Path, channels: u16, frames: usize) -> Vec<u8> {
     }
     fs::write(path, &wav).unwrap();
     wav
+}
+
+fn write_bytes_file(path: &Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, bytes).unwrap();
 }
 
 fn write_flac_file(path: &Path, channels: u16, frames: usize) -> (Vec<u8>, Vec<u8>) {
@@ -793,6 +803,31 @@ fn encode_directory_skips_non_wav_files() {
 }
 
 #[test]
+fn encode_directory_accepts_rf64_and_w64_inputs() {
+    let input_dir = unique_temp_dir();
+    let rf64_path = input_dir.join("keep-rf64.rf64");
+    let w64_path = input_dir.join("keep-w64.w64");
+    write_bytes_file(
+        &rf64_path,
+        &rf64_pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
+    );
+    write_bytes_file(
+        &w64_path,
+        &w64_pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
+    );
+
+    let output = Command::new(flacx_bin())
+        .args(["encode", input_dir.to_str().unwrap(), "--threads", "1"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(input_dir.join("keep-rf64.flac").exists());
+    assert!(input_dir.join("keep-w64.flac").exists());
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
 fn encode_directory_rejects_output_file_path() {
     let input_dir = unique_temp_dir();
     let output_path = unique_temp_path("flac");
@@ -875,6 +910,31 @@ fn decode_command_accepts_threads_and_round_trips_exact_wav_bytes() {
         let _ = fs::remove_file(input_path);
         let _ = fs::remove_file(output_path);
     }
+}
+
+#[test]
+fn decode_command_can_emit_wave64_via_output_extension() {
+    let samples = sample_fixture(1, 2_048);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("w64");
+    fs::write(&input_path, &flac).unwrap();
+
+    let output = decode_cli_output(&input_path, &output_path, &[]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let decoded = fs::read(&output_path).unwrap();
+    let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
+    let round_tripped = decode_bytes(&reencoded).unwrap();
+    assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
 }
 
 #[test]

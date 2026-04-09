@@ -1,6 +1,6 @@
 # flacx-cli
 
-`flacx-cli` is the workspace command-line interface for WAV/FLAC conversion and
+`flacx-cli` is the workspace command-line interface for PCM-container/FLAC conversion and
 FLAC recompression.
 It uses the same encode/decode pipeline as the `flacx` library crate and is
 kept separate from the publishable library package.
@@ -55,9 +55,9 @@ Directory traversal is controlled by `--depth`.
 - `--depth` defaults to `1`.
 - `--depth` only affects directory input.
 - Use `--depth 0` for unlimited recursive traversal.
-- Single-file input with no `-o` writes a sibling `.flac` next to the source WAV.
+- Single-file input with no `-o` writes a sibling `.flac` next to the source PCM container.
 - Single-file input with `-o <path>` writes to that exact file path.
-- Directory input with no `-o` writes `.flac` siblings next to each discovered WAV.
+- Directory input with no `-o` writes `.flac` siblings next to each discovered `.wav`, `.rf64`, or `.w64`.
 - Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
 - For single-file input, `-o` must be a file path.
 - For directory input, `-o` must be a directory path.
@@ -66,7 +66,7 @@ Directory traversal is controlled by `--depth`.
 
 ```bash
 flacx encode input.wav
-flacx encode input.wav -o output.flac --level 8 --threads 4
+flacx encode input.w64 -o output.flac --level 8 --threads 4
 flacx encode album-dir -o encoded-album --depth 0
 ```
 
@@ -101,7 +101,7 @@ flacx encode album-dir -o encoded-album --depth 0
 
 ```bash
 flacx decode input.flac
-flacx decode input.flac -o output.wav --threads 4
+flacx decode input.flac -o output.w64 --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
 flacx decode input.flac --mode loose
 flacx decode input.flac --mode strict
