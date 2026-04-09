@@ -745,11 +745,11 @@ mod tests {
         vec![0x66, 0x78, 0x6d]
     }
 
-    fn valid_fxmd_chunk(version: u16) -> Vec<u8> {
+    fn fxmd_chunk(version: u16, flags: u16) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(b"fxmd");
         payload.extend_from_slice(&version.to_le_bytes());
-        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&flags.to_le_bytes());
         payload.extend_from_slice(&1u32.to_le_bytes());
         payload.extend_from_slice(&1u32.to_le_bytes());
         payload.extend_from_slice(&1u32.to_le_bytes());
@@ -963,24 +963,24 @@ mod tests {
     }
 
     #[test]
-    fn read_wav_for_encode_rejects_legacy_fxmd_chunks_by_default() {
+    fn read_wav_for_encode_rejects_unsupported_fxmd_header_flags_by_default() {
         let wav = with_chunks(
             pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
-            &[(*b"fxmd", valid_fxmd_chunk(1))],
+            &[(*b"fxmd", fxmd_chunk(1, 0))],
         );
 
         let error = read_wav_for_encode_with_config(Cursor::new(wav), &EncoderConfig::default())
             .unwrap_err();
 
-        assert!(error.to_string().contains("version is unsupported"));
+        assert!(error.to_string().contains("flags are unsupported"));
     }
 
     #[test]
-    fn read_wav_for_encode_leniently_ignores_legacy_fxmd_chunks_when_validation_is_disabled() {
+    fn read_wav_for_encode_leniently_ignores_unsupported_fxmd_header_flags() {
         let wav = with_chunks(
             pcm_wav_bytes(16, 1, 44_100, &[0, 1, 2, 3]),
             &[
-                (*b"fxmd", valid_fxmd_chunk(1)),
+                (*b"fxmd", fxmd_chunk(1, 0)),
                 (*b"LIST", info_list_chunk(&[(*b"IART", b"Example Artist")])),
             ],
         );

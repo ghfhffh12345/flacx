@@ -5,10 +5,9 @@ use flacx::{Encoder, EncoderConfig, decode_bytes};
 mod support;
 
 use support::{
-    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, application_block, cue_chunk,
-    decode_with_ffmpeg, flac_metadata_blocks, info_list_chunk, legacy_fxmd_v1_payload,
-    parse_first_flac_frame_header, parse_wav_format, pcm_wav_bytes, picture_block, sample_fixture,
-    vorbis_comments, wav_data_bytes, wav_with_chunks,
+    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, decode_with_ffmpeg,
+    flac_metadata_blocks, info_list_chunk, parse_first_flac_frame_header, parse_wav_format,
+    pcm_wav_bytes, sample_fixture, vorbis_comments, wav_data_bytes, wav_with_chunks,
 };
 
 #[test]
@@ -285,10 +284,7 @@ fn preserves_metadata_deterministically_across_thread_counts() {
 fn legacy_fxvc_fxcs_chunks_are_ignored_like_unknown_wav_chunks() {
     let wav = wav_with_chunks(
         pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
-        &[
-            (*b"fxvc", vec![1, 2, 3, 4]),
-            (*b"fxcs", vec![5, 6, 7, 8]),
-        ],
+        &[(*b"fxvc", vec![1, 2, 3, 4]), (*b"fxcs", vec![5, 6, 7, 8])],
     );
 
     let flac = Encoder::new(EncoderConfig::default().with_threads(2))
@@ -306,49 +302,6 @@ fn legacy_fxvc_fxcs_chunks_are_ignored_like_unknown_wav_chunks() {
 
     assert!(!reencoded_blocks.iter().any(|block| block.block_type == 4));
     assert!(!reencoded_blocks.iter().any(|block| block.block_type == 5));
-}
-
-#[test]
-fn rejects_legacy_fxmd_v1_in_exact_modes_and_ignores_it_in_loose_mode() {
-    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
-    let legacy_fxmd = legacy_fxmd_v1_payload(&[
-        application_block(b"legacy-application"),
-        picture_block("image/png", "legacy cover", 1, 1, 24, 0, &[0x89, 0x50, 0x4E, 0x47]),
-    ]);
-    let wav = wav_with_chunks(wav, &[(*b"fxmd", legacy_fxmd.clone())]);
-
-    let default_error = Encoder::new(EncoderConfig::default())
-        .encode_bytes(&wav)
-        .unwrap_err();
-    assert!(
-        default_error
-            .to_string()
-            .contains("fxmd payload version is unsupported")
-    );
-
-    let strict_error = Encoder::new(
-        EncoderConfig::default()
-            .with_capture_fxmd(true)
-            .with_strict_fxmd_validation(true),
-    )
-    .encode_bytes(&wav)
-    .unwrap_err();
-    assert!(
-        strict_error
-            .to_string()
-            .contains("fxmd payload version is unsupported")
-    );
-
-    let loose_flac = Encoder::new(
-        EncoderConfig::default()
-            .with_capture_fxmd(false)
-            .with_strict_fxmd_validation(false),
-    )
-    .encode_bytes(&wav)
-    .unwrap();
-    let loose_blocks = flac_metadata_blocks(&loose_flac);
-    assert!(!loose_blocks.iter().any(|block| block.block_type == 2));
-    assert!(!loose_blocks.iter().any(|block| block.block_type == 6));
 }
 
 #[test]

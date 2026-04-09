@@ -5,6 +5,8 @@ FLAC recompression.
 It uses the same encode/decode pipeline as the `flacx` library crate and is
 kept separate from the publishable library package.
 
+> Warning: flacx-cli is still experimental. The current `fxmd` layout is canonical `v1`; mode presets only adjust capture/emission and validation around that format.
+
 ## Run it locally
 
 Build the release binary from the workspace root:
@@ -92,9 +94,9 @@ flacx encode album-dir -o encoded-album --depth 0
 - Single-file input with `-o <path>` writes to that exact file path.
 - Directory input with no `-o` writes `.wav` siblings next to each discovered FLAC.
 - Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
-- `--mode loose` treats `fxmd` as unknown in both directions and disables relaxable validation.
-- `--mode default` preserves current `fxmd` behavior and rejects malformed, duplicate, or legacy-version `fxmd` payloads.
-- `--mode strict` preserves current `fxmd` behavior and enables the relaxable validation set while also rejecting malformed, duplicate, or legacy-version `fxmd` payloads.
+- `--mode loose` disables `fxmd` capture/emission and disables relaxable validation.
+- `--mode default` preserves the canonical `fxmd v1` behavior and rejects malformed or duplicate `fxmd` payloads.
+- `--mode strict` preserves the canonical `fxmd v1` behavior, enables the relaxable validation set, and rejects malformed or duplicate `fxmd` payloads.
 - For single-file input, `-o` must be a file path.
 - For directory input, `-o` must be a directory path.
 
