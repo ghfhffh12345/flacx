@@ -56,7 +56,7 @@ let encode_summary = encoder.encode_file("input.w64", "output.flac").unwrap();
 assert!(encode_summary.total_samples > 0);
 
 let decoder = Decoder::default();
-let decode_summary = decoder.decode_file("output.flac", "roundtrip.rf64").unwrap();
+let decode_summary = decoder.decode_file("output.flac", "roundtrip.aiff").unwrap();
 assert_eq!(encode_summary.total_samples, decode_summary.total_samples);
 ```
 
@@ -122,7 +122,7 @@ the current machine’s available parallelism.
 
 - `threads` sets the worker count
 - `emit_fxmd` controls whether decode output writes the private `fxmd` preservation chunk
-- `output_container` selects `Auto`, `Wave`, `Rf64`, or `Wave64`
+- `output_container` selects `Auto`, `Wave`, `Rf64`, `Wave64`, `Aiff`, `Aifc`, or `Caf`
 - `strict_channel_mask_provenance` requires explicit provenance before the
   decoder restores non-ordinary channel masks
 - `strict_seektable_validation` turns malformed `SEEKTABLE` metadata from a
@@ -345,7 +345,7 @@ progress UI.
 
 - RIFF/WAVE, RF64, Wave64, AIFF, bounded AIFC, and bounded CAF PCM-to-FLAC encoding
 - explicit raw signed-integer PCM-to-FLAC encoding via `RawPcmDescriptor`
-- FLAC-to-WAVE / RF64 / Wave64 decoding
+- FLAC-to-WAVE / RF64 / Wave64 / AIFF / AIFC `NONE` / CAF decoding
 - file-based input/output
 - in-memory byte helpers
 - sample-count inspection
@@ -361,7 +361,7 @@ Out of scope for the current crate:
 - metadata editing
 - non-seekable streaming APIs
 - broader transcoding beyond PCM-container ↔ FLAC
-- later non-RIFF-family rollout stages beyond the current CAF/raw ingest slice
+- raw PCM output and any broader post-Stage-4 family work remain explicitly out of scope
 
 ## Workspace note
 

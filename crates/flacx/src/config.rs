@@ -206,7 +206,7 @@ impl EncoderBuilder {
 pub struct DecodeConfig {
     /// Number of worker threads the decoder may use.
     pub threads: usize,
-    /// Whether to emit the private `fxmd` WAV chunk when metadata is preserved during decode.
+    /// Whether to emit the private `fxmd` chunk when RIFF-family metadata is preserved during decode.
     pub emit_fxmd: bool,
     /// Which PCM container family to emit for decoded output.
     pub output_container: PcmContainer,
@@ -263,7 +263,7 @@ impl DecodeConfig {
         self
     }
 
-    /// Enable or disable `fxmd` emission in decoded WAV output.
+    /// Enable or disable `fxmd` emission in decoded RIFF-family output.
     #[must_use]
     pub fn with_emit_fxmd(mut self, emit: bool) -> Self {
         self.emit_fxmd = emit;
@@ -318,7 +318,7 @@ impl DecodeBuilder {
         self
     }
 
-    /// Enable or disable `fxmd` emission in decoded WAV output.
+    /// Enable or disable `fxmd` emission in decoded RIFF-family output.
     #[must_use]
     pub fn emit_fxmd(mut self, emit: bool) -> Self {
         self.config = self.config.with_emit_fxmd(emit);

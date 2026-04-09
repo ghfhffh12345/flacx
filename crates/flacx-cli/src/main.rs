@@ -38,7 +38,7 @@ struct Cli {
 enum Commands {
     /// Encode a supported PCM container (`.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, `.caf`) or explicit raw PCM to FLAC.
     Encode(EncodeArgs),
-    /// Decode a supported FLAC file to `.wav`, `.rf64`, or `.w64`.
+    /// Decode a supported FLAC file to `.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, or `.caf`.
     Decode(DecodeArgs),
     /// Recompress a supported FLAC file to a new FLAC.
     Recompress(RecompressArgs),
@@ -55,6 +55,16 @@ enum ModePreset {
 enum RawByteOrderArg {
     Le,
     Be,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DecodeOutputFamilyArg {
+    Wave,
+    Rf64,
+    W64,
+    Aiff,
+    Aifc,
+    Caf,
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +119,9 @@ struct DecodeArgs {
     /// Output PCM-container path for a single file, or destination directory for a folder input.
     #[arg(short, long)]
     output: Option<std::path::PathBuf>,
+    /// Explicit output family for directory decode. Single-file decode still prefers explicit output-path extensions.
+    #[arg(long, value_enum)]
+    output_family: Option<DecodeOutputFamilyArg>,
     /// Number of decoding threads.
     #[arg(long)]
     threads: Option<usize>,
@@ -250,6 +263,22 @@ fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(threads) = args.threads {
         config = config.with_threads(threads);
     }
+    if let Some(output_family) = args.output_family {
+        if args.input.is_file() {
+            return Err(
+                "--output-family is only supported for directory decode; use an explicit output path extension for single-file decode"
+                    .into(),
+            );
+        }
+        config = config.with_output_container(match output_family {
+            DecodeOutputFamilyArg::Wave => flacx::PcmContainer::Wave,
+            DecodeOutputFamilyArg::Rf64 => flacx::PcmContainer::Rf64,
+            DecodeOutputFamilyArg::W64 => flacx::PcmContainer::Wave64,
+            DecodeOutputFamilyArg::Aiff => flacx::PcmContainer::Aiff,
+            DecodeOutputFamilyArg::Aifc => flacx::PcmContainer::Aifc,
+            DecodeOutputFamilyArg::Caf => flacx::PcmContainer::Caf,
+        });
+    }
 
     let interactive = io::stderr().is_terminal();
     enforce_interactive_mode(interactive, interactive_required())?;
@@ -344,8 +373,8 @@ fn enforce_interactive_mode(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, ModePreset, RawByteOrderArg, apply_decode_mode, apply_encode_mode,
-        enforce_interactive_mode, recompress_mode,
+        Cli, Commands, DecodeOutputFamilyArg, ModePreset, RawByteOrderArg, apply_decode_mode,
+        apply_encode_mode, enforce_interactive_mode, recompress_mode,
     };
     use clap::Parser;
 
@@ -461,6 +490,26 @@ mod tests {
                 assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
                 assert_eq!(args.output, Some(std::path::PathBuf::from("out-dir")));
                 assert_eq!(args.depth, 0);
+            }
+            _ => panic!("expected decode command"),
+        }
+    }
+
+    #[test]
+    fn decode_command_parses_output_family() {
+        let cli = Cli::parse_from([
+            "flacx",
+            "decode",
+            "albums",
+            "-o",
+            "out-dir",
+            "--output-family",
+            "caf",
+        ]);
+
+        match cli.command {
+            Commands::Decode(args) => {
+                assert_eq!(args.output_family, Some(DecodeOutputFamilyArg::Caf));
             }
             _ => panic!("expected decode command"),
         }

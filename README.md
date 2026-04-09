@@ -73,7 +73,7 @@ Then run `flacx` directly from `target/release/` (or after adding that directory
 ```bash
 flacx encode input.wav -o output.flac --level 8 --threads 4
 flacx encode album-dir -o encoded-album --depth 0
-flacx decode input.flac -o output.wav --threads 4
+flacx decode input.flac -o output.aiff --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
 ```
 
@@ -100,9 +100,12 @@ Encode/decode defaults and folder behavior:
 - decode single-file input with no `-o` writes a sibling `.wav` next to the source FLAC
 - decode folder input with no `-o` writes `.wav` siblings next to each discovered FLAC
 - decode folder input with `-o <dir>` preserves relative subpaths under the destination root
+- decode explicit output paths may target `.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, or `.caf`
+- decode directory output-family overrides are explicit; without a selector, batch output still defaults to `.wav`
 - `--depth` defaults to `1`, affects directory input only, and uses `0` for unlimited traversal
 - encode `--threads` defaults to `8`
 - raw PCM encode is explicit-only via `--raw` plus descriptor flags; generic `.raw` / `.pcm` files are not auto-discovered
+- raw PCM remains ingest-only and is not a decode/output family
 
 Progress display:
 

@@ -9,6 +9,9 @@ pub enum PcmContainer {
     Wave,
     Rf64,
     Wave64,
+    Aiff,
+    Aifc,
+    Caf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
