@@ -22,9 +22,6 @@ flacx encode input.wav -o output.flac --level 8 --threads 4
 flacx encode album-dir -o encoded-album --depth 0
 flacx decode input.flac -o output.wav --threads 4
 flacx decode encoded-album -o decoded-album --depth 0
-flacx recompress input.flac -o input.recompressed.flac --level 0 --threads 4
-flacx recompress input.flac --in-place --level 0 --threads 4
-flacx recompress album-dir -o recompressed-album --depth 0
 ```
 
 ## Command model
