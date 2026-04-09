@@ -68,8 +68,11 @@ Why first: current `input.rs` and `wav_output.rs` are already RIFF/WAVE-shaped, 
 - complete cross-container round-trip and rejection-path verification
 
 ### Stage 5 — Remainder pass
-- audit any still-missing qualifying PCM container/envelope families
-- close remaining gaps without widening into non-PCM or lossy territory
+- create a concrete remainder register for all post-Stage-4 candidate gaps
+- seed the register with grounded asymmetry questions such as raw-output symmetry and AIFC `sowt` output symmetry
+- classify every candidate as `supported`, `close-now`, `defer`, or `reject`
+- implement only grounded `close-now` items that preserve the exact FLAC boundary
+- close the stage when the register is fully classified and no unclassified candidates remain
 
 ## Definition of done for planning
 
