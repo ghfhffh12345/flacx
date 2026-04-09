@@ -3,6 +3,7 @@ use std::{
     env, fs,
     path::PathBuf,
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -332,7 +333,8 @@ pub fn parse_fxmd_chunk_payload(payload: &[u8]) -> ParsedFxmdChunk {
         offset += 2; // reserved
         let ordinal = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
         offset += 4;
-        let blob_index = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+        let blob_index =
+            u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         records.push(ParsedFxmdRecord {
             block_type,
@@ -540,27 +542,6 @@ pub fn picture_block(
     }
 }
 
-pub fn legacy_fxmd_v1_payload(blocks: &[ParsedMetadataBlock]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(b"fxmd");
-    payload.extend_from_slice(&1u16.to_le_bytes());
-    payload.extend_from_slice(&0u16.to_le_bytes());
-    payload.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
-    payload.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
-    for block in blocks {
-        payload.extend_from_slice(&(block.payload.len() as u32).to_le_bytes());
-        payload.extend_from_slice(&block.payload);
-    }
-    for (ordinal, block) in blocks.iter().enumerate() {
-        payload.push(block.block_type);
-        payload.push(0);
-        payload.extend_from_slice(&0u16.to_le_bytes());
-        payload.extend_from_slice(&(ordinal as u32).to_le_bytes());
-        payload.extend_from_slice(&(ordinal as u32).to_le_bytes());
-    }
-    payload
-}
-
 pub fn wav_info_entries(wav_bytes: &[u8]) -> Vec<([u8; 4], String)> {
     let mut entries = Vec::new();
     for (chunk_id, payload) in wav_chunks(wav_bytes) {
@@ -702,14 +683,17 @@ pub fn parse_seektable_entries(payload: &[u8]) -> Vec<(u64, u64, u16)> {
 }
 
 pub fn unique_temp_path(extension: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     env::temp_dir().join(format!(
-        "flacx-test-{}-{}.{}",
+        "flacx-test-{}-{}-{}.{}",
         std::process::id(),
         timestamp,
+        unique,
         extension
     ))
 }

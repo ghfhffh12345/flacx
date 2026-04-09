@@ -2,6 +2,8 @@
 
 High-performance WAV/FLAC conversion and FLAC recompression in Rust.
 
+> Warning: flacx is still experimental; APIs, CLI flags, and metadata details may change without notice.
+
 This repository is a Cargo workspace with two user-facing crates:
 
 - `crates/flacx` — the publishable library crate
