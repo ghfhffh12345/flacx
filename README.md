@@ -95,13 +95,14 @@ Supported CLI shape:
 Encode/decode defaults and folder behavior:
 
 - single-file input with no `-o` writes a sibling `.flac` next to the source PCM container
-- folder input with no `-o` writes `.flac` siblings next to each discovered `.wav`, `.rf64`, or `.w64`
+- folder input with no `-o` writes `.flac` siblings next to each discovered `.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, or `.caf`
 - folder input with `-o <dir>` preserves relative subpaths under the destination root
 - decode single-file input with no `-o` writes a sibling `.wav` next to the source FLAC
 - decode folder input with no `-o` writes `.wav` siblings next to each discovered FLAC
 - decode folder input with `-o <dir>` preserves relative subpaths under the destination root
 - `--depth` defaults to `1`, affects directory input only, and uses `0` for unlimited traversal
 - encode `--threads` defaults to `8`
+- raw PCM encode is explicit-only via `--raw` plus descriptor flags; generic `.raw` / `.pcm` files are not auto-discovered
 
 Progress display:
 

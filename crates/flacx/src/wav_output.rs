@@ -20,8 +20,7 @@ const PCM_SUBFORMAT_GUID: [u8; 16] = [
 ];
 const RF64_PLACEHOLDER_SIZE: u32 = 0xFFFF_FFFF;
 const W64_RIFF_GUID: [u8; 16] = [
-    0x72, 0x69, 0x66, 0x66, 0x2E, 0x91, 0xCF, 0x11, 0xA5, 0xD6, 0x28, 0xDB, 0x04, 0xC1, 0x00,
-    0x00,
+    0x72, 0x69, 0x66, 0x66, 0x2E, 0x91, 0xCF, 0x11, 0xA5, 0xD6, 0x28, 0xDB, 0x04, 0xC1, 0x00, 0x00,
 ];
 const W64_CHUNK_GUID_SUFFIX: [u8; 12] = [
     0xF3, 0xAC, 0xD3, 0x11, 0x8C, 0xD1, 0x00, 0xC0, 0x4F, 0x8E, 0xDB, 0x8A,
@@ -134,8 +133,12 @@ pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
         use_canonical_pcm,
     );
     let metadata_chunks = wav_metadata_chunks(metadata, options.emit_fxmd);
-    let resolved_container =
-        resolve_pcm_container(options.container, fmt_payload.len(), &metadata_chunks, data_bytes)?;
+    let resolved_container = resolve_pcm_container(
+        options.container,
+        fmt_payload.len(),
+        &metadata_chunks,
+        data_bytes,
+    )?;
 
     let streaminfo_md5 = match resolved_container {
         PcmContainer::Wave => {
@@ -201,9 +204,7 @@ fn wav_metadata_chunks(metadata: &WavMetadata, emit_fxmd: bool) -> Vec<([u8; 4],
         return Vec::new();
     }
     let mut chunks = Vec::new();
-    if emit_fxmd
-        && let Some(payload) = metadata.unified_chunk_payload()
-    {
+    if emit_fxmd && let Some(payload) = metadata.unified_chunk_payload() {
         chunks.push((FXMD_CHUNK_ID, payload));
     }
     if let Some(payload) = metadata.list_info_chunk_payload() {
@@ -266,8 +267,8 @@ fn write_wave_header_and_chunks<W: Write>(
             .sum::<u64>()
         + 8
         + data_bytes;
-    let riff_size =
-        u32::try_from(riff_size).map_err(|_| Error::UnsupportedWav("RIFF output exceeds 4 GiB".into()))?;
+    let riff_size = u32::try_from(riff_size)
+        .map_err(|_| Error::UnsupportedWav("RIFF output exceeds 4 GiB".into()))?;
 
     writer.write_all(b"RIFF")?;
     writer.write_all(&riff_size.to_le_bytes())?;
@@ -437,9 +438,9 @@ fn write_sample_bytes<W: Write>(
 #[cfg(test)]
 mod tests {
     use crate::{
+        PcmContainer,
         input::{WavSpec, ordinary_channel_mask},
         metadata::WavMetadata,
-        PcmContainer,
     };
 
     use super::{

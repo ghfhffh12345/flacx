@@ -57,7 +57,8 @@ Directory traversal is controlled by `--depth`.
 - Use `--depth 0` for unlimited recursive traversal.
 - Single-file input with no `-o` writes a sibling `.flac` next to the source PCM container.
 - Single-file input with `-o <path>` writes to that exact file path.
-- Directory input with no `-o` writes `.flac` siblings next to each discovered `.wav`, `.rf64`, or `.w64`.
+- Directory input with no `-o` writes `.flac` siblings next to each discovered `.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, or `.caf`.
+- Raw PCM encode is explicit-only via `--raw` plus descriptor flags; generic `.raw` / `.pcm` files are not auto-discovered.
 - Directory input with `-o <dir>` preserves relative subpaths under the destination directory.
 - For single-file input, `-o` must be a file path.
 - For directory input, `-o` must be a directory path.
@@ -67,6 +68,9 @@ Directory traversal is controlled by `--depth`.
 ```bash
 flacx encode input.wav
 flacx encode input.w64 -o output.flac --level 8 --threads 4
+flacx encode input.aiff -o output.flac --threads 4
+flacx encode input.caf -o output.flac --threads 4
+flacx encode input.pcm --raw --sample-rate 44100 --channels 2 --bits-per-sample 16 --container-bits 16 --byte-order le -o output.flac
 flacx encode album-dir -o encoded-album --depth 0
 ```
 

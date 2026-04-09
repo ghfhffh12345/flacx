@@ -249,7 +249,9 @@ assert!(flac_total_samples > 0);
 
 These helpers do not perform a full transcode; they only inspect the container
 metadata needed to report sample counts. `inspect_wav_total_samples` accepts
-RIFF/WAVE, RF64, and Wave64 integer-PCM inputs through the same API.
+RIFF/WAVE, RF64, Wave64, AIFF, the Stage 2 AIFC integer-PCM allowlist, and the
+Stage 3 CAF integer-PCM allowlist through the same stable API. Use
+`inspect_raw_pcm_total_samples` for explicit raw signed-integer PCM.
 
 ## Compression levels
 
@@ -341,7 +343,8 @@ progress UI.
 
 `flacx` is focused on the current RIFF-family / FLAC workflow:
 
-- RIFF/WAVE, RF64, and Wave64 PCM-to-FLAC encoding
+- RIFF/WAVE, RF64, Wave64, AIFF, bounded AIFC, and bounded CAF PCM-to-FLAC encoding
+- explicit raw signed-integer PCM-to-FLAC encoding via `RawPcmDescriptor`
 - FLAC-to-WAVE / RF64 / Wave64 decoding
 - file-based input/output
 - in-memory byte helpers
@@ -358,7 +361,7 @@ Out of scope for the current crate:
 - metadata editing
 - non-seekable streaming APIs
 - broader transcoding beyond PCM-container ↔ FLAC
-- non-RIFF-family containers such as AIFF/AIFC, CAF, and raw-PCM descriptors
+- later non-RIFF-family rollout stages beyond the current CAF/raw ingest slice
 
 ## Workspace note
 

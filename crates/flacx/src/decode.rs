@@ -290,8 +290,8 @@ impl Decoder {
         let input_path = input_path.as_ref();
         let output_path = output_path.as_ref();
         let (temp_path, temp_file) = open_temp_output(output_path)?;
-        let output_container = output_container_from_path(output_path)
-            .unwrap_or(self.config.output_container);
+        let output_container =
+            output_container_from_path(output_path).unwrap_or(self.config.output_container);
 
         let result = (|| {
             let input = File::open(input_path)?;

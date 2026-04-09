@@ -11,7 +11,10 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use flacx::{DecodeConfig, EncoderConfig, RecompressConfig, RecompressMode, level::Level};
+use flacx::{
+    DecodeConfig, EncoderConfig, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig,
+    RecompressMode, level::Level,
+};
 use flacx_cli::{
     DecodeCommand, EncodeCommand, RecompressCommand, decode_command, encode_command,
     recompress_command,
@@ -33,7 +36,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Encode a supported PCM container (`.wav`, `.rf64`, `.w64`) to FLAC.
+    /// Encode a supported PCM container (`.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, `.caf`) or explicit raw PCM to FLAC.
     Encode(EncodeArgs),
     /// Decode a supported FLAC file to `.wav`, `.rf64`, or `.w64`.
     Decode(DecodeArgs),
@@ -48,9 +51,15 @@ enum ModePreset {
     Strict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RawByteOrderArg {
+    Le,
+    Be,
+}
+
 #[derive(Debug, Args)]
 struct EncodeArgs {
-    /// Input PCM-container path (`.wav`, `.rf64`, or `.w64`).
+    /// Input PCM-container path (`.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, or `.caf`), or any file path when `--raw` is used.
     input: std::path::PathBuf,
     /// Output FLAC path for a single file, or destination directory for a folder input.
     #[arg(short, long)]
@@ -70,6 +79,27 @@ struct EncodeArgs {
     /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
     #[arg(long, default_value_t = 1usize)]
     depth: usize,
+    /// Treat the input as raw signed-integer PCM instead of a self-describing container.
+    #[arg(long)]
+    raw: bool,
+    /// Raw PCM sample rate in Hz. Required with `--raw`.
+    #[arg(long)]
+    sample_rate: Option<u32>,
+    /// Raw PCM channel count. Required with `--raw`.
+    #[arg(long)]
+    channels: Option<u8>,
+    /// Raw PCM valid bits per sample. Required with `--raw`.
+    #[arg(long)]
+    bits_per_sample: Option<u8>,
+    /// Raw PCM container bits per sample. Required with `--raw`.
+    #[arg(long)]
+    container_bits: Option<u8>,
+    /// Raw PCM byte order. Required with `--raw`.
+    #[arg(long, value_enum)]
+    byte_order: Option<RawByteOrderArg>,
+    /// Raw PCM channel mask in hex (required for 3..=8 channel raw mode).
+    #[arg(long)]
+    channel_mask: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -148,14 +178,71 @@ fn encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let interactive = io::stderr().is_terminal();
     enforce_interactive_mode(interactive, interactive_required())?;
     let mut stderr = io::stderr().lock();
+    let raw_descriptor = build_raw_descriptor(&args)?;
     let command = EncodeCommand {
         input: args.input,
         output: args.output,
         depth: args.depth,
         config,
+        raw_descriptor,
     };
     encode_command(&command, interactive, &mut stderr)?;
     Ok(())
+}
+
+fn build_raw_descriptor(
+    args: &EncodeArgs,
+) -> Result<Option<RawPcmDescriptor>, Box<dyn std::error::Error>> {
+    if !args.raw {
+        if args.sample_rate.is_some()
+            || args.channels.is_some()
+            || args.bits_per_sample.is_some()
+            || args.container_bits.is_some()
+            || args.byte_order.is_some()
+            || args.channel_mask.is_some()
+        {
+            return Err("raw PCM flags require --raw".into());
+        }
+        return Ok(None);
+    }
+
+    let sample_rate = args.sample_rate.ok_or("--raw requires --sample-rate")?;
+    let channels = args.channels.ok_or("--raw requires --channels")?;
+    let bits_per_sample = args
+        .bits_per_sample
+        .ok_or("--raw requires --bits-per-sample")?;
+    let container_bits = args
+        .container_bits
+        .ok_or("--raw requires --container-bits")?;
+    let byte_order = match args.byte_order.ok_or("--raw requires --byte-order")? {
+        RawByteOrderArg::Le => RawPcmByteOrder::LittleEndian,
+        RawByteOrderArg::Be => RawPcmByteOrder::BigEndian,
+    };
+    let channel_mask = match args.channel_mask.as_deref() {
+        Some(mask) => Some(parse_channel_mask(mask)?),
+        None => None,
+    };
+    if (3..=8).contains(&channels) && channel_mask.is_none() {
+        return Err("--raw 3..=8 channel input requires --channel-mask".into());
+    }
+
+    Ok(Some(RawPcmDescriptor {
+        sample_rate,
+        channels,
+        valid_bits_per_sample: bits_per_sample,
+        container_bits_per_sample: container_bits,
+        byte_order,
+        channel_mask,
+    }))
+}
+
+fn parse_channel_mask(mask: &str) -> Result<u32, Box<dyn std::error::Error>> {
+    let trimmed = mask.trim();
+    let hex = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    Ok(u32::from_str_radix(hex, 16)?)
 }
 
 fn decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -257,8 +344,8 @@ fn enforce_interactive_mode(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, ModePreset, apply_decode_mode, apply_encode_mode, enforce_interactive_mode,
-        recompress_mode,
+        Cli, Commands, ModePreset, RawByteOrderArg, apply_decode_mode, apply_encode_mode,
+        enforce_interactive_mode, recompress_mode,
     };
     use clap::Parser;
 
@@ -311,6 +398,41 @@ mod tests {
             Commands::Encode(args) => {
                 assert_eq!(args.input, std::path::PathBuf::from("input.wav"));
                 assert_eq!(args.depth, 3);
+            }
+            _ => panic!("expected encode command"),
+        }
+    }
+
+    #[test]
+    fn encode_command_parses_raw_pcm_flags() {
+        let cli = Cli::parse_from([
+            "flacx",
+            "encode",
+            "input.raw",
+            "--raw",
+            "--sample-rate",
+            "48000",
+            "--channels",
+            "4",
+            "--bits-per-sample",
+            "20",
+            "--container-bits",
+            "24",
+            "--byte-order",
+            "le",
+            "--channel-mask",
+            "0x33",
+        ]);
+
+        match cli.command {
+            Commands::Encode(args) => {
+                assert!(args.raw);
+                assert_eq!(args.sample_rate, Some(48_000));
+                assert_eq!(args.channels, Some(4));
+                assert_eq!(args.bits_per_sample, Some(20));
+                assert_eq!(args.container_bits, Some(24));
+                assert_eq!(args.byte_order, Some(RawByteOrderArg::Le));
+                assert_eq!(args.channel_mask.as_deref(), Some("0x33"));
             }
             _ => panic!("expected encode command"),
         }

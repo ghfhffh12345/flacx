@@ -11,12 +11,12 @@ use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, ParsedMetadataBlock, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
     cuesheet_block, extensible_pcm_wav_bytes, flac_frames, flac_metadata_blocks, info_list_chunk,
-    ordinary_channel_mask, parse_first_flac_frame_header, parse_fxmd_chunk_payload,
+    is_w64_bytes, ordinary_channel_mask, parse_first_flac_frame_header, parse_fxmd_chunk_payload,
     parse_wav_format, pcm_wav_bytes, picture_block, raw_cuesheet_block, raw_seektable_block,
     replace_flac_optional_metadata, rewrite_streaminfo_md5, rich_cuesheet_payload, sample_fixture,
     seektable_block, streaminfo_md5, truncate_bytes, unique_temp_path, vorbis_comment_block,
     vorbis_comments, wav_chunk_payloads, wav_cue_points, wav_data_bytes, wav_info_entries,
-    wav_with_chunks, is_w64_bytes,
+    wav_with_chunks,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
