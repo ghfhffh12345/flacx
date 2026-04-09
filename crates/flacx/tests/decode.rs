@@ -1,7 +1,8 @@
 use std::{fs, io::Cursor, thread::available_parallelism};
 
 use flacx::{
-    DecodeConfig, Decoder, Encoder, EncoderConfig, decode_bytes, decode_file, level::Level,
+    DecodeConfig, Decoder, Encoder, EncoderConfig, PcmContainer, decode_bytes, decode_file,
+    level::Level,
 };
 
 mod support;
@@ -15,7 +16,7 @@ use support::{
     replace_flac_optional_metadata, rewrite_streaminfo_md5, rich_cuesheet_payload, sample_fixture,
     seektable_block, streaminfo_md5, truncate_bytes, unique_temp_path, vorbis_comment_block,
     vorbis_comments, wav_chunk_payloads, wav_cue_points, wav_data_bytes, wav_info_entries,
-    wav_with_chunks,
+    wav_with_chunks, is_w64_bytes,
 };
 
 fn decode_thread_variants() -> [usize; 2] {
@@ -231,6 +232,80 @@ fn decode_file_writes_identical_wav_bytes() {
         let _ = fs::remove_file(output_path);
     }
 
+    let _ = fs::remove_file(input_path);
+}
+
+#[test]
+fn decode_bytes_can_emit_rf64_when_requested() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+
+    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Rf64))
+        .decode_bytes(&flac)
+        .unwrap();
+
+    assert!(decoded.starts_with(b"RF64"));
+    let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
+    let round_tripped = decode_bytes(&reencoded).unwrap();
+    assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
+}
+
+#[test]
+fn decode_bytes_can_emit_wave64_when_requested() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+
+    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Wave64))
+        .decode_bytes(&flac)
+        .unwrap();
+
+    assert!(is_w64_bytes(&decoded));
+    let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
+    let round_tripped = decode_bytes(&reencoded).unwrap();
+    assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
+}
+
+#[test]
+fn decode_file_infers_wave64_from_output_extension() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("w64");
+    fs::write(&input_path, flac).unwrap();
+
+    Decoder::default()
+        .decode_file(&input_path, &output_path)
+        .unwrap();
+
+    let decoded = fs::read(&output_path).unwrap();
+    assert!(is_w64_bytes(&decoded));
+    let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
+    let round_tripped = decode_bytes(&reencoded).unwrap();
+    assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
+
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(input_path);
+}
+
+#[test]
+fn decode_file_infers_rf64_from_output_extension() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("rf64");
+    fs::write(&input_path, flac).unwrap();
+
+    Decoder::default()
+        .decode_file(&input_path, &output_path)
+        .unwrap();
+
+    let decoded = fs::read(&output_path).unwrap();
+    assert!(decoded.starts_with(b"RF64"));
+    let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
+    let round_tripped = decode_bytes(&reencoded).unwrap();
+    assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
+
+    let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(input_path);
 }
 

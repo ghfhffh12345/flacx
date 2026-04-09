@@ -1,6 +1,6 @@
 # flacx
 
-High-performance WAV/FLAC conversion and FLAC recompression for Rust.
+High-performance PCM-container/FLAC conversion and FLAC recompression for Rust.
 
 `flacx` is the publishable library crate in this workspace. It exposes the
 reusable encode/decode pipeline used by Rust callers and by the sibling
@@ -52,11 +52,11 @@ let encoder = Encoder::new(
         .build(),
 );
 
-let encode_summary = encoder.encode_file("input.wav", "output.flac").unwrap();
+let encode_summary = encoder.encode_file("input.w64", "output.flac").unwrap();
 assert!(encode_summary.total_samples > 0);
 
 let decoder = Decoder::default();
-let decode_summary = decoder.decode_file("output.flac", "roundtrip.wav").unwrap();
+let decode_summary = decoder.decode_file("output.flac", "roundtrip.rf64").unwrap();
 assert_eq!(encode_summary.total_samples, decode_summary.total_samples);
 ```
 
@@ -118,10 +118,11 @@ let _decoder = Decoder::new(decoder_config);
 `EncoderConfig::default()` uses `Level::Level8` and a thread count derived from
 the current machine’s available parallelism.
 
-`DecodeConfig` controls FLAC-to-WAV decoding:
+`DecodeConfig` controls FLAC-to-PCM-container decoding:
 
 - `threads` sets the worker count
 - `emit_fxmd` controls whether decode output writes the private `fxmd` preservation chunk
+- `output_container` selects `Auto`, `Wave`, `Rf64`, or `Wave64`
 - `strict_channel_mask_provenance` requires explicit provenance before the
   decoder restores non-ordinary channel masks
 - `strict_seektable_validation` turns malformed `SEEKTABLE` metadata from a
@@ -247,7 +248,8 @@ assert!(flac_total_samples > 0);
 ```
 
 These helpers do not perform a full transcode; they only inspect the container
-metadata needed to report sample counts.
+metadata needed to report sample counts. `inspect_wav_total_samples` accepts
+RIFF/WAVE, RF64, and Wave64 integer-PCM inputs through the same API.
 
 ## Compression levels
 
@@ -333,14 +335,14 @@ progress UI.
 
 ## Supported scope
 
-- WAV -> FLAC encoding
-- FLAC -> WAV decoding
+- PCM-container -> FLAC encoding
+- FLAC -> PCM-container decoding
 - FLAC -> FLAC recompression with policy-driven metadata handling
 
-`flacx` is focused on the current WAV ↔ FLAC workflow:
+`flacx` is focused on the current RIFF-family / FLAC workflow:
 
-- WAV-to-FLAC encoding
-- FLAC-to-WAV decoding
+- RIFF/WAVE, RF64, and Wave64 PCM-to-FLAC encoding
+- FLAC-to-WAVE / RF64 / Wave64 decoding
 - file-based input/output
 - in-memory byte helpers
 - sample-count inspection
@@ -355,8 +357,8 @@ Out of scope for the current crate:
 
 - metadata editing
 - non-seekable streaming APIs
-- broader transcoding beyond WAV ↔ FLAC
-- broader format support beyond the current engine envelope
+- broader transcoding beyond PCM-container ↔ FLAC
+- non-RIFF-family containers such as AIFF/AIFC, CAF, and raw-PCM descriptors
 
 ## Workspace note
 

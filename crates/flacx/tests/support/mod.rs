@@ -14,6 +14,13 @@ const PCM_GUID: [u8; 16] = [
 ];
 const PCM_FMT_CHUNK_SIZE: u32 = 16;
 const EXTENSIBLE_FMT_CHUNK_SIZE: u32 = 40;
+const RF64_PLACEHOLDER_SIZE: u32 = 0xFFFF_FFFF;
+const W64_RIFF_GUID: [u8; 16] = [
+    0x72, 0x69, 0x66, 0x66, 0x2e, 0x91, 0xcf, 0x11, 0xa5, 0xd6, 0x28, 0xdb, 0x04, 0xc1, 0x00, 0x00,
+];
+const W64_CHUNK_GUID_SUFFIX: [u8; 12] = [
+    0xf3, 0xac, 0xd3, 0x11, 0x8c, 0xd1, 0x00, 0xc0, 0x4f, 0x8e, 0xdb, 0x8a,
+];
 
 pub fn pcm_wav_bytes(
     bits_per_sample: u16,
@@ -93,6 +100,153 @@ pub fn extensible_pcm_wav_bytes(
     );
 
     bytes
+}
+
+pub fn rf64_from_wav_bytes(wav_bytes: &[u8], sample_frames: u64) -> Vec<u8> {
+    assert!(wav_bytes.len() >= 12, "wav bytes too short");
+    assert_eq!(&wav_bytes[..4], b"RIFF", "source must start with RIFF");
+    assert_eq!(&wav_bytes[8..12], b"WAVE", "source must be WAVE");
+
+    let mut body = wav_bytes[12..].to_vec();
+    let data_chunk_offset = body
+        .windows(4)
+        .position(|window| window == b"data")
+        .expect("data chunk present in source wav");
+    let data_size_offset = data_chunk_offset + 4;
+    let data_size = u32::from_le_bytes(
+        body[data_size_offset..data_size_offset + 4]
+            .try_into()
+            .unwrap(),
+    ) as u64;
+    body[data_size_offset..data_size_offset + 4]
+        .copy_from_slice(&RF64_PLACEHOLDER_SIZE.to_le_bytes());
+
+    let mut bytes = Vec::with_capacity(wav_bytes.len() + 36);
+    bytes.extend_from_slice(b"RF64");
+    bytes.extend_from_slice(&RF64_PLACEHOLDER_SIZE.to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+
+    bytes.extend_from_slice(b"ds64");
+    bytes.extend_from_slice(&28u32.to_le_bytes());
+    let riff_size = (wav_bytes.len() as u64 - 8) + 36;
+    bytes.extend_from_slice(&riff_size.to_le_bytes());
+    bytes.extend_from_slice(&data_size.to_le_bytes());
+    bytes.extend_from_slice(&sample_frames.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+
+    bytes.extend_from_slice(&body);
+    bytes
+}
+
+pub fn rf64_pcm_wav_bytes(
+    bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    let wav = pcm_wav_bytes(bits_per_sample, channels, sample_rate, samples);
+    rf64_from_wav_bytes(&wav, (samples.len() / usize::from(channels)) as u64)
+}
+
+pub fn rf64_extensible_pcm_wav_bytes(
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    channel_mask: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    let wav = extensible_pcm_wav_bytes(
+        valid_bits_per_sample,
+        container_bits_per_sample,
+        channels,
+        sample_rate,
+        channel_mask,
+        samples,
+    );
+    rf64_from_wav_bytes(&wav, (samples.len() / usize::from(channels)) as u64)
+}
+
+pub fn w64_from_wav_bytes(wav_bytes: &[u8]) -> Vec<u8> {
+    assert!(wav_bytes.len() >= 12, "wav bytes too short");
+    assert_eq!(&wav_bytes[..4], b"RIFF", "source must start with RIFF");
+    assert_eq!(&wav_bytes[8..12], b"WAVE", "source must be WAVE");
+
+    let mut body = &wav_bytes[12..];
+    let mut chunks = Vec::new();
+    while !body.is_empty() {
+        assert!(body.len() >= 8, "chunk header truncated");
+        let chunk_id: [u8; 4] = body[..4].try_into().unwrap();
+        let chunk_size = u32::from_le_bytes(body[4..8].try_into().unwrap()) as usize;
+        let payload_start = 8;
+        let payload_end = payload_start + chunk_size;
+        let payload = body[payload_start..payload_end].to_vec();
+        let padded_len = payload_end + (chunk_size % 2);
+        chunks.push((chunk_id, payload));
+        body = &body[padded_len..];
+    }
+
+    let mut bytes = Vec::with_capacity(wav_bytes.len() + (chunks.len() * 16));
+    bytes.extend_from_slice(&W64_RIFF_GUID);
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&w64_chunk_guid(*b"wave"));
+
+    for (chunk_id, payload) in chunks {
+        bytes.extend_from_slice(&w64_chunk_guid(chunk_id));
+        bytes.extend_from_slice(&((payload.len() + 24) as u64).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        let padding = (8 - (payload.len() % 8)) % 8;
+        if padding != 0 {
+            bytes.resize(bytes.len() + padding, 0);
+        }
+    }
+
+    let total_size = bytes.len() as u64;
+    bytes[16..24].copy_from_slice(&total_size.to_le_bytes());
+    bytes
+}
+
+pub fn w64_pcm_wav_bytes(
+    bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    w64_from_wav_bytes(&pcm_wav_bytes(
+        bits_per_sample,
+        channels,
+        sample_rate,
+        samples,
+    ))
+}
+
+pub fn w64_extensible_pcm_wav_bytes(
+    valid_bits_per_sample: u16,
+    container_bits_per_sample: u16,
+    channels: u16,
+    sample_rate: u32,
+    channel_mask: u32,
+    samples: &[i32],
+) -> Vec<u8> {
+    w64_from_wav_bytes(&extensible_pcm_wav_bytes(
+        valid_bits_per_sample,
+        container_bits_per_sample,
+        channels,
+        sample_rate,
+        channel_mask,
+        samples,
+    ))
+}
+
+fn w64_chunk_guid(chunk_id: [u8; 4]) -> [u8; 16] {
+    let mut guid = [0u8; 16];
+    guid[..4].copy_from_slice(&chunk_id);
+    guid[4..].copy_from_slice(&W64_CHUNK_GUID_SUFFIX);
+    guid
+}
+
+pub fn is_w64_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= W64_RIFF_GUID.len() && bytes[..W64_RIFF_GUID.len()] == W64_RIFF_GUID
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

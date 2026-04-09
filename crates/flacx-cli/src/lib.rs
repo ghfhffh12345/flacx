@@ -96,10 +96,10 @@ impl CommandKind {
         }
     }
 
-    fn source_extension(self) -> &'static str {
+    fn source_extensions(self) -> &'static [&'static str] {
         match self {
-            Self::Encode => "wav",
-            Self::Decode | Self::Recompress => "flac",
+            Self::Encode => &["wav", "rf64", "w64"],
+            Self::Decode | Self::Recompress => &["flac"],
         }
     }
 
@@ -530,7 +530,7 @@ fn collect_directory_work_items(
     for entry in walker {
         let entry =
             entry.map_err(|error| kind.planning_error(kind.traversal_error(input_root, &error)))?;
-        if !entry.file_type().is_file() || !has_extension(entry.path(), kind.source_extension()) {
+        if !entry.file_type().is_file() || !has_any_extension(entry.path(), kind.source_extensions()) {
             continue;
         }
 
@@ -637,7 +637,7 @@ fn plan_recompress_directory_worklist(command: &RecompressCommand) -> Result<Pla
             CommandKind::Recompress
                 .planning_error(CommandKind::Recompress.traversal_error(&command.input, &error))
         })?;
-        if !entry.file_type().is_file() || !has_extension(entry.path(), "flac") {
+        if !entry.file_type().is_file() || !has_any_extension(entry.path(), &["flac"]) {
             continue;
         }
 
@@ -700,10 +700,10 @@ fn ensure_output_parent_dirs(output: &Path) -> Result<()> {
     Ok(())
 }
 
-fn has_extension(path: &Path, extension: &str) -> bool {
+fn has_any_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+        .is_some_and(|ext| extensions.iter().any(|candidate| ext.eq_ignore_ascii_case(candidate)))
 }
 
 fn file_display_name(path: &Path) -> String {

@@ -9,7 +9,7 @@
 //! fluent configuration flow, and use the `with_*` methods when you want to
 //! start from [`Default::default`].
 
-use crate::level::Level;
+use crate::{PcmContainer, level::Level};
 
 /// User-facing encoder configuration for WAV-to-FLAC conversion.
 ///
@@ -208,6 +208,8 @@ pub struct DecodeConfig {
     pub threads: usize,
     /// Whether to emit the private `fxmd` WAV chunk when metadata is preserved during decode.
     pub emit_fxmd: bool,
+    /// Which PCM container family to emit for decoded output.
+    pub output_container: PcmContainer,
     /// Require channel-layout provenance metadata before restoring a non-ordinary mask.
     pub strict_channel_mask_provenance: bool,
     /// Require RFC 9639 seektable validation instead of tolerating malformed tables.
@@ -221,6 +223,7 @@ impl Default for DecodeConfig {
                 .map(usize::from)
                 .unwrap_or(1),
             emit_fxmd: true,
+            output_container: PcmContainer::Auto,
             strict_channel_mask_provenance: false,
             strict_seektable_validation: false,
         }
@@ -264,6 +267,13 @@ impl DecodeConfig {
     #[must_use]
     pub fn with_emit_fxmd(mut self, emit: bool) -> Self {
         self.emit_fxmd = emit;
+        self
+    }
+
+    /// Select the PCM container family used for decoded output.
+    #[must_use]
+    pub fn with_output_container(mut self, output_container: PcmContainer) -> Self {
+        self.output_container = output_container;
         self
     }
 
@@ -315,6 +325,13 @@ impl DecodeBuilder {
         self
     }
 
+    /// Select the PCM container family used for decoded output.
+    #[must_use]
+    pub fn output_container(mut self, output_container: PcmContainer) -> Self {
+        self.config = self.config.with_output_container(output_container);
+        self
+    }
+
     /// Enable or disable strict channel-mask provenance checks.
     #[must_use]
     pub fn strict_channel_mask_provenance(mut self, strict: bool) -> Self {
@@ -339,7 +356,7 @@ impl DecodeBuilder {
 #[cfg(test)]
 mod tests {
     use super::{DecodeConfig, EncoderConfig};
-    use crate::level::Level;
+    use crate::{PcmContainer, level::Level};
 
     #[test]
     fn with_threads_clamps_to_one() {
@@ -421,6 +438,7 @@ mod tests {
         let built = DecodeConfig::builder()
             .threads(4)
             .emit_fxmd(false)
+            .output_container(PcmContainer::Wave64)
             .strict_channel_mask_provenance(true)
             .strict_seektable_validation(true)
             .build();
@@ -430,6 +448,7 @@ mod tests {
             DecodeConfig::default()
                 .with_threads(4)
                 .with_emit_fxmd(false)
+                .with_output_container(PcmContainer::Wave64)
                 .with_strict_channel_mask_provenance(true)
                 .with_strict_seektable_validation(true)
         );
@@ -446,6 +465,7 @@ mod tests {
     fn decode_default_emits_fxmd_without_extra_validation() {
         let config = DecodeConfig::default();
         assert!(config.emit_fxmd);
+        assert_eq!(config.output_container, PcmContainer::Auto);
         assert!(!config.strict_channel_mask_provenance);
         assert!(!config.strict_seektable_validation);
     }
