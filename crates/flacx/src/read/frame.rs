@@ -1,6 +1,17 @@
+use super::{
+    ChannelAssignment, DecodeConfig, Error, FLAC_SYNC_CODE, FRAME_CHUNK_SIZE, FrameHeaderNumber,
+    FrameHeaderNumberKind, FrameIndex, FrameResult, ParsedFrame, ProgressSink, Result, StreamInfo,
+    SubframeHeader,
+};
+use crate::{
+    crc::{crc8, crc16},
+    progress::ProgressSnapshot,
+    reconstruct::{interleave_channels, restore_fixed, restore_lpc, unfold_residual},
+};
+use bitstream_io::{BigEndian, BitRead, BitReader};
 use std::{
     collections::BTreeMap,
-    io::{Cursor, ErrorKind, Read, Seek},
+    io::{Cursor, Read},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -9,226 +20,7 @@ use std::{
     thread,
 };
 
-use bitstream_io::{BigEndian, BitRead, BitReader};
-
-use crate::{
-    config::DecodeConfig,
-    crc::{crc8, crc16},
-    error::{Error, Result},
-    input::{WavData, WavSpec, ordinary_channel_mask},
-    metadata::{
-        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, SEEKTABLE_BLOCK_TYPE, WavMetadata,
-        validate_seektable_payload,
-    },
-    model::ChannelAssignment,
-    progress::{NoProgress, ProgressSink, ProgressSnapshot},
-    reconstruct::{interleave_channels, restore_fixed, restore_lpc, unfold_residual},
-    stream_info::StreamInfo,
-};
-
-const FLAC_MAGIC: &[u8; 4] = b"fLaC";
-const STREAMINFO_BLOCK_TYPE: u8 = 0;
-const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
-const FRAME_CHUNK_SIZE: usize = 32;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FrameHeaderNumberKind {
-    FrameNumber,
-    SampleNumber,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FrameHeaderNumber {
-    kind: FrameHeaderNumberKind,
-    value: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FrameIndex {
-    header_number: FrameHeaderNumber,
-    offset: usize,
-    bytes_consumed: usize,
-    block_size: u16,
-}
-
-struct FrameResult {
-    frame_index: usize,
-    result: Result<Vec<i32>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ParsedFrame {
-    header_number: FrameHeaderNumber,
-    block_size: u16,
-    bits_per_sample: u8,
-    assignment: ChannelAssignment,
-    bytes_consumed: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SubframeHeader {
-    kind: u8,
-    wasted_bits: usize,
-    effective_bps: u8,
-}
-
-pub(crate) struct DecodedFlacData {
-    pub(crate) wav: WavData,
-    pub(crate) metadata: WavMetadata,
-    pub(crate) stream_info: StreamInfo,
-    pub(crate) frame_count: usize,
-}
-
-#[allow(dead_code)]
-pub(crate) fn read_flac<R: Read + Seek>(reader: R) -> Result<(WavData, StreamInfo, usize)> {
-    let mut progress = NoProgress;
-    let decoded = read_flac_for_decode(reader, DecodeConfig::default(), &mut progress)?;
-    Ok((decoded.wav, decoded.stream_info, decoded.frame_count))
-}
-
-pub(crate) fn read_flac_for_decode<R, P>(
-    mut reader: R,
-    config: DecodeConfig,
-    progress: &mut P,
-) -> Result<DecodedFlacData>
-where
-    R: Read + Seek,
-    P: ProgressSink,
-{
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    let (stream_info, metadata, frame_offset) =
-        parse_metadata(&bytes, config.strict_seektable_validation)?;
-
-    if !(1..=8).contains(&stream_info.channels) {
-        return Err(Error::UnsupportedFlac(format!(
-            "only independent 1..8 channel decode is supported, found {} channels",
-            stream_info.channels
-        )));
-    }
-    if !(4..=32).contains(&stream_info.bits_per_sample) {
-        return Err(Error::UnsupportedFlac(format!(
-            "only FLAC-native 4..32-bit decode is supported, found {} bits/sample",
-            stream_info.bits_per_sample
-        )));
-    }
-
-    let expected_frames = stream_info.total_samples as usize;
-    let total_output_samples = expected_frames * usize::from(stream_info.channels);
-    let channel_mask = resolve_channel_mask(
-        stream_info.channels,
-        &metadata,
-        config.strict_channel_mask_provenance,
-    )?;
-    let wav_spec = WavSpec {
-        sample_rate: stream_info.sample_rate,
-        channels: stream_info.channels,
-        bits_per_sample: stream_info.bits_per_sample,
-        total_samples: stream_info.total_samples,
-        bytes_per_sample: u16::from(stream_info.bits_per_sample.div_ceil(8)),
-        channel_mask,
-    };
-
-    if expected_frames == 0 {
-        return Ok(DecodedFlacData {
-            wav: WavData {
-                spec: wav_spec,
-                samples: Vec::new(),
-            },
-            metadata,
-            stream_info,
-            frame_count: 0,
-        });
-    }
-
-    let frames = index_frames(&bytes, frame_offset, stream_info)?;
-    let frame_count = frames.len();
-    let bytes: Arc<[u8]> = Arc::from(bytes);
-    let frames: Arc<[FrameIndex]> = Arc::from(frames);
-    let mut samples = Vec::with_capacity(total_output_samples);
-    decode_frames_parallel(bytes, frames, stream_info, config, progress, &mut samples)?;
-
-    if samples.len() != total_output_samples {
-        return Err(Error::Decode(format!(
-            "decoded sample count mismatch: expected {total_output_samples}, got {}",
-            samples.len()
-        )));
-    }
-    Ok(DecodedFlacData {
-        wav: WavData {
-            spec: wav_spec,
-            samples,
-        },
-        metadata,
-        stream_info,
-        frame_count,
-    })
-}
-
-fn resolve_channel_mask(
-    channels: u8,
-    metadata: &WavMetadata,
-    strict_channel_mask_provenance: bool,
-) -> Result<u32> {
-    let ordinary_mask = ordinary_channel_mask(u16::from(channels))
-        .expect("ordinary channel mask must exist after validating 1..8 channels in STREAMINFO");
-    if strict_channel_mask_provenance
-        && requires_channel_layout_provenance(channels, metadata.channel_mask())
-        && !metadata.has_channel_layout_provenance()
-    {
-        return Err(Error::UnsupportedFlac(format!(
-            "strict channel-layout provenance requires {FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY} for {channels}-channel decode"
-        )));
-    }
-    Ok(metadata.channel_mask().unwrap_or(ordinary_mask))
-}
-
-fn requires_channel_layout_provenance(_channels: u8, channel_mask: Option<u32>) -> bool {
-    channel_mask.is_some()
-}
-
-/// Inspect a FLAC stream and return the total sample count stored in
-/// `STREAMINFO`.
-///
-/// This helper validates the FLAC marker and first metadata block, then
-/// extracts the total sample count without decoding audio frames.
-///
-/// # Example
-///
-/// ```no_run
-/// use flacx::inspect_flac_total_samples;
-/// use std::fs::File;
-///
-/// let total_samples = inspect_flac_total_samples(File::open("input.flac").unwrap()).unwrap();
-/// assert!(total_samples > 0);
-/// ```
-pub fn inspect_flac_total_samples<R: Read>(mut reader: R) -> Result<u64> {
-    let mut magic = [0u8; 4];
-    read_exact_or_invalid(&mut reader, &mut magic, "file is too short")?;
-    if &magic != FLAC_MAGIC {
-        return Err(Error::InvalidFlac("expected fLaC stream marker"));
-    }
-
-    let mut header = [0u8; 4];
-    read_exact_or_invalid(
-        &mut reader,
-        &mut header,
-        "metadata block header is truncated",
-    )?;
-    let block_type = header[0] & 0x7f;
-    let block_len = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
-    if block_type != STREAMINFO_BLOCK_TYPE || block_len != 34 {
-        return Err(Error::InvalidFlac(
-            "first metadata block must be a 34-byte STREAMINFO block",
-        ));
-    }
-
-    let mut raw = [0u8; 34];
-    read_exact_or_invalid(&mut reader, &mut raw, "metadata block body is truncated")?;
-    Ok(StreamInfo::from_bytes(raw).total_samples)
-}
-
-fn index_frames(
+pub(super) fn index_frames(
     bytes: &[u8],
     frame_offset: usize,
     stream_info: StreamInfo,
@@ -266,7 +58,7 @@ fn index_frames(
     Ok(frames)
 }
 
-fn decode_frames_parallel<P>(
+pub(super) fn decode_frames_parallel<P>(
     bytes: Arc<[u8]>,
     frames: Arc<[FrameIndex]>,
     stream_info: StreamInfo,
@@ -906,7 +698,7 @@ fn sample_rate_extra_len(code: u8) -> usize {
     }
 }
 
-fn decode_bits_per_sample(code: u8, stream_bps: u8) -> Result<u8> {
+pub(super) fn decode_bits_per_sample(code: u8, stream_bps: u8) -> Result<u8> {
     match code {
         0b000 => Ok(stream_bps),
         0b001 => Ok(8),
@@ -922,7 +714,7 @@ fn decode_bits_per_sample(code: u8, stream_bps: u8) -> Result<u8> {
     }
 }
 
-fn decode_channel_assignment(code: u8) -> Result<ChannelAssignment> {
+pub(super) fn decode_channel_assignment(code: u8) -> Result<ChannelAssignment> {
     match code {
         0b0000..=0b0111 => Ok(ChannelAssignment::Independent(code + 1)),
         0b1000 => Ok(ChannelAssignment::LeftSide),
@@ -935,7 +727,10 @@ fn decode_channel_assignment(code: u8) -> Result<ChannelAssignment> {
     }
 }
 
-fn channel_bits_per_sample(assignment: ChannelAssignment, bits_per_sample: u8) -> Vec<u8> {
+pub(super) fn channel_bits_per_sample(
+    assignment: ChannelAssignment,
+    bits_per_sample: u8,
+) -> Vec<u8> {
     match assignment {
         ChannelAssignment::Independent(channels) => vec![bits_per_sample; usize::from(channels)],
         ChannelAssignment::LeftSide => vec![bits_per_sample, bits_per_sample + 1],
@@ -981,176 +776,4 @@ fn decode_utf8_number<R: Read>(reader: &mut R) -> Result<(u64, usize)> {
     }
 
     Ok((value, additional + 1))
-}
-
-fn parse_metadata(
-    bytes: &[u8],
-    strict_seektable_validation: bool,
-) -> Result<(StreamInfo, WavMetadata, usize)> {
-    if bytes.len() < 8 {
-        return Err(Error::InvalidFlac("file is too short"));
-    }
-    if &bytes[..4] != FLAC_MAGIC {
-        return Err(Error::InvalidFlac("expected fLaC stream marker"));
-    }
-
-    let mut offset = 4usize;
-    let mut saw_streaminfo = false;
-    let mut stream_info = None;
-    let mut metadata = WavMetadata::default();
-    let mut saw_seektable = false;
-    loop {
-        if offset + 4 > bytes.len() {
-            return Err(Error::InvalidFlac("metadata block header is truncated"));
-        }
-        let header = bytes[offset];
-        let is_last = header & 0x80 != 0;
-        let block_type = header & 0x7f;
-        let block_len =
-            u32::from_be_bytes([0, bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
-                as usize;
-        offset += 4;
-        if offset + block_len > bytes.len() {
-            return Err(Error::InvalidFlac("metadata block body is truncated"));
-        }
-
-        if !saw_streaminfo {
-            if block_type != STREAMINFO_BLOCK_TYPE || block_len != 34 {
-                return Err(Error::InvalidFlac(
-                    "first metadata block must be a 34-byte STREAMINFO block",
-                ));
-            }
-            let mut raw = [0u8; 34];
-            raw.copy_from_slice(&bytes[offset..offset + 34]);
-            stream_info = Some(StreamInfo::from_bytes(raw));
-            saw_streaminfo = true;
-        } else if block_type == SEEKTABLE_BLOCK_TYPE {
-            let seektable_result = validate_seektable_payload(&bytes[offset..offset + block_len]);
-            let seektable_is_valid = seektable_result.is_ok();
-            if strict_seektable_validation {
-                seektable_result?;
-                if saw_seektable {
-                    return Err(Error::InvalidFlac(
-                        "stream must not contain more than one seektable metadata block",
-                    ));
-                }
-            }
-            if seektable_is_valid {
-                metadata.ingest_flac_metadata_block(
-                    block_type,
-                    &bytes[offset..offset + block_len],
-                    stream_info
-                        .expect("streaminfo parsed before optional metadata")
-                        .total_samples,
-                    stream_info
-                        .expect("streaminfo parsed before optional metadata")
-                        .channels,
-                )?;
-            }
-            saw_seektable = true;
-        } else {
-            metadata.ingest_flac_metadata_block(
-                block_type,
-                &bytes[offset..offset + block_len],
-                stream_info
-                    .expect("streaminfo parsed before optional metadata")
-                    .total_samples,
-                stream_info
-                    .expect("streaminfo parsed before optional metadata")
-                    .channels,
-            )?;
-        }
-
-        offset += block_len;
-        if is_last {
-            break;
-        }
-    }
-
-    Ok((
-        stream_info.ok_or(Error::InvalidFlac("missing STREAMINFO block"))?,
-        metadata,
-        offset,
-    ))
-}
-
-fn read_exact_or_invalid<R: Read>(
-    reader: &mut R,
-    buffer: &mut [u8],
-    truncated_message: &'static str,
-) -> Result<()> {
-    reader.read_exact(buffer).map_err(|error| {
-        if error.kind() == ErrorKind::UnexpectedEof {
-            Error::InvalidFlac(truncated_message)
-        } else {
-            error.into()
-        }
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment,
-        requires_channel_layout_provenance,
-    };
-    use crate::model::ChannelAssignment;
-
-    #[test]
-    fn decodes_independent_channel_assignments_for_one_to_eight_channels() {
-        for (code, channels) in (0u8..=7).zip(1u8..=8) {
-            assert_eq!(
-                decode_channel_assignment(code).unwrap(),
-                ChannelAssignment::Independent(channels)
-            );
-        }
-    }
-
-    #[test]
-    fn preserves_stereo_only_decorrelation_modes() {
-        assert_eq!(
-            decode_channel_assignment(0b1000).unwrap(),
-            ChannelAssignment::LeftSide
-        );
-        assert_eq!(
-            decode_channel_assignment(0b1001).unwrap(),
-            ChannelAssignment::SideRight
-        );
-        assert_eq!(
-            decode_channel_assignment(0b1010).unwrap(),
-            ChannelAssignment::MidSide
-        );
-    }
-
-    #[test]
-    fn bit_depth_code_zero_uses_streaminfo_depth_for_broader_flac_native_range() {
-        for depth in [4u8, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 31] {
-            assert_eq!(decode_bits_per_sample(0b000, depth).unwrap(), depth);
-        }
-        assert_eq!(decode_bits_per_sample(0b001, 4).unwrap(), 8);
-        assert_eq!(decode_bits_per_sample(0b010, 4).unwrap(), 12);
-        assert_eq!(decode_bits_per_sample(0b100, 4).unwrap(), 16);
-        assert_eq!(decode_bits_per_sample(0b101, 4).unwrap(), 20);
-        assert_eq!(decode_bits_per_sample(0b110, 4).unwrap(), 24);
-        assert_eq!(decode_bits_per_sample(0b111, 4).unwrap(), 32);
-    }
-
-    #[test]
-    fn channel_bits_expand_for_independent_multichannel_assignments() {
-        assert_eq!(
-            channel_bits_per_sample(ChannelAssignment::Independent(3), 16),
-            vec![16, 16, 16]
-        );
-        assert_eq!(
-            channel_bits_per_sample(ChannelAssignment::MidSide, 16),
-            vec![16, 17]
-        );
-    }
-
-    #[test]
-    fn channel_layout_provenance_is_only_required_for_explicit_mask_restore() {
-        assert!(!requires_channel_layout_provenance(2, None));
-        assert!(requires_channel_layout_provenance(2, Some(0)));
-        assert!(requires_channel_layout_provenance(4, Some(0x0001_2104)));
-    }
 }

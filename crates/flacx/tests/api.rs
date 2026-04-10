@@ -1,8 +1,9 @@
 use std::{fs, io::Cursor};
 
 use flacx::{
-    DecodeSummary, Decoder, Encoder, EncoderConfig, RawPcmByteOrder, RawPcmDescriptor,
-    decode_bytes, encode_bytes, encode_file, inspect_raw_pcm_total_samples, level::Level,
+    DecodeSummary, Decoder, Encoder, EncoderConfig, PcmSpec, PcmStream, RawPcmByteOrder,
+    RawPcmDescriptor, convenience, decode_bytes, encode_file, inspect_raw_pcm_total_samples,
+    level::Level, read_pcm_stream, write_pcm_stream,
 };
 
 mod support;
@@ -13,11 +14,11 @@ use support::{
 };
 
 #[test]
-fn top_level_encode_bytes_matches_default_encoder() {
+fn convenience_encode_bytes_matches_default_encoder() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
-    let via_function = encode_bytes(&wav).unwrap();
+    let via_module = convenience::encode_bytes(&wav).unwrap();
     let via_encoder = Encoder::default().encode_bytes(&wav).unwrap();
-    assert_eq!(via_function, via_encoder);
+    assert_eq!(via_module, via_encoder);
 }
 
 #[test]
@@ -75,7 +76,7 @@ fn api_accepts_seekable_readers_and_writers() {
 }
 
 #[test]
-fn top_level_decode_bytes_matches_default_decoder() {
+fn convenience_decode_bytes_matches_default_decoder() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
@@ -121,6 +122,40 @@ fn decode_api_accepts_seekable_readers_and_returns_summary() {
     assert_eq!(format.channels, 2);
     assert_eq!(format.sample_rate, 48_000);
     assert_eq!(format.bits_per_sample, 24);
+}
+
+#[test]
+fn typed_pcm_aliases_are_usable_from_the_public_api() {
+    let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 256));
+    let stream: PcmStream = read_pcm_stream(Cursor::new(&wav)).unwrap();
+    let spec: PcmSpec = stream.spec;
+
+    assert_eq!(spec.sample_rate, 48_000);
+    assert_eq!(spec.channels, 2);
+    assert_eq!(spec.bits_per_sample, 24);
+    assert_eq!(stream.samples.len(), 512);
+}
+
+#[test]
+fn explicit_pcm_stream_pipeline_round_trips_without_convenience_inference() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let stream = read_pcm_stream(Cursor::new(&wav)).unwrap();
+
+    let mut flac = Cursor::new(Vec::new());
+    let encode_summary = Encoder::default()
+        .encode_pcm_stream(&stream, &mut flac)
+        .unwrap();
+    let decoded_stream = Decoder::default()
+        .decode_pcm_stream(Cursor::new(flac.into_inner()))
+        .unwrap();
+    let mut roundtrip = Cursor::new(Vec::new());
+    write_pcm_stream(&mut roundtrip, &decoded_stream, flacx::PcmContainer::Wave).unwrap();
+
+    assert_eq!(encode_summary.total_samples, 1_024);
+    assert_eq!(decoded_stream.spec.sample_rate, 44_100);
+    assert_eq!(decoded_stream.spec.channels, 2);
+    assert_eq!(decoded_stream.samples, stream.samples);
+    assert_eq!(wav_data_bytes(roundtrip.get_ref()), wav_data_bytes(&wav));
 }
 
 #[test]

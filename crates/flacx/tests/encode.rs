@@ -6,9 +6,19 @@ mod support;
 
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, decode_with_ffmpeg,
-    flac_metadata_blocks, info_list_chunk, parse_first_flac_frame_header, parse_wav_format,
-    pcm_wav_bytes, sample_fixture, vorbis_comments, wav_data_bytes, wav_with_chunks,
+    ffmpeg_available, flac_metadata_blocks, info_list_chunk, parse_first_flac_frame_header,
+    parse_wav_format, pcm_wav_bytes, sample_fixture, vorbis_comments, wav_data_bytes,
+    wav_with_chunks,
 };
+
+fn require_ffmpeg_or_skip() -> bool {
+    if ffmpeg_available() {
+        true
+    } else {
+        eprintln!("skipping ffmpeg oracle test: ffmpeg unavailable in PATH");
+        false
+    }
+}
 
 #[test]
 fn patches_streaminfo_after_encoding() {
@@ -328,6 +338,9 @@ fn encodes_riff_cue_when_no_canonical_private_chunk_exists() {
 
 #[test]
 fn round_trips_16bit_stereo_with_ffmpeg_oracle() {
+    if !require_ffmpeg_or_skip() {
+        return;
+    }
     let samples = sample_fixture(2, 6_144);
     let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
     let flac = Encoder::new(EncoderConfig::default().with_threads(4))
@@ -340,6 +353,9 @@ fn round_trips_16bit_stereo_with_ffmpeg_oracle() {
 
 #[test]
 fn round_trips_24bit_mono_with_ffmpeg_oracle() {
+    if !require_ffmpeg_or_skip() {
+        return;
+    }
     let samples: Vec<i32> = (0..5_000)
         .map(|index| ((index * 9_731) % 16_000_000) - 8_000_000)
         .collect();
@@ -354,6 +370,9 @@ fn round_trips_24bit_mono_with_ffmpeg_oracle() {
 
 #[test]
 fn round_trips_constant_16bit_mono_with_ffmpeg_oracle() {
+    if !require_ffmpeg_or_skip() {
+        return;
+    }
     let samples = vec![12_345; 6_144];
     let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
     let flac = Encoder::new(EncoderConfig::default().with_threads(2))

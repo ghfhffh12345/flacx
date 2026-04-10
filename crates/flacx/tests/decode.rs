@@ -7,17 +7,21 @@ use flacx::{
 
 mod support;
 
+#[cfg(feature = "caf")]
+use support::is_caf_bytes;
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, ParsedMetadataBlock, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
     cuesheet_block, extensible_pcm_wav_bytes, flac_frames, flac_metadata_blocks, info_list_chunk,
-    is_aifc_bytes, is_aiff_bytes, is_caf_bytes, is_w64_bytes, ordinary_channel_mask,
-    parse_first_flac_frame_header, parse_fxmd_chunk_payload, parse_wav_format, pcm_wav_bytes,
-    picture_block, raw_cuesheet_block, raw_seektable_block, replace_flac_optional_metadata,
-    rewrite_streaminfo_md5, rich_cuesheet_payload, sample_fixture, seektable_block, streaminfo_md5,
-    truncate_bytes, unique_temp_path, vorbis_comment_block, vorbis_comments, wav_chunk_payloads,
-    wav_cue_points, wav_data_bytes, wav_info_entries, wav_with_chunks,
+    is_w64_bytes, ordinary_channel_mask, parse_first_flac_frame_header, parse_fxmd_chunk_payload,
+    parse_wav_format, pcm_wav_bytes, picture_block, raw_cuesheet_block, raw_seektable_block,
+    replace_flac_optional_metadata, rewrite_streaminfo_md5, rich_cuesheet_payload, sample_fixture,
+    seektable_block, streaminfo_md5, truncate_bytes, unique_temp_path, vorbis_comment_block,
+    vorbis_comments, wav_chunk_payloads, wav_cue_points, wav_data_bytes, wav_info_entries,
+    wav_with_chunks,
 };
+#[cfg(feature = "aiff")]
+use support::{is_aifc_bytes, is_aiff_bytes};
 
 fn decode_thread_variants() -> [usize; 2] {
     [1, DecodeConfig::default().threads.max(2)]
@@ -235,6 +239,7 @@ fn decode_file_writes_identical_wav_bytes() {
     let _ = fs::remove_file(input_path);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decode_bytes_can_emit_rf64_when_requested() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
@@ -250,6 +255,7 @@ fn decode_bytes_can_emit_rf64_when_requested() {
     assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decode_bytes_can_emit_wave64_when_requested() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
@@ -265,6 +271,7 @@ fn decode_bytes_can_emit_wave64_when_requested() {
     assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decode_file_infers_wave64_from_output_extension() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
@@ -287,6 +294,7 @@ fn decode_file_infers_wave64_from_output_extension() {
     let _ = fs::remove_file(input_path);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decode_file_infers_rf64_from_output_extension() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
@@ -309,6 +317,7 @@ fn decode_file_infers_rf64_from_output_extension() {
     let _ = fs::remove_file(input_path);
 }
 
+#[cfg(feature = "aiff")]
 #[test]
 fn decode_bytes_can_emit_aiff_when_requested() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
@@ -324,6 +333,7 @@ fn decode_bytes_can_emit_aiff_when_requested() {
     assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "aiff")]
 #[test]
 fn decode_bytes_can_emit_aiff_for_ordinary_multichannel_layouts() {
     let wav = extensible_pcm_wav_bytes(
@@ -346,6 +356,7 @@ fn decode_bytes_can_emit_aiff_for_ordinary_multichannel_layouts() {
     assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "aiff")]
 #[test]
 fn decode_bytes_can_emit_aifc_when_requested() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
@@ -361,6 +372,7 @@ fn decode_bytes_can_emit_aifc_when_requested() {
     assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "caf")]
 #[test]
 fn decode_bytes_can_emit_caf_when_requested() {
     let wav = extensible_pcm_wav_bytes(
@@ -383,6 +395,7 @@ fn decode_bytes_can_emit_caf_when_requested() {
     assert_eq!(wav_data_bytes(&round_tripped), wav_data_bytes(&wav));
 }
 
+#[cfg(all(feature = "aiff", feature = "caf"))]
 #[test]
 fn decode_file_infers_aiff_family_and_caf_from_output_extension() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
@@ -390,11 +403,17 @@ fn decode_file_infers_aiff_family_and_caf_from_output_extension() {
     let input_path = unique_temp_path("flac");
     fs::write(&input_path, flac).unwrap();
 
-    for (ext, detector) in [
+    #[allow(unused_mut)]
+    let cases: &[(&str, fn(&[u8]) -> bool)] = &[
+        #[cfg(feature = "aiff")]
         ("aiff", is_aiff_bytes as fn(&[u8]) -> bool),
+        #[cfg(feature = "aiff")]
         ("aifc", is_aifc_bytes as fn(&[u8]) -> bool),
+        #[cfg(feature = "caf")]
         ("caf", is_caf_bytes as fn(&[u8]) -> bool),
-    ] {
+    ];
+
+    for &(ext, detector) in cases {
         let output_path = unique_temp_path(ext);
         Decoder::default()
             .decode_file(&input_path, &output_path)
@@ -433,12 +452,20 @@ fn decode_file_rejects_unsupported_output_extension() {
     let _ = fs::remove_file(input_path);
 }
 
+#[cfg(feature = "aiff")]
 #[test]
 fn decode_aiff_output_projects_text_and_marker_metadata_without_fxmd() {
     let wav = wav_with_chunks(
         pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 512)),
         &[
-            (*b"LIST", info_list_chunk(&[(*b"INAM", b"Example"), (*b"IART", b"Artist"), (*b"ICMT", b"Note")])),
+            (
+                *b"LIST",
+                info_list_chunk(&[
+                    (*b"INAM", b"Example"),
+                    (*b"IART", b"Artist"),
+                    (*b"ICMT", b"Note"),
+                ]),
+            ),
             (*b"cue ", cue_chunk(&[0, 128])),
         ],
     );
@@ -456,12 +483,16 @@ fn decode_aiff_output_projects_text_and_marker_metadata_without_fxmd() {
     assert!(!decoded.windows(4).any(|window| window == b"fxmd"));
 }
 
+#[cfg(feature = "caf")]
 #[test]
 fn decode_caf_output_projects_info_and_marker_metadata_without_fxmd() {
     let wav = wav_with_chunks(
         pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 512)),
         &[
-            (*b"LIST", info_list_chunk(&[(*b"INAM", b"Example"), (*b"IART", b"Artist")])),
+            (
+                *b"LIST",
+                info_list_chunk(&[(*b"INAM", b"Example"), (*b"IART", b"Artist")]),
+            ),
             (*b"cue ", cue_chunk(&[0, 64])),
         ],
     );

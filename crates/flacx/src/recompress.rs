@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    decode::{commit_temp_output, open_temp_output},
+    decode_output::{commit_temp_output, open_temp_output},
     encoder::{EncodeSummary, Encoder},
     error::Result,
     input::EncodeWavData,

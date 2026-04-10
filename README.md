@@ -33,6 +33,9 @@ Add the library crate to your project:
 flacx = "0.8.2"
 ```
 
+The library enables its built-in `wav`, `aiff`, and `caf` container families
+by default; add `progress` when you want callback-driven progress from Rust.
+
 Then encode a supported PCM container to FLAC from Rust:
 
 ```rust
@@ -57,6 +60,10 @@ Decoder::default()
     .decode_file("input.flac", "output.wav")
     .unwrap();
 ```
+
+If you want the explicit adapter/core path instead of the convenience helpers,
+the library crate also exposes `flacx::core::{PcmStream, read_pcm_stream,
+write_pcm_stream, Encoder, Decoder}`.
 
 See [`crates/flacx/README.md`](crates/flacx/README.md) for the crate-focused usage guide.
 
@@ -147,7 +154,12 @@ required secret setup, and manual recovery notes.
 
 ## Documentation map
 
-- [`crates/flacx/README.md`](crates/flacx/README.md) — library user guide and
-  API overview
+- [`crates/flacx/README.md`](crates/flacx/README.md) — crate-level public API
+  architecture guide
+- [`docs/flacx-public-api-architecture.md`](docs/flacx-public-api-architecture.md) —
+  expanded maintainer-oriented guide to the current public surface and source
+  structure
+- [`docs/flacx-major-refactor-review.md`](docs/flacx-major-refactor-review.md) —
+  maintainer guide for the explicit-core / convenience-layer refactor
 - [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) — CLI user guide
 - [`docs/releasing.md`](docs/releasing.md) — maintainer release workflow
