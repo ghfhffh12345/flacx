@@ -9,12 +9,169 @@ pub(crate) use crate::pcm::{
     container_bits_from_valid_bits, ordinary_channel_mask,
 };
 pub use crate::pcm::{PcmSpec, PcmStream};
+pub type PcmReaderOptions = crate::wav_input::WavReaderOptions;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EncodeWavData {
+pub(crate) struct BufferedEncodeInput {
     pub(crate) wav: WavData,
     pub(crate) metadata: EncodeMetadata,
     pub(crate) streaminfo_md5: [u8; 16],
+}
+
+/// Single-pass PCM sample source consumed by the encode session.
+pub trait EncodePcmStream {
+    /// Return the stream specification that drives encode planning.
+    fn spec(&self) -> PcmSpec;
+
+    /// Read up to `max_frames` interleaved PCM frames into `output`.
+    ///
+    /// Returns the number of frames appended to `output`.
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize>;
+
+    fn update_streaminfo_md5(
+        &mut self,
+        md5: &mut crate::md5::StreaminfoMd5,
+        samples: &[i32],
+    ) -> Result<()> {
+        md5.update_samples(samples)
+    }
+}
+
+/// Family-dispatched PCM reader for the explicit encode workflow.
+pub enum PcmReader<R: Read + Seek> {
+    Wav(crate::wav_input::WavReader<R>),
+    #[cfg(feature = "aiff")]
+    Aiff(crate::aiff::AiffReader<R>),
+    #[cfg(feature = "caf")]
+    Caf(crate::caf::CafReader<R>),
+}
+
+impl<R: Read + Seek> PcmReader<R> {
+    /// Return the parsed PCM specification without consuming the sample stream.
+    #[must_use]
+    pub fn spec(&self) -> PcmSpec {
+        match self {
+            Self::Wav(reader) => reader.spec(),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(reader) => reader.spec(),
+            #[cfg(feature = "caf")]
+            Self::Caf(reader) => reader.spec(),
+        }
+    }
+
+    /// Return the parsed encode-side metadata captured from the input.
+    #[must_use]
+    pub fn metadata(&self) -> &EncodeMetadata {
+        match self {
+            Self::Wav(reader) => reader.metadata(),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(reader) => reader.metadata(),
+            #[cfg(feature = "caf")]
+            Self::Caf(reader) => reader.metadata(),
+        }
+    }
+
+    /// Convert the parsed reader into its single-pass PCM stream.
+    pub fn into_pcm_stream(self) -> AnyPcmStream<R> {
+        match self {
+            Self::Wav(reader) => AnyPcmStream::Wav(reader.into_pcm_stream()),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(reader) => AnyPcmStream::Aiff(reader.into_pcm_stream()),
+            #[cfg(feature = "caf")]
+            Self::Caf(reader) => AnyPcmStream::Caf(reader.into_pcm_stream()),
+        }
+    }
+}
+
+/// Family-dispatched single-pass PCM stream.
+pub enum AnyPcmStream<R: Read + Seek> {
+    Wav(crate::wav_input::WavPcmStream<R>),
+    #[cfg(feature = "aiff")]
+    Aiff(crate::aiff::AiffPcmStream<R>),
+    #[cfg(feature = "caf")]
+    Caf(crate::caf::CafPcmStream<R>),
+}
+
+impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
+    fn spec(&self) -> PcmSpec {
+        match self {
+            Self::Wav(stream) => stream.spec(),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(stream) => stream.spec(),
+            #[cfg(feature = "caf")]
+            Self::Caf(stream) => stream.spec(),
+        }
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        match self {
+            Self::Wav(stream) => stream.read_chunk(max_frames, output),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(stream) => stream.read_chunk(max_frames, output),
+            #[cfg(feature = "caf")]
+            Self::Caf(stream) => stream.read_chunk(max_frames, output),
+        }
+    }
+
+    fn update_streaminfo_md5(
+        &mut self,
+        md5: &mut crate::md5::StreaminfoMd5,
+        samples: &[i32],
+    ) -> Result<()> {
+        match self {
+            Self::Wav(stream) => stream.update_streaminfo_md5(md5, samples),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(stream) => stream.update_streaminfo_md5(md5, samples),
+            #[cfg(feature = "caf")]
+            Self::Caf(stream) => stream.update_streaminfo_md5(md5, samples),
+        }
+    }
+}
+
+/// Parse a supported PCM container and return a family-specific reader for the
+/// explicit encode workflow.
+pub fn read_pcm_reader<R: Read + Seek>(reader: R) -> Result<PcmReader<R>> {
+    read_pcm_reader_with_options(reader, PcmReaderOptions::default())
+}
+
+pub(crate) struct SlicePcmStream {
+    spec: PcmSpec,
+    samples: Vec<i32>,
+    next_sample: usize,
+}
+
+impl SlicePcmStream {
+    pub(crate) fn new(spec: PcmSpec, samples: Vec<i32>) -> Self {
+        Self {
+            spec,
+            samples,
+            next_sample: 0,
+        }
+    }
+
+    pub(crate) fn from_pcm_stream(stream: PcmStream) -> Self {
+        Self::new(stream.spec, stream.samples)
+    }
+}
+
+impl EncodePcmStream for SlicePcmStream {
+    fn spec(&self) -> PcmSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        let channels = usize::from(self.spec.channels);
+        let remaining_frames = (self.samples.len().saturating_sub(self.next_sample)) / channels;
+        let frames = remaining_frames.min(max_frames);
+        if frames == 0 {
+            return Ok(0);
+        }
+        let next = self.next_sample + frames * channels;
+        output.extend_from_slice(&self.samples[self.next_sample..next]);
+        self.next_sample = next;
+        Ok(frames)
+    }
 }
 
 #[allow(dead_code)]
@@ -55,18 +212,33 @@ pub(crate) fn inspect_pcm_total_samples<R: Read + Seek>(reader: &mut R) -> Resul
     }
 }
 
-pub(crate) fn read_pcm_for_encode_with_config<R: Read + Seek>(
-    reader: &mut R,
-    config: &EncoderConfig,
-) -> Result<EncodeWavData> {
-    match sniff_pcm_input_kind(reader)? {
-        PcmInputKind::AiffLike => read_aiff_for_encode_with_features(reader),
-        PcmInputKind::Caf => read_caf_for_encode_with_features(reader),
+pub fn read_pcm_reader_with_options<R: Read + Seek>(
+    mut reader: R,
+    options: PcmReaderOptions,
+) -> Result<PcmReader<R>> {
+    match sniff_pcm_input_kind(&mut reader)? {
+        PcmInputKind::AiffLike => read_aiff_reader_with_features(reader),
+        PcmInputKind::Caf => read_caf_reader_with_features(reader),
         PcmInputKind::RiffLike => {
             ensure_wav_family_enabled()?;
-            crate::wav_input::read_wav_for_encode_with_config(reader, config)
+            Ok(PcmReader::Wav(
+                crate::wav_input::WavReader::with_reader_options(reader, options)?,
+            ))
         }
     }
+}
+
+pub(crate) fn read_pcm_reader_with_config<R: Read + Seek>(
+    reader: R,
+    config: &EncoderConfig,
+) -> Result<PcmReader<R>> {
+    read_pcm_reader_with_options(
+        reader,
+        PcmReaderOptions {
+            capture_fxmd: config.capture_fxmd,
+            strict_fxmd_validation: config.strict_fxmd_validation,
+        },
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,22 +283,22 @@ fn inspect_caf_total_samples_with_features<R: Read + Seek>(_reader: &mut R) -> R
 }
 
 #[cfg(feature = "aiff")]
-fn read_aiff_for_encode_with_features<R: Read + Seek>(reader: &mut R) -> Result<EncodeWavData> {
-    crate::aiff::read_aiff_for_encode(reader)
+fn read_aiff_reader_with_features<R: Read + Seek>(reader: R) -> Result<PcmReader<R>> {
+    Ok(PcmReader::Aiff(crate::aiff::AiffReader::new(reader)?))
 }
 
 #[cfg(not(feature = "aiff"))]
-fn read_aiff_for_encode_with_features<R: Read + Seek>(_reader: &mut R) -> Result<EncodeWavData> {
+fn read_aiff_reader_with_features<R: Read + Seek>(_reader: R) -> Result<PcmReader<R>> {
     Err(aiff_feature_disabled_error())
 }
 
 #[cfg(feature = "caf")]
-fn read_caf_for_encode_with_features<R: Read + Seek>(reader: &mut R) -> Result<EncodeWavData> {
-    crate::caf::read_caf_for_encode(reader)
+fn read_caf_reader_with_features<R: Read + Seek>(reader: R) -> Result<PcmReader<R>> {
+    Ok(PcmReader::Caf(crate::caf::CafReader::new(reader)?))
 }
 
 #[cfg(not(feature = "caf"))]
-fn read_caf_for_encode_with_features<R: Read + Seek>(_reader: &mut R) -> Result<EncodeWavData> {
+fn read_caf_reader_with_features<R: Read + Seek>(_reader: R) -> Result<PcmReader<R>> {
     Err(caf_feature_disabled_error())
 }
 

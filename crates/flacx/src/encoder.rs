@@ -1,24 +1,18 @@
-//! PCM-container-to-FLAC encoding primitives used by the `flacx` crate.
+//! PCM-container-to-FLAC encoding session primitives used by the `flacx` crate.
 //!
-//! The main façade is [`Encoder`]. Pair it with [`EncoderConfig`] or
-//! [`Encoder::builder`] to choose the compression level, thread count, and
-//! optional block sizing strategy before encoding.
+//! The public encode flow is reader-driven: parse a family reader, inspect its
+//! spec/metadata, bind an output writer through [`EncoderConfig::into_encoder`],
+//! then feed the resulting single-pass PCM stream into [`Encoder::encode`].
 
-use std::{
-    io::{Read, Seek, Write},
-    path::Path,
-};
+use std::io::{Seek, Write};
 
 use crate::{
     config::{EncoderBuilder, EncoderConfig},
-    convenience,
-    encode_pipeline::encode_prepared,
+    encode_pipeline::encode_stream,
     error::Result,
-    input::read_pcm_for_encode_with_config,
-    md5::streaminfo_md5,
+    input::EncodePcmStream,
     metadata::EncodeMetadata,
     progress::{NoProgress, ProgressSink},
-    raw::{RawPcmDescriptor, read_raw_for_encode},
 };
 
 #[cfg(feature = "progress")]
@@ -26,364 +20,167 @@ use crate::progress::ProgressSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Summary of the FLAC stream produced by an encode operation.
-///
-/// The values mirror the stream information written into the output file.
 pub struct EncodeSummary {
-    /// Number of FLAC frames written to the output stream.
     pub frame_count: usize,
-    /// Total input samples consumed by the encoder.
     pub total_samples: u64,
-    /// Maximum block size recorded in the output stream.
     pub block_size: u16,
-    /// Smallest encoded frame size in bytes.
     pub min_frame_size: u32,
-    /// Largest encoded frame size in bytes.
     pub max_frame_size: u32,
-    /// Smallest encoded block size in samples.
     pub min_block_size: u16,
-    /// Largest encoded block size in samples.
     pub max_block_size: u16,
-    /// Sample rate of the encoded stream.
     pub sample_rate: u32,
-    /// Number of channels in the encoded stream.
     pub channels: u8,
-    /// Bits per sample recorded in the encoded stream.
     pub bits_per_sample: u8,
 }
 
-/// Primary library façade for PCM-container-to-FLAC conversion.
-///
-/// Construct an encoder from [`EncoderConfig`] and call one of the encode
-/// methods depending on your input shape:
-///
-/// - [`Encoder::encode`] for generic `Read + Seek` sources
-/// - [`Encoder::encode_file`] for file paths
-/// - [`Encoder::encode_bytes`] for in-memory input
-/// - [`Encoder::encode_raw`] / [`Encoder::encode_raw_file`] for explicit raw
-///   PCM descriptors
-///
-/// The encoder itself is cheap to clone and holds only its configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Encoder {
+/// Writer-owning PCM-container-to-FLAC encode session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encoder<W> {
     config: EncoderConfig,
+    writer: W,
+    metadata: EncodeMetadata,
 }
 
-impl Encoder {
+impl EncoderConfig {
+    /// Bind an output writer and create a writer-owning encode session.
+    pub fn into_encoder<W>(self, writer: W) -> Encoder<W>
+    where
+        W: Write + Seek,
+    {
+        Encoder::new(writer, self)
+    }
+}
+
+impl EncoderBuilder {
+    /// Finish building the configuration and bind an output writer.
+    pub fn into_encoder<W>(self, writer: W) -> Encoder<W>
+    where
+        W: Write + Seek,
+    {
+        self.build().into_encoder(writer)
+    }
+}
+
+impl<W> Encoder<W>
+where
+    W: Write + Seek,
+{
     /// Create a builder initialized from [`EncoderConfig::builder`].
     #[must_use]
     pub fn builder() -> EncoderBuilder {
         EncoderConfig::builder()
     }
 
-    /// Construct an encoder from a configuration value.
+    /// Construct a writer-owning encode session from a writer and config.
     #[must_use]
-    pub fn new(config: EncoderConfig) -> Self {
-        Self { config }
+    pub fn new(writer: W, config: EncoderConfig) -> Self {
+        Self {
+            config,
+            writer,
+            metadata: EncodeMetadata::default(),
+        }
     }
 
-    /// Return a clone of the configuration currently stored in the encoder.
+    /// Return a clone of the session configuration.
     #[must_use]
     pub fn config(&self) -> EncoderConfig {
         self.config.clone()
     }
 
-    /// Return a new encoder with a different compression level preset.
+    /// Return the metadata currently staged onto the encode session.
     #[must_use]
-    pub fn with_level(self, level: crate::level::Level) -> Self {
-        Self::new(self.config.with_level(level))
+    pub fn metadata(&self) -> &EncodeMetadata {
+        &self.metadata
     }
 
-    /// Return a new encoder with a different worker thread count.
-    #[must_use]
-    pub fn with_threads(self, threads: usize) -> Self {
-        Self::new(self.config.with_threads(threads))
+    /// Replace the staged encode metadata.
+    pub fn set_metadata(&mut self, metadata: EncodeMetadata) {
+        self.metadata = metadata;
     }
 
-    /// Return a new encoder with a different fixed block size.
+    /// Return a new session with different staged metadata.
     #[must_use]
-    pub fn with_block_size(self, block_size: u16) -> Self {
-        Self::new(self.config.with_block_size(block_size))
+    pub fn with_metadata(mut self, metadata: EncodeMetadata) -> Self {
+        self.metadata = metadata;
+        self
     }
 
-    /// Encode a supported PCM-container reader into FLAC output.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use std::io::Cursor;
-    /// use flacx::Encoder;
-    ///
-    /// let input = Cursor::new(std::fs::read("input.wav").unwrap());
-    /// let mut output = Cursor::new(Vec::new());
-    /// Encoder::default().encode(input, &mut output).unwrap();
-    /// ```
-    pub fn encode<R, W>(&self, input: R, output: W) -> Result<EncodeSummary>
+    /// Return a new session with a different compression level preset.
+    #[must_use]
+    pub fn with_level(mut self, level: crate::level::Level) -> Self {
+        self.config = self.config.with_level(level);
+        self
+    }
+
+    /// Return a new session with a different worker thread count.
+    #[must_use]
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.config = self.config.with_threads(threads);
+        self
+    }
+
+    /// Return a new session with a different fixed block size.
+    #[must_use]
+    pub fn with_block_size(mut self, block_size: u16) -> Self {
+        self.config = self.config.with_block_size(block_size);
+        self
+    }
+
+    /// Return a shared reference to the owned output writer.
+    #[must_use]
+    pub fn writer(&self) -> &W {
+        &self.writer
+    }
+
+    /// Return a mutable reference to the owned output writer.
+    pub fn writer_mut(&mut self) -> &mut W {
+        &mut self.writer
+    }
+
+    /// Consume the session and return the owned writer.
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    /// Encode a single-pass PCM stream into the owned writer.
+    pub fn encode<S>(&mut self, stream: S) -> Result<EncodeSummary>
     where
-        R: Read + Seek,
-        W: Write + Seek,
+        S: EncodePcmStream,
     {
-        let mut input = input;
-        let input = read_pcm_for_encode_with_config(&mut input, &self.config)?;
         let mut progress = NoProgress;
-        self.encode_wav_data(input, output, &mut progress)
+        self.encode_with_sink(stream, &mut progress)
     }
 
     #[cfg(feature = "progress")]
-    /// Encode a supported PCM-container reader into FLAC output while reporting progress.
-    ///
-    /// The callback receives a [`ProgressSnapshot`] after each frame is
-    /// written.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # #[cfg(feature = "progress")]
-    /// # {
-    /// use std::io::Cursor;
-    /// use flacx::{Encoder, ProgressSnapshot};
-    ///
-    /// let input = Cursor::new(std::fs::read("input.wav").unwrap());
-    /// let mut output = Cursor::new(Vec::new());
-    /// Encoder::default().encode_with_progress(input, &mut output, |snapshot: ProgressSnapshot| {
-    ///     println!("{} / {}", snapshot.processed_samples, snapshot.total_samples);
-    ///     Ok(())
-    /// }).unwrap();
-    /// # }
-    /// ```
-    pub fn encode_with_progress<R, W, F>(
-        &self,
-        input: R,
-        output: W,
+    /// Encode a single-pass PCM stream while reporting frame-level progress.
+    pub fn encode_with_progress<S, F>(
+        &mut self,
+        stream: S,
         mut on_progress: F,
     ) -> Result<EncodeSummary>
     where
-        R: Read + Seek,
-        W: Write + Seek,
+        S: EncodePcmStream,
         F: FnMut(ProgressSnapshot) -> Result<()>,
     {
-        let mut input = input;
-        let input = read_pcm_for_encode_with_config(&mut input, &self.config)?;
         let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
-        self.encode_wav_data(input, output, &mut progress)
+        self.encode_with_sink(stream, &mut progress)
     }
 
-    /// Encode raw signed-integer PCM from a seekable reader into FLAC output.
-    pub fn encode_raw<R, W>(
-        &self,
-        input: R,
-        output: W,
-        descriptor: RawPcmDescriptor,
-    ) -> Result<EncodeSummary>
-    where
-        R: Read + Seek,
-        W: Write + Seek,
-    {
-        let mut input = input;
-        let input = read_raw_for_encode(&mut input, descriptor)?;
-        let mut progress = NoProgress;
-        self.encode_wav_data(input, output, &mut progress)
-    }
-
-    /// Encode an explicit typed PCM stream into FLAC output.
-    pub fn encode_pcm<W>(&self, input: crate::PcmStream, output: W) -> Result<EncodeSummary>
-    where
-        W: Write + Seek,
-    {
-        let streaminfo_md5 = streaminfo_md5(input.spec, &input.samples)?;
-        let prepared = crate::input::EncodeWavData {
-            wav: input,
-            metadata: EncodeMetadata::default(),
-            streaminfo_md5,
-        };
-        let mut progress = NoProgress;
-        self.encode_wav_data(prepared, output, &mut progress)
-    }
-
-    /// Encode an explicit typed PCM stream into FLAC output.
-    ///
-    /// This alias keeps the public API spelling aligned with
-    /// [`crate::read_pcm_stream`] / [`crate::write_pcm_stream`].
-    pub fn encode_pcm_stream<W>(&self, input: &crate::PcmStream, output: W) -> Result<EncodeSummary>
-    where
-        W: Write + Seek,
-    {
-        self.encode_pcm(input.clone(), output)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Encode an explicit typed PCM stream into FLAC output while reporting progress.
-    pub fn encode_pcm_with_progress<W, F>(
-        &self,
-        input: crate::PcmStream,
-        output: W,
-        mut on_progress: F,
-    ) -> Result<EncodeSummary>
-    where
-        W: Write + Seek,
-        F: FnMut(ProgressSnapshot) -> Result<()>,
-    {
-        let streaminfo_md5 = streaminfo_md5(input.spec, &input.samples)?;
-        let prepared = crate::input::EncodeWavData {
-            wav: input,
-            metadata: EncodeMetadata::default(),
-            streaminfo_md5,
-        };
-        let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
-        self.encode_wav_data(prepared, output, &mut progress)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Encode an explicit typed PCM stream into FLAC output while reporting progress.
-    ///
-    /// This alias keeps the public API spelling aligned with
-    /// [`crate::read_pcm_stream`] / [`crate::write_pcm_stream`].
-    pub fn encode_pcm_stream_with_progress<W, F>(
-        &self,
-        input: &crate::PcmStream,
-        output: W,
-        on_progress: F,
-    ) -> Result<EncodeSummary>
-    where
-        W: Write + Seek,
-        F: FnMut(ProgressSnapshot) -> Result<()>,
-    {
-        self.encode_pcm_with_progress(input.clone(), output, on_progress)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Encode raw signed-integer PCM into FLAC output while reporting progress.
-    pub fn encode_raw_with_progress<R, W, F>(
-        &self,
-        input: R,
-        output: W,
-        descriptor: RawPcmDescriptor,
-        mut on_progress: F,
-    ) -> Result<EncodeSummary>
-    where
-        R: Read + Seek,
-        W: Write + Seek,
-        F: FnMut(ProgressSnapshot) -> Result<()>,
-    {
-        let mut input = input;
-        let input = read_raw_for_encode(&mut input, descriptor)?;
-        let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
-        self.encode_wav_data(input, output, &mut progress)
-    }
-
-    /// Encode from one file path to another.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use flacx::Encoder;
-    ///
-    /// Encoder::default()
-    ///     .encode_file("input.wav", "output.flac")
-    ///     .unwrap();
-    /// ```
-    pub fn encode_file<P, Q>(&self, input_path: P, output_path: Q) -> Result<EncodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        convenience::encode_file_with_encoder(self, input_path, output_path)
-    }
-
-    /// Encode raw signed-integer PCM from one file path to another.
-    pub fn encode_raw_file<P, Q>(
-        &self,
-        input_path: P,
-        output_path: Q,
-        descriptor: RawPcmDescriptor,
-    ) -> Result<EncodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        convenience::encode_raw_file_with_encoder(self, input_path, output_path, descriptor)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Encode from one file path to another while reporting progress.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # #[cfg(feature = "progress")]
-    /// # {
-    /// use flacx::{Encoder, ProgressSnapshot};
-    ///
-    /// Encoder::default()
-    ///     .encode_file_with_progress("input.wav", "output.flac", |snapshot: ProgressSnapshot| {
-    ///         println!("{} / {} frames", snapshot.completed_frames, snapshot.total_frames);
-    ///         Ok(())
-    ///     })
-    ///     .unwrap();
-    /// # }
-    /// ```
-    pub fn encode_file_with_progress<P, Q, F>(
-        &self,
-        input_path: P,
-        output_path: Q,
-        on_progress: F,
-    ) -> Result<EncodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-        F: FnMut(ProgressSnapshot) -> Result<()>,
-    {
-        convenience::encode_file_with_progress(self, input_path, output_path, on_progress)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Encode raw signed-integer PCM from one file path to another while
-    /// reporting progress.
-    pub fn encode_raw_file_with_progress<P, Q, F>(
-        &self,
-        input_path: P,
-        output_path: Q,
-        descriptor: RawPcmDescriptor,
-        on_progress: F,
-    ) -> Result<EncodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-        F: FnMut(ProgressSnapshot) -> Result<()>,
-    {
-        convenience::encode_raw_file_with_progress(
-            self,
-            input_path,
-            output_path,
-            descriptor,
-            on_progress,
-        )
-    }
-
-    /// Encode an in-memory supported PCM-container buffer and return the FLAC bytes.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use flacx::Encoder;
-    ///
-    /// let wav_bytes = std::fs::read("input.wav").unwrap();
-    /// let flac_bytes = Encoder::default().encode_bytes(&wav_bytes).unwrap();
-    /// assert!(!flac_bytes.is_empty());
-    /// ```
-    pub fn encode_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
-        convenience::encode_bytes_with_encoder(self, input)
-    }
-
-    pub(crate) fn encode_wav_data<W, P>(
-        &self,
-        input: crate::input::EncodeWavData,
-        output: W,
+    pub(crate) fn encode_with_sink<S, P>(
+        &mut self,
+        stream: S,
         progress: &mut P,
     ) -> Result<EncodeSummary>
     where
-        W: Write + Seek,
+        S: EncodePcmStream,
         P: ProgressSink,
     {
-        encode_prepared(&self.config, input, output, progress)
+        encode_stream(
+            &self.config,
+            self.metadata.clone(),
+            stream,
+            &mut self.writer,
+            progress,
+        )
     }
 }

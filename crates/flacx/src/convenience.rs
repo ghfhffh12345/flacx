@@ -1,18 +1,19 @@
 use std::{fs::File, io::Cursor, path::Path};
 
 use crate::{
-    Result,
+    EncoderConfig, Result,
     decode::{DecodeSummary, Decoder},
     decode_output::{commit_temp_output, open_temp_output},
-    encoder::{EncodeSummary, Encoder},
+    encoder::EncodeSummary,
     error::Error,
+    input::read_pcm_reader_with_config,
     pcm::PcmContainer,
-    raw::RawPcmDescriptor,
 };
 
+pub use crate::recompress::{recompress_bytes, recompress_file};
 pub use crate::{
     inspect_flac_total_samples, inspect_pcm_total_samples, inspect_raw_pcm_total_samples,
-    inspect_wav_total_samples, recompress_bytes, recompress_file,
+    inspect_wav_total_samples,
 };
 
 pub fn encode_file<P, Q>(input_path: P, output_path: Q) -> Result<EncodeSummary>
@@ -20,15 +21,15 @@ where
     P: AsRef<Path>,
     Q: AsRef<Path>,
 {
-    encode_file_with_encoder(&Encoder::default(), input_path, output_path)
+    encode_file_with_config(&EncoderConfig::default(), input_path, output_path)
 }
 
 pub fn encode_bytes(input: &[u8]) -> Result<Vec<u8>> {
-    encode_bytes_with_encoder(&Encoder::default(), input)
+    encode_bytes_with_config(&EncoderConfig::default(), input)
 }
 
-pub(crate) fn encode_file_with_encoder<P, Q>(
-    encoder: &Encoder,
+pub(crate) fn encode_file_with_config<P, Q>(
+    config: &EncoderConfig,
     input_path: P,
     output_path: Q,
 ) -> Result<EncodeSummary>
@@ -36,70 +37,22 @@ where
     P: AsRef<Path>,
     Q: AsRef<Path>,
 {
-    encoder.encode(File::open(input_path)?, File::create(output_path)?)
+    let reader = read_pcm_reader_with_config(File::open(input_path)?, config)?;
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = config.clone().into_encoder(File::create(output_path)?);
+    encoder.set_metadata(metadata);
+    encoder.encode(stream)
 }
 
-pub(crate) fn encode_bytes_with_encoder(encoder: &Encoder, input: &[u8]) -> Result<Vec<u8>> {
-    let mut output = Cursor::new(Vec::new());
-    encoder.encode(Cursor::new(input), &mut output)?;
-    Ok(output.into_inner())
-}
-
-pub(crate) fn encode_raw_file_with_encoder<P, Q>(
-    encoder: &Encoder,
-    input_path: P,
-    output_path: Q,
-    descriptor: RawPcmDescriptor,
-) -> Result<EncodeSummary>
-where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-{
-    encoder.encode_raw(
-        File::open(input_path)?,
-        File::create(output_path)?,
-        descriptor,
-    )
-}
-
-#[cfg(feature = "progress")]
-pub(crate) fn encode_file_with_progress<P, Q, F>(
-    encoder: &Encoder,
-    input_path: P,
-    output_path: Q,
-    on_progress: F,
-) -> Result<EncodeSummary>
-where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-    F: FnMut(crate::progress::ProgressSnapshot) -> Result<()>,
-{
-    encoder.encode_with_progress(
-        File::open(input_path)?,
-        File::create(output_path)?,
-        on_progress,
-    )
-}
-
-#[cfg(feature = "progress")]
-pub(crate) fn encode_raw_file_with_progress<P, Q, F>(
-    encoder: &Encoder,
-    input_path: P,
-    output_path: Q,
-    descriptor: RawPcmDescriptor,
-    on_progress: F,
-) -> Result<EncodeSummary>
-where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-    F: FnMut(crate::progress::ProgressSnapshot) -> Result<()>,
-{
-    encoder.encode_raw_with_progress(
-        File::open(input_path)?,
-        File::create(output_path)?,
-        descriptor,
-        on_progress,
-    )
+pub(crate) fn encode_bytes_with_config(config: &EncoderConfig, input: &[u8]) -> Result<Vec<u8>> {
+    let reader = read_pcm_reader_with_config(Cursor::new(input), config)?;
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = config.clone().into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    encoder.encode(stream)?;
+    Ok(encoder.into_inner().into_inner())
 }
 
 pub fn decode_file<P, Q>(input_path: P, output_path: Q) -> Result<DecodeSummary>

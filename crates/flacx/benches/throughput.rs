@@ -1,11 +1,12 @@
 use std::{
-    env, fs,
+    env,
+    fs::{self, File},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use flacx::{DecodeConfig, Decoder, Encoder, EncoderConfig};
+use flacx::{DecodeConfig, Decoder, EncoderConfig, PcmReaderOptions, read_pcm_reader_with_options};
 
 #[path = "../tests/support/mod.rs"]
 mod support;
@@ -80,7 +81,7 @@ impl BenchmarkCorpus {
         let wav_root = fresh_temp_dir("flacx-library-bench-wav")?;
         let flac_root = fresh_temp_dir("flacx-library-bench-flac")?;
         let threads = shared_thread_count();
-        let encoder = Encoder::new(EncoderConfig::default().with_threads(threads));
+        let config = EncoderConfig::default().with_threads(threads);
 
         let mut wav_inputs = Vec::with_capacity(CORPUS_FIXTURES.len());
         let mut flac_inputs = Vec::with_capacity(CORPUS_FIXTURES.len());
@@ -102,7 +103,7 @@ impl BenchmarkCorpus {
             if let Some(parent) = flac_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            encoder.encode_file(&wav_path, &flac_path)?;
+            encode_fixture_file(&config, &wav_path, &flac_path)?;
             flac_inputs.push(flac_path);
         }
 
@@ -131,13 +132,13 @@ fn run_encode_corpus(
     corpus: &BenchmarkCorpus,
     threads: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let encoder = Encoder::new(EncoderConfig::default().with_threads(threads));
+    let config = EncoderConfig::default().with_threads(threads);
     with_temp_dir("flacx-library-bench-encode", |output_root| {
         for input in &corpus.wav_inputs {
             let output = output_root
                 .join(input.file_stem().expect("fixture file stem"))
                 .with_extension("flac");
-            encoder.encode_file(input, &output)?;
+            encode_fixture_file(&config, input, &output)?;
         }
         Ok(())
     })
@@ -176,6 +177,26 @@ fn fresh_temp_dir(label: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = env::temp_dir().join(format!("flacx-{label}-{}-{unique}", std::process::id()));
     fs::create_dir_all(&path)?;
     Ok(path)
+}
+
+fn encode_fixture_file(
+    config: &EncoderConfig,
+    input: &Path,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reader = read_pcm_reader_with_options(
+        File::open(input)?,
+        PcmReaderOptions {
+            capture_fxmd: config.capture_fxmd,
+            strict_fxmd_validation: config.strict_fxmd_validation,
+        },
+    )?;
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = config.clone().into_encoder(File::create(output)?);
+    encoder.set_metadata(metadata);
+    encoder.encode(stream)?;
+    Ok(())
 }
 
 fn shared_thread_count() -> usize {

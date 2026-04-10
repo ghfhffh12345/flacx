@@ -2,8 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::{
     error::{Error, Result},
-    input::{EncodeWavData, WavData, WavSpec},
-    md5::streaminfo_md5,
+    input::WavSpec,
     pcm::{PcmEnvelope, is_supported_channel_mask, ordinary_channel_mask},
 };
 
@@ -23,6 +22,40 @@ pub struct RawPcmDescriptor {
     pub container_bits_per_sample: u8,
     pub byte_order: RawPcmByteOrder,
     pub channel_mask: Option<u32>,
+}
+
+#[derive(Debug)]
+pub struct RawPcmReader<R: Read + Seek> {
+    reader: R,
+    spec: WavSpec,
+    descriptor: RawPcmDescriptor,
+}
+
+impl<R: Read + Seek> RawPcmReader<R> {
+    pub fn new(mut reader: R, descriptor: RawPcmDescriptor) -> Result<Self> {
+        let total_samples = inspect_raw_pcm_total_samples_impl(&mut reader, descriptor)?;
+        Ok(Self {
+            reader,
+            spec: WavSpec {
+                sample_rate: descriptor.sample_rate,
+                channels: descriptor.channels,
+                bits_per_sample: descriptor.valid_bits_per_sample,
+                total_samples,
+                bytes_per_sample: u16::from(descriptor.container_bits_per_sample) / 8,
+                channel_mask: validate_raw_descriptor(descriptor)?.channel_mask,
+            },
+            descriptor,
+        })
+    }
+
+    #[must_use]
+    pub fn spec(&self) -> WavSpec {
+        self.spec
+    }
+
+    pub fn into_pcm_stream(self) -> Result<RawPcmStream<R>> {
+        RawPcmStream::new(self.reader, self.descriptor, self.spec.total_samples)
+    }
 }
 
 /// Inspect raw signed-integer PCM and return its total sample count when an
@@ -54,49 +87,81 @@ pub(crate) fn total_samples_from_byte_len_with_descriptor(
     total_samples_from_byte_len(byte_len, validated.frame_bytes)
 }
 
-pub(crate) fn read_raw_for_encode<R: Read + Seek>(
-    reader: &mut R,
-    descriptor: RawPcmDescriptor,
-) -> Result<EncodeWavData> {
-    let start = reader.stream_position()?;
-    validate_raw_descriptor(descriptor)?;
-    let end = reader.seek(SeekFrom::End(0))?;
-    reader.seek(SeekFrom::Start(start))?;
-    let data_len = usize::try_from(end.saturating_sub(start))
-        .map_err(|_| Error::UnsupportedWav("PCM payload exceeds memory-addressable size".into()))?;
-    let mut data = vec![0u8; data_len];
-    reader.read_exact(&mut data)?;
-    read_raw_bytes_for_encode(data, descriptor)
+#[derive(Debug)]
+pub struct RawPcmStream<R> {
+    reader: R,
+    spec: WavSpec,
+    validated: ValidatedRawDescriptor,
+    remaining_frames: u64,
+    last_chunk_bytes: Vec<u8>,
 }
 
-pub(crate) fn read_raw_bytes_for_encode(
-    data: Vec<u8>,
-    descriptor: RawPcmDescriptor,
-) -> Result<EncodeWavData> {
-    let validated = validate_raw_descriptor(descriptor)?;
-    let total_samples = total_samples_from_byte_len(
-        u64::try_from(data.len()).expect("vector length fits u64"),
-        validated.frame_bytes,
-    )?;
-    let samples = decode_raw_samples(&data, validated)?;
-    let wav = WavData {
-        spec: WavSpec {
-            sample_rate: descriptor.sample_rate,
-            channels: descriptor.channels,
-            bits_per_sample: descriptor.valid_bits_per_sample,
-            total_samples,
-            bytes_per_sample: u16::from(descriptor.container_bits_per_sample) / 8,
-            channel_mask: validated.channel_mask,
-        },
-        samples,
-    };
-    let streaminfo_md5 = streaminfo_md5(wav.spec, &wav.samples)?;
+impl<R: Read + Seek> RawPcmStream<R> {
+    pub(crate) fn new(reader: R, descriptor: RawPcmDescriptor, total_samples: u64) -> Result<Self> {
+        let validated = validate_raw_descriptor(descriptor)?;
+        Ok(Self {
+            reader,
+            spec: WavSpec {
+                sample_rate: descriptor.sample_rate,
+                channels: descriptor.channels,
+                bits_per_sample: descriptor.valid_bits_per_sample,
+                total_samples,
+                bytes_per_sample: u16::from(descriptor.container_bits_per_sample) / 8,
+                channel_mask: validated.channel_mask,
+            },
+            validated,
+            remaining_frames: total_samples,
+            last_chunk_bytes: Vec::new(),
+        })
+    }
 
-    Ok(EncodeWavData {
-        wav,
-        metadata: Default::default(),
-        streaminfo_md5,
-    })
+    #[must_use]
+    pub fn spec(&self) -> WavSpec {
+        self.spec
+    }
+}
+
+impl<R: Read + Seek> crate::input::EncodePcmStream for RawPcmStream<R> {
+    fn spec(&self) -> WavSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        let frames = self.remaining_frames.min(max_frames as u64) as usize;
+        if frames == 0 {
+            return Ok(0);
+        }
+
+        let byte_len = usize::try_from(
+            (frames as u64)
+                .checked_mul(self.validated.frame_bytes)
+                .ok_or_else(|| Error::UnsupportedWav("raw PCM chunk size overflows".into()))?,
+        )
+        .map_err(|_| {
+            Error::UnsupportedWav("raw PCM chunk size exceeds addressable memory".into())
+        })?;
+        self.last_chunk_bytes.clear();
+        self.last_chunk_bytes.resize(byte_len, 0);
+        self.reader.read_exact(&mut self.last_chunk_bytes)?;
+        let samples = decode_raw_samples(&self.last_chunk_bytes, self.validated)?;
+        output.extend(samples);
+        self.remaining_frames -= frames as u64;
+        Ok(frames)
+    }
+
+    fn update_streaminfo_md5(
+        &mut self,
+        md5: &mut crate::md5::StreaminfoMd5,
+        samples: &[i32],
+    ) -> Result<()> {
+        match self.validated.descriptor.byte_order {
+            RawPcmByteOrder::LittleEndian => {
+                md5.update_bytes(&self.last_chunk_bytes);
+                Ok(())
+            }
+            RawPcmByteOrder::BigEndian => md5.update_samples(samples),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,9 +326,8 @@ fn decode_raw_samples(data: &[u8], descriptor: ValidatedRawDescriptor) -> Result
 mod tests {
     use std::io::Cursor;
 
-    use super::{
-        RawPcmByteOrder, RawPcmDescriptor, inspect_raw_pcm_total_samples, read_raw_bytes_for_encode,
-    };
+    use super::{RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, inspect_raw_pcm_total_samples};
+    use crate::input::EncodePcmStream;
 
     #[test]
     fn inspects_and_reads_little_endian_raw_pcm() {
@@ -283,8 +347,13 @@ mod tests {
             inspect_raw_pcm_total_samples(Cursor::new(&data), descriptor).unwrap(),
             2
         );
-        let parsed = read_raw_bytes_for_encode(data, descriptor).unwrap();
-        assert_eq!(parsed.wav.samples, vec![1, -2, 3, -4]);
+        let reader = RawPcmReader::new(Cursor::new(data), descriptor).unwrap();
+        let mut stream = reader.into_pcm_stream().unwrap();
+        let mut samples = Vec::new();
+        let frames = stream.read_chunk(2, &mut samples).unwrap();
+
+        assert_eq!(frames, 2);
+        assert_eq!(samples, vec![1, -2, 3, -4]);
     }
 
     #[test]

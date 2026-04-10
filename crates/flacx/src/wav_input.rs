@@ -1,15 +1,18 @@
-use std::{
-    io::{Read, Seek, SeekFrom},
-    sync::Arc,
-    thread,
-};
+use std::io::{Read, Seek, SeekFrom};
 
+#[cfg(test)]
+use std::{sync::Arc, thread};
+
+#[cfg(test)]
 use crate::config::EncoderConfig;
-use crate::input::EncodeWavData;
+#[cfg(test)]
+use crate::input::BufferedEncodeInput;
+use crate::input::EncodePcmStream;
+#[cfg(test)]
+use crate::md5::digest_bytes;
 use crate::metadata::{EncodeMetadata, FXMD_CHUNK_ID, FxmdChunkPolicy, MetadataDraft};
 use crate::{
     error::{Error, Result},
-    md5::digest_bytes,
     pcm::{
         PcmEnvelope, PcmSpec as WavSpec, PcmStream as WavData, is_supported_channel_mask,
         ordinary_channel_mask,
@@ -30,6 +33,22 @@ const W64_CHUNK_GUID_SUFFIX: [u8; 12] = [
     0xf3, 0xac, 0xd3, 0x11, 0x8c, 0xd1, 0x00, 0xc0, 0x4f, 0x8e, 0xdb, 0x8a,
 ];
 
+/// Reader options for RIFF/WAVE-family encode-side parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WavReaderOptions {
+    pub capture_fxmd: bool,
+    pub strict_fxmd_validation: bool,
+}
+
+impl Default for WavReaderOptions {
+    fn default() -> Self {
+        Self {
+            capture_fxmd: true,
+            strict_fxmd_validation: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FormatChunk {
     format_tag: u16,
@@ -42,18 +61,161 @@ struct FormatChunk {
     channel_mask: u32,
 }
 
+/// Reader façade for WAV/RF64/Wave64 encode inputs.
+#[derive(Debug, Clone)]
+pub struct WavReader<R> {
+    reader: R,
+    spec: WavSpec,
+    metadata: EncodeMetadata,
+    envelope: PcmEnvelope,
+}
+
+impl<R: Read + Seek> WavReader<R> {
+    pub fn new(reader: R) -> Result<Self> {
+        Self::with_reader_options(reader, WavReaderOptions::default())
+    }
+
+    pub fn with_options(
+        reader: R,
+        capture_fxmd: bool,
+        strict_fxmd_validation: bool,
+    ) -> Result<Self> {
+        Self::with_reader_options(
+            reader,
+            WavReaderOptions {
+                capture_fxmd,
+                strict_fxmd_validation,
+            },
+        )
+    }
+
+    pub fn with_reader_options(mut reader: R, options: WavReaderOptions) -> Result<Self> {
+        let layout = parse_wav_layout(
+            &mut reader,
+            true,
+            FxmdChunkPolicy {
+                capture: options.capture_fxmd,
+                strict: options.strict_fxmd_validation,
+            },
+        )?;
+        reader.seek(SeekFrom::Start(layout.data_offset))?;
+        let spec = WavSpec {
+            sample_rate: layout.format.sample_rate,
+            channels: layout.format.channels as u8,
+            bits_per_sample: layout.envelope.valid_bits_per_sample as u8,
+            total_samples: layout.total_samples,
+            bytes_per_sample: layout.envelope.container_bits_per_sample / 8,
+            channel_mask: layout.envelope.channel_mask,
+        };
+        let mut metadata = layout.metadata;
+        if should_preserve_channel_mask(layout.format.channels, layout.envelope.channel_mask) {
+            metadata.set_channel_mask(layout.format.channels, layout.envelope.channel_mask);
+        }
+
+        Ok(Self {
+            reader,
+            spec,
+            metadata,
+            envelope: layout.envelope,
+        })
+    }
+
+    #[must_use]
+    pub fn spec(&self) -> WavSpec {
+        self.spec
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &EncodeMetadata {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub fn into_pcm_stream(self) -> WavPcmStream<R> {
+        WavPcmStream {
+            reader: self.reader,
+            spec: self.spec,
+            envelope: self.envelope,
+            remaining_frames: self.spec.total_samples,
+            frame_bytes: usize::from(self.envelope.channels)
+                * usize::from(self.envelope.container_bits_per_sample / 8),
+            last_chunk_bytes: Vec::new(),
+        }
+    }
+}
+
+/// Single-pass PCM stream produced by [`WavReader`].
+#[derive(Debug, Clone)]
+pub struct WavPcmStream<R> {
+    reader: R,
+    spec: WavSpec,
+    envelope: PcmEnvelope,
+    remaining_frames: u64,
+    frame_bytes: usize,
+    last_chunk_bytes: Vec<u8>,
+}
+
+impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
+    fn spec(&self) -> WavSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        let frames = self.remaining_frames.min(max_frames as u64) as usize;
+        if frames == 0 {
+            return Ok(0);
+        }
+
+        let byte_len = frames
+            .checked_mul(self.frame_bytes)
+            .ok_or_else(|| Error::UnsupportedWav("PCM chunk size overflows".into()))?;
+        self.last_chunk_bytes.clear();
+        self.last_chunk_bytes.resize(byte_len, 0);
+        self.reader.read_exact(&mut self.last_chunk_bytes)?;
+        let samples = decode_samples(&self.last_chunk_bytes, self.envelope)?;
+        output.extend(samples);
+        self.remaining_frames -= frames as u64;
+        Ok(frames)
+    }
+
+    fn update_streaminfo_md5(
+        &mut self,
+        md5: &mut crate::md5::StreaminfoMd5,
+        samples: &[i32],
+    ) -> Result<()> {
+        if self.envelope.container_bits_per_sample == 8 {
+            md5.update_samples(samples)
+        } else {
+            md5.update_bytes(&self.last_chunk_bytes);
+            Ok(())
+        }
+    }
+}
+
 pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
-    Ok(read_wav_internal(&mut reader, false, FxmdChunkPolicy::IGNORE)?.wav)
+    let reader = WavReader::with_reader_options(
+        &mut reader,
+        WavReaderOptions {
+            capture_fxmd: false,
+            strict_fxmd_validation: false,
+        },
+    )?;
+    let spec = reader.spec();
+    let mut stream = reader.into_pcm_stream();
+    let mut samples = Vec::new();
+    while stream.read_chunk(4_096, &mut samples)? != 0 {}
+    Ok(WavData { spec, samples })
 }
 
 pub(crate) fn inspect_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64> {
     Ok(parse_wav_layout(&mut reader, false, FxmdChunkPolicy::IGNORE)?.total_samples)
 }
 
+#[cfg(test)]
 pub(crate) fn read_wav_for_encode_with_config<R: Read + Seek>(
     mut reader: R,
     config: &EncoderConfig,
-) -> Result<EncodeWavData> {
+) -> Result<BufferedEncodeInput> {
     read_wav_internal(
         &mut reader,
         true,
@@ -342,11 +504,12 @@ fn parse_w64_layout<R: Read + Seek>(
     })
 }
 
+#[cfg(test)]
 fn read_wav_internal<R: Read + Seek>(
     reader: &mut R,
     capture_metadata: bool,
     fxmd_policy: FxmdChunkPolicy,
-) -> Result<EncodeWavData> {
+) -> Result<BufferedEncodeInput> {
     let layout = parse_wav_layout(reader, capture_metadata, fxmd_policy)?;
     reader.seek(SeekFrom::Start(layout.data_offset))?;
     let data_len = usize::try_from(layout.data_size)
@@ -377,7 +540,7 @@ fn read_wav_internal<R: Read + Seek>(
         metadata.set_channel_mask(layout.format.channels, layout.envelope.channel_mask);
     }
 
-    Ok(EncodeWavData {
+    Ok(BufferedEncodeInput {
         wav,
         metadata,
         streaminfo_md5,

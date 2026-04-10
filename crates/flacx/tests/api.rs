@@ -1,9 +1,14 @@
-use std::{fs, io::Cursor};
+use std::{
+    cell::RefCell,
+    fs,
+    io::{Cursor, Read, Seek, SeekFrom},
+    rc::Rc,
+};
 
 use flacx::{
-    DecodeSummary, Decoder, Encoder, EncoderConfig, PcmSpec, PcmStream, RawPcmByteOrder,
-    RawPcmDescriptor, convenience, decode_bytes, encode_file, inspect_raw_pcm_total_samples,
-    level::Level, read_pcm_stream, write_pcm_stream,
+    DecodeSummary, Decoder, EncodePcmStream, EncoderConfig, PcmSpec, RawPcmByteOrder,
+    RawPcmDescriptor, WavReader, builtin, inspect_raw_pcm_total_samples, level::Level,
+    read_pcm_reader, write_pcm_stream,
 };
 
 mod support;
@@ -14,28 +19,39 @@ use support::{
 };
 
 #[test]
-fn convenience_encode_bytes_matches_default_encoder() {
+fn builtin_encode_bytes_matches_explicit_reader_session_flow() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
-    let via_module = convenience::encode_bytes(&wav).unwrap();
-    let via_encoder = Encoder::default().encode_bytes(&wav).unwrap();
-    assert_eq!(via_module, via_encoder);
+    let via_builtin = builtin::encode_bytes(&wav).unwrap();
+
+    let reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    let summary = encoder.encode(stream).unwrap();
+    let via_session = encoder.into_inner().into_inner();
+
+    assert_eq!(summary.total_samples, 2_048);
+    assert_eq!(via_builtin, via_session);
 }
 
 #[test]
-fn encode_file_uses_configured_options() {
+fn reader_session_flow_uses_configured_options() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
     let input_path = unique_temp_path("wav");
     let output_path = unique_temp_path("flac");
     fs::write(&input_path, &wav).unwrap();
 
-    let summary = Encoder::new(
-        EncoderConfig::default()
-            .with_level(Level::Level0)
-            .with_threads(1)
-            .with_block_size(576),
-    )
-    .encode_file(&input_path, &output_path)
-    .unwrap();
+    let reader = read_pcm_reader(fs::File::open(&input_path).unwrap()).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = EncoderConfig::default()
+        .with_level(Level::Level0)
+        .with_threads(1)
+        .with_block_size(576)
+        .into_encoder(fs::File::create(&output_path).unwrap());
+    encoder.set_metadata(metadata);
+    let summary = encoder.encode(stream).unwrap();
 
     assert_eq!(summary.block_size, 576);
     assert_eq!(summary.channels, 2);
@@ -46,15 +62,22 @@ fn encode_file_uses_configured_options() {
 }
 
 #[test]
-fn convenience_encode_file_matches_default_encoder_output() {
+fn builtin_encode_file_matches_explicit_reader_session_output() {
     let wav = pcm_wav_bytes(16, 1, 32_000, &sample_fixture(1, 2_048));
     let input_path = unique_temp_path("wav");
     let output_path = unique_temp_path("flac");
     fs::write(&input_path, &wav).unwrap();
 
-    let summary = encode_file(&input_path, &output_path).unwrap();
+    let summary = builtin::encode_file(&input_path, &output_path).unwrap();
     let bytes_from_file = fs::read(&output_path).unwrap();
-    let bytes_from_memory = Encoder::default().encode_bytes(&wav).unwrap();
+
+    let reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    encoder.encode(stream).unwrap();
+    let bytes_from_memory = encoder.into_inner().into_inner();
 
     assert_eq!(summary.total_samples, 2_048);
     assert_eq!(bytes_from_file, bytes_from_memory);
@@ -64,23 +87,28 @@ fn convenience_encode_file_matches_default_encoder_output() {
 }
 
 #[test]
-fn api_accepts_seekable_readers_and_writers() {
+fn api_accepts_seekable_readers_and_writer_bound_sessions() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
+    let reader = read_pcm_reader(Cursor::new(wav)).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
     let mut output = Cursor::new(Vec::new());
-    let summary = Encoder::new(EncoderConfig::default().with_threads(2))
-        .encode(Cursor::new(wav), &mut output)
-        .unwrap();
+    let mut encoder = EncoderConfig::default()
+        .with_threads(2)
+        .into_encoder(&mut output);
+    encoder.set_metadata(metadata);
+    let summary = encoder.encode(stream).unwrap();
 
     assert!(summary.frame_count >= 1);
     assert!(output.get_ref().starts_with(b"fLaC"));
 }
 
 #[test]
-fn convenience_decode_bytes_matches_default_decoder() {
+fn builtin_decode_bytes_matches_default_decoder() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = builtin::encode_bytes(&wav).unwrap();
 
-    let via_function = decode_bytes(&flac).unwrap();
+    let via_function = builtin::decode_bytes(&flac).unwrap();
     let via_decoder = Decoder::default().decode_bytes(&flac).unwrap();
     let format = parse_wav_format(&via_decoder);
 
@@ -94,7 +122,7 @@ fn convenience_decode_bytes_matches_default_decoder() {
 #[test]
 fn decode_api_accepts_seekable_readers_and_returns_summary() {
     let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 3_000));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = builtin::encode_bytes(&wav).unwrap();
     let mut output = Cursor::new(Vec::new());
 
     let summary = Decoder::default()
@@ -125,28 +153,33 @@ fn decode_api_accepts_seekable_readers_and_returns_summary() {
 }
 
 #[test]
-fn typed_pcm_aliases_are_usable_from_the_public_api() {
+fn wav_reader_exposes_spec_before_stream_consumption() {
     let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 256));
-    let stream: PcmStream = read_pcm_stream(Cursor::new(&wav)).unwrap();
-    let spec: PcmSpec = stream.spec;
+    let reader = WavReader::new(Cursor::new(&wav)).unwrap();
+    let spec: PcmSpec = reader.spec();
+    let mut stream = reader.into_pcm_stream();
+    let mut samples = Vec::new();
+    let frames = stream.read_chunk(256, &mut samples).unwrap();
 
     assert_eq!(spec.sample_rate, 48_000);
     assert_eq!(spec.channels, 2);
     assert_eq!(spec.bits_per_sample, 24);
-    assert_eq!(stream.samples.len(), 512);
+    assert_eq!(frames, 256);
+    assert_eq!(samples.len(), 512);
 }
 
 #[test]
-fn explicit_pcm_stream_pipeline_round_trips_without_convenience_inference() {
+fn explicit_reader_session_pipeline_round_trips_without_builtin_inference() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
-    let stream = read_pcm_stream(Cursor::new(&wav)).unwrap();
+    let reader = WavReader::new(Cursor::new(&wav)).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
 
-    let mut flac = Cursor::new(Vec::new());
-    let encode_summary = Encoder::default()
-        .encode_pcm_stream(&stream, &mut flac)
-        .unwrap();
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    let encode_summary = encoder.encode(stream).unwrap();
     let decoded_stream = Decoder::default()
-        .decode_pcm_stream(Cursor::new(flac.into_inner()))
+        .decode_pcm_stream(Cursor::new(encoder.into_inner().into_inner()))
         .unwrap();
     let mut roundtrip = Cursor::new(Vec::new());
     write_pcm_stream(&mut roundtrip, &decoded_stream, flacx::PcmContainer::Wave).unwrap();
@@ -154,7 +187,6 @@ fn explicit_pcm_stream_pipeline_round_trips_without_convenience_inference() {
     assert_eq!(encode_summary.total_samples, 1_024);
     assert_eq!(decoded_stream.spec.sample_rate, 44_100);
     assert_eq!(decoded_stream.spec.channels, 2);
-    assert_eq!(decoded_stream.samples, stream.samples);
     assert_eq!(wav_data_bytes(roundtrip.get_ref()), wav_data_bytes(&wav));
 }
 
@@ -174,7 +206,7 @@ fn decode_builder_supports_strict_channel_mask_provenance() {
 }
 
 #[test]
-fn raw_api_round_trips_with_explicit_descriptor() {
+fn raw_descriptor_fixture_still_counts_samples_explicitly() {
     let samples = sample_fixture(2, 1_024);
     let (raw_bytes, descriptor) = raw_pcm_fixture(
         44_100,
@@ -185,17 +217,7 @@ fn raw_api_round_trips_with_explicit_descriptor() {
         None,
         &samples,
     );
-    let mut output = Cursor::new(Vec::new());
-    let summary = Encoder::default()
-        .encode_raw(Cursor::new(&raw_bytes), &mut output, descriptor)
-        .unwrap();
-    let flac = output.into_inner();
-    let decoded = decode_bytes(&flac).unwrap();
-    let expected = pcm_wav_bytes(16, 2, 44_100, &samples);
 
-    assert_eq!(summary.total_samples, 1_024);
-    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&expected));
-    assert_eq!(parse_wav_format(&decoded).channels, 2);
     assert_eq!(
         inspect_raw_pcm_total_samples(Cursor::new(&raw_bytes), descriptor).unwrap(),
         1_024
@@ -214,4 +236,66 @@ fn raw_api_rejects_missing_multichannel_channel_mask() {
     };
     let error = inspect_raw_pcm_total_samples(Cursor::new(vec![0u8; 16]), descriptor).unwrap_err();
     assert!(error.to_string().contains("channel mask"));
+}
+
+#[derive(Clone)]
+struct CountingCursor {
+    inner: Cursor<Vec<u8>>,
+    bytes_read: Rc<RefCell<usize>>,
+}
+
+impl CountingCursor {
+    fn new(bytes: Vec<u8>) -> (Self, Rc<RefCell<usize>>) {
+        let bytes_read = Rc::new(RefCell::new(0usize));
+        (
+            Self {
+                inner: Cursor::new(bytes),
+                bytes_read: Rc::clone(&bytes_read),
+            },
+            bytes_read,
+        )
+    }
+}
+
+impl Read for CountingCursor {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        *self.bytes_read.borrow_mut() += read;
+        Ok(read)
+    }
+}
+
+impl Seek for CountingCursor {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+#[test]
+fn encoder_session_starts_before_full_payload_consumption() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
+    let wav_len = wav.len();
+    let (counting_reader, bytes_read) = CountingCursor::new(wav.clone());
+
+    let reader = WavReader::new(counting_reader).unwrap();
+    assert!(
+        *bytes_read.borrow() < wav_len,
+        "reader construction should not consume the full payload"
+    );
+
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    assert!(
+        *bytes_read.borrow() < wav_len,
+        "binding the writer-owning encoder session should not consume the full payload"
+    );
+
+    encoder.encode(stream).unwrap();
+    assert_eq!(
+        *bytes_read.borrow(),
+        wav_len,
+        "the full payload should only be consumed while driving the PCM stream through encode"
+    );
 }

@@ -1,7 +1,9 @@
 #![allow(dead_code)]
-use flacx::{RawPcmByteOrder, RawPcmDescriptor};
+#![allow(unexpected_cfgs)]
+use flacx::{EncodeSummary, EncoderConfig, RawPcmByteOrder, RawPcmDescriptor, read_pcm_reader};
 use std::{
     env, fs,
+    io::{Cursor, Read, Seek, Write},
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
@@ -27,6 +29,109 @@ const AIFC_FORM_TYPE: [u8; 4] = *b"AIFC";
 const AIFC_NONE: [u8; 4] = *b"NONE";
 const AIFC_SOWT: [u8; 4] = *b"sowt";
 const CAF_MAGIC: [u8; 4] = *b"caff";
+
+pub fn encode_flac_bytes(input: &[u8]) -> Vec<u8> {
+    flacx::builtin::encode_bytes(input).unwrap()
+}
+
+pub fn try_encode_flac_bytes_with_config(
+    config: EncoderConfig,
+    input: &[u8],
+) -> flacx::Result<Vec<u8>> {
+    let reader = read_pcm_reader(Cursor::new(input))?;
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = config.into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    encoder.encode(stream)?;
+    Ok(encoder.into_inner().into_inner())
+}
+
+pub fn encode_flac_bytes_with_config(config: EncoderConfig, input: &[u8]) -> Vec<u8> {
+    try_encode_flac_bytes_with_config(config, input).unwrap()
+}
+
+pub fn try_encode_file_with_config(
+    config: EncoderConfig,
+    input_path: impl AsRef<std::path::Path>,
+    output_path: impl AsRef<std::path::Path>,
+) -> flacx::Result<EncodeSummary> {
+    let input = fs::read(input_path)?;
+    let reader = read_pcm_reader(Cursor::new(&input))?;
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = config.into_encoder(fs::File::create(output_path)?);
+    encoder.set_metadata(metadata);
+    encoder.encode(stream)
+}
+
+pub fn encode_file_with_config(
+    config: EncoderConfig,
+    input_path: impl AsRef<std::path::Path>,
+    output_path: impl AsRef<std::path::Path>,
+) -> EncodeSummary {
+    try_encode_file_with_config(config, input_path, output_path).unwrap()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TestEncoder {
+    config: EncoderConfig,
+}
+
+impl TestEncoder {
+    pub fn new(config: EncoderConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn config(&self) -> EncoderConfig {
+        self.config.clone()
+    }
+
+    pub fn encode_bytes(&self, input: &[u8]) -> flacx::Result<Vec<u8>> {
+        try_encode_flac_bytes_with_config(self.config.clone(), input)
+    }
+
+    pub fn encode_file<P, Q>(&self, input_path: P, output_path: Q) -> flacx::Result<EncodeSummary>
+    where
+        P: AsRef<std::path::Path>,
+        Q: AsRef<std::path::Path>,
+    {
+        try_encode_file_with_config(self.config.clone(), input_path, output_path)
+    }
+
+    pub fn encode<R, W>(&self, input: R, output: W) -> flacx::Result<EncodeSummary>
+    where
+        R: Read + Seek,
+        W: Write + Seek,
+    {
+        let reader = read_pcm_reader(input)?;
+        let metadata = reader.metadata().clone();
+        let stream = reader.into_pcm_stream();
+        let mut encoder = self.config.clone().into_encoder(output);
+        encoder.set_metadata(metadata);
+        encoder.encode(stream)
+    }
+
+    #[cfg(feature = "progress")]
+    pub fn encode_with_progress<R, W, F>(
+        &self,
+        input: R,
+        output: W,
+        on_progress: F,
+    ) -> flacx::Result<EncodeSummary>
+    where
+        R: Read + Seek,
+        W: Write + Seek,
+        F: FnMut(flacx::ProgressSnapshot) -> flacx::Result<()>,
+    {
+        let reader = read_pcm_reader(input)?;
+        let metadata = reader.metadata().clone();
+        let stream = reader.into_pcm_stream();
+        let mut encoder = self.config.clone().into_encoder(output);
+        encoder.set_metadata(metadata);
+        encoder.encode_with_progress(stream, on_progress)
+    }
+}
 
 pub fn pcm_wav_bytes(
     bits_per_sample: u16,

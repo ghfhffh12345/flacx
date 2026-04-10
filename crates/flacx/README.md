@@ -52,18 +52,18 @@ flacx
 │  ├─ Encoder / EncodeSummary
 │  ├─ Decoder / DecodeSummary
 │  ├─ Recompressor / RecompressMode / RecompressPhase / RecompressProgress
-│  ├─ PcmStream / PcmStreamSpec / PcmContainer
-│  ├─ read_pcm_stream / write_pcm_stream
+│  ├─ PcmReader / AnyPcmStream / PcmStream / PcmStreamSpec / PcmContainer
+│  ├─ read_pcm_reader / write_pcm_stream
 │  └─ RawPcmDescriptor / RawPcmByteOrder / inspect_raw_pcm_total_samples
 ├─ inspectors
 │  ├─ inspect_pcm_total_samples
 │  ├─ inspect_wav_total_samples
 │  ├─ inspect_flac_total_samples
 │  └─ inspect_raw_pcm_total_samples
-├─ convenience
-│  ├─ encode_file / encode_bytes
-│  ├─ decode_file / decode_bytes
-│  ├─ recompress_file / recompress_bytes
+├─ builtin
+│  ├─ builtin::encode_file / builtin::encode_bytes
+│  ├─ builtin::decode_file / builtin::decode_bytes
+│  ├─ builtin::recompress_file / builtin::recompress_bytes
 │  └─ inspection-helper re-exports
 ├─ level
 └─ progress (feature = "progress")
@@ -78,7 +78,7 @@ flacx
 crate root
 ├─ modules
 │  ├─ core
-│  ├─ convenience
+│  ├─ builtin
 │  └─ level
 ├─ config + builders
 │  ├─ EncoderConfig / EncoderBuilder
@@ -90,7 +90,7 @@ crate root
 │  └─ Recompressor / RecompressMode / RecompressPhase / RecompressProgress
 ├─ typed PCM + raw PCM boundary
 │  ├─ PcmStream / PcmStreamSpec / PcmContainer
-│  ├─ read_pcm_stream / write_pcm_stream
+│  ├─ read_pcm_reader / write_pcm_stream
 │  └─ RawPcmDescriptor / RawPcmByteOrder
 ├─ inspectors
 │  ├─ inspect_wav_total_samples
@@ -108,13 +108,13 @@ crate root
 | Layer | Public API surface | Ownership |
 | --- | --- | --- |
 | Explicit core | `flacx::core`, config/builders, codec façades, typed PCM helpers | The source of truth for codec configuration, typed PCM handoff, explicit encode/decode/recompress operations, and summary reporting. |
-| Convenience/orchestration | `flacx::convenience`, flat `*_file` / `*_bytes` helpers | One-shot file and byte workflows, extension inference, and lightweight routing into the core. |
+| Builtin/orchestration | `flacx::builtin` | One-shot file and byte workflows, extension inference, and lightweight routing into the core. |
 | Support surfaces | `level`, raw PCM helpers, inspectors, progress types | Supporting concepts that remain public without becoming the main architecture story. |
 
 ### Key rule
 
 The architecture should be read **from the explicit core outward**. The
-convenience layer is intentionally thin and should not be treated as the
+builtin layer is intentionally thin and should not be treated as the
 semantic center of the crate.
 
 ## Current source structure snapshot
@@ -125,7 +125,7 @@ The current source tree that backs the public contract is:
 crates/flacx/src/
 ├─ lib.rs                 # public re-exports and crate contract
 ├─ config.rs              # EncoderConfig / DecodeConfig + builders
-├─ convenience.rs         # one-shot file/byte orchestration
+├─ convenience.rs         # implementation backing the public `builtin` module
 ├─ encoder.rs             # encode façade
 ├─ decode.rs              # decode façade
 ├─ recompress.rs          # subordinate FLAC→FLAC façade
@@ -173,7 +173,7 @@ supported PCM container / raw PCM / FLAC
         typed PCM boundary
                 │
                 ▼
- convenience helpers (`*_file`, `*_bytes`) route into the same core
+ builtin helpers (`builtin::*`) route into the same core
 ```
 
 ## Feature-gated contract
@@ -208,15 +208,15 @@ encode/decode architecture.
 - `PcmStream`
 - `PcmStreamSpec`
 - `PcmContainer`
-- `read_pcm_stream`
+- `read_pcm_reader`
 - `write_pcm_stream`
 
 This is the seam between container adapters and the FLAC codec pipeline.
 
-### Convenience/orchestration surface
-- `encode_file`, `encode_bytes`
-- `decode_file`, `decode_bytes`
-- `recompress_file`, `recompress_bytes`
+### Builtin/orchestration surface
+- `builtin::encode_file`, `builtin::encode_bytes`
+- `builtin::decode_file`, `builtin::decode_bytes`
+- `builtin::recompress_file`, `builtin::recompress_bytes`
 
 These helpers are important, but they are wrappers around the same explicit
 surfaces above rather than a separate architectural center.

@@ -1,11 +1,10 @@
 use std::{fs, io::Cursor, thread::available_parallelism};
 
-use flacx::{
-    DecodeConfig, Decoder, Encoder, EncoderConfig, PcmContainer, decode_bytes, decode_file,
-    level::Level,
-};
+use flacx::builtin::{decode_bytes, decode_file};
+use flacx::{DecodeConfig, Decoder, EncoderConfig, PcmContainer, level::Level};
 
 mod support;
+use support::TestEncoder as Encoder;
 
 #[cfg(feature = "caf")]
 use support::is_caf_bytes;

@@ -127,8 +127,8 @@ impl Decoder {
 
     /// Decode a FLAC reader into an explicit typed PCM stream.
     ///
-    /// This alias keeps the public API spelling aligned with
-    /// [`crate::read_pcm_stream`] / [`crate::write_pcm_stream`].
+    /// This alias keeps the public API spelling aligned with the decode-side
+    /// typed PCM helpers such as [`crate::write_pcm_stream`].
     pub fn decode_pcm_stream<R>(&self, input: R) -> Result<crate::PcmStream>
     where
         R: Read + Seek,
@@ -154,8 +154,8 @@ impl Decoder {
     #[cfg(feature = "progress")]
     /// Decode a FLAC reader into an explicit typed PCM stream while reporting progress.
     ///
-    /// This alias keeps the public API spelling aligned with
-    /// [`crate::read_pcm_stream`] / [`crate::write_pcm_stream`].
+    /// This alias keeps the public API spelling aligned with the decode-side
+    /// typed PCM helpers such as [`crate::write_pcm_stream`].
     pub fn decode_pcm_stream_with_progress<R, F>(
         &self,
         input: R,
