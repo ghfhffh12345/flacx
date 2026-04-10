@@ -13,11 +13,11 @@ use std::{
 
 use crate::{
     decode_output::{commit_temp_output, open_temp_output},
-    encoder::{EncodeSummary, Encoder},
+    encoder::EncodeSummary,
     error::Result,
-    input::EncodeWavData,
+    input::SlicePcmStream,
     level::Level,
-    md5::{streaminfo_md5, verify_streaminfo_digest},
+    md5::verify_streaminfo_md5,
     plan::EncodePlan,
     progress::{ProgressSink, ProgressSnapshot},
     read::{inspect_flac_total_samples, read_flac_for_decode},
@@ -400,18 +400,20 @@ impl Recompressor {
             total_frames: encode_plan.total_frames,
         })?;
 
-        let streaminfo_md5 = streaminfo_md5(decoded.wav.spec, &decoded.wav.samples)?;
-        verify_streaminfo_digest(streaminfo_md5, decoded.stream_info.md5)?;
-        let recompress_input = EncodeWavData {
-            streaminfo_md5,
-            wav: decoded.wav,
-            metadata: decoded.metadata.into_encode_metadata(),
-        };
+        verify_streaminfo_md5(
+            decoded.wav.spec,
+            &decoded.wav.samples,
+            decoded.stream_info.md5,
+        )?;
+        let metadata = decoded.metadata.into_encode_metadata();
+        let stream = SlicePcmStream::from_pcm_stream(decoded.wav);
         let mut encode_progress = EncodePhaseProgress {
             callback: on_progress,
             total_samples,
         };
-        Encoder::new(encode_config).encode_wav_data(recompress_input, output, &mut encode_progress)
+        let mut encoder = encode_config.into_encoder(output);
+        encoder.set_metadata(metadata);
+        encoder.encode_with_sink(stream, &mut encode_progress)
     }
 
     fn recompress_file_with_sink<P, Q, F>(

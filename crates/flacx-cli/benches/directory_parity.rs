@@ -7,13 +7,13 @@ use std::{
 };
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use flacx::{DecodeConfig, Encoder, EncoderConfig, level::Level};
+use flacx::{DecodeConfig, EncoderConfig, level::Level};
 use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 
 #[path = "../../flacx/tests/support/mod.rs"]
 mod support;
 
-use support::{pcm_wav_bytes, sample_fixture};
+use support::{encode_flac_bytes_with_config, pcm_wav_bytes, sample_fixture};
 
 const DEFAULT_FIXTURE_FRAMES: usize = 2_048;
 
@@ -72,11 +72,9 @@ impl DirectoryParityCorpus {
         let wav_root = TempDir::new("flacx-cli-bench-wav-corpus")?;
         let flac_root = TempDir::new("flacx-cli-bench-flac-corpus")?;
         let threads = benchmark_thread_count();
-        let encoder = Encoder::new(
-            EncoderConfig::default()
-                .with_level(Level::Level8)
-                .with_threads(threads),
-        );
+        let config = EncoderConfig::default()
+            .with_level(Level::Level8)
+            .with_threads(threads);
 
         for (relative, channels, frames) in benchmark_fixtures() {
             let wav_path = wav_root.path().join(relative).with_extension("wav");
@@ -90,7 +88,7 @@ impl DirectoryParityCorpus {
             if let Some(parent) = flac_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let flac_bytes = encoder.encode_bytes(&wav_bytes)?;
+            let flac_bytes = encode_flac_bytes_with_config(config.clone(), &wav_bytes);
             fs::write(&flac_path, &flac_bytes)?;
         }
 

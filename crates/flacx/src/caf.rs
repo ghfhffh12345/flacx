@@ -3,10 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::{
     error::{Error, Result},
     pcm::is_supported_channel_mask,
-    raw::{
-        RawPcmByteOrder, RawPcmDescriptor, read_raw_bytes_for_encode,
-        total_samples_from_byte_len_with_descriptor,
-    },
+    raw::{RawPcmByteOrder, RawPcmDescriptor, total_samples_from_byte_len_with_descriptor},
 };
 
 const CAF_MAGIC: [u8; 4] = *b"caff";
@@ -23,6 +20,7 @@ const CAF_FLAG_IS_LITTLE_ENDIAN: u32 = 1 << 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedCaf {
     descriptor: RawPcmDescriptor,
+    data_offset: u64,
     data_size: u64,
     data: Option<Vec<u8>>,
 }
@@ -34,16 +32,76 @@ struct CafChannelLayout {
     number_channel_descriptions: u32,
 }
 
+/// Reader façade for CAF encode inputs.
+#[derive(Debug, Clone)]
+pub struct CafReader<R> {
+    reader: R,
+    spec: crate::input::PcmSpec,
+    metadata: crate::metadata::EncodeMetadata,
+    descriptor: RawPcmDescriptor,
+}
+
+impl<R: Read + Seek> CafReader<R> {
+    pub fn new(mut reader: R) -> Result<Self> {
+        let parsed = parse_caf(&mut reader, false)?;
+        reader.seek(SeekFrom::Start(parsed.data_offset))?;
+        let total_samples =
+            total_samples_from_byte_len_with_descriptor(parsed.data_size, parsed.descriptor)?;
+        Ok(Self {
+            reader,
+            spec: crate::input::PcmSpec {
+                sample_rate: parsed.descriptor.sample_rate,
+                channels: parsed.descriptor.channels,
+                bits_per_sample: parsed.descriptor.valid_bits_per_sample,
+                total_samples,
+                bytes_per_sample: u16::from(parsed.descriptor.container_bits_per_sample) / 8,
+                channel_mask: parsed.descriptor.channel_mask.unwrap_or_default(),
+            },
+            metadata: crate::metadata::EncodeMetadata::default(),
+            descriptor: parsed.descriptor,
+        })
+    }
+
+    #[must_use]
+    pub fn spec(&self) -> crate::input::PcmSpec {
+        self.spec
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &crate::metadata::EncodeMetadata {
+        &self.metadata
+    }
+
+    pub fn into_pcm_stream(self) -> CafPcmStream<R> {
+        CafPcmStream {
+            inner: crate::raw::RawPcmStream::new(
+                self.reader,
+                self.descriptor,
+                self.spec.total_samples,
+            )
+            .expect("validated CAF descriptor remains valid"),
+        }
+    }
+}
+
+/// Single-pass PCM stream produced by [`CafReader`].
+pub struct CafPcmStream<R> {
+    inner: crate::raw::RawPcmStream<R>,
+}
+
+impl<R: Read + Seek> crate::input::EncodePcmStream for CafPcmStream<R> {
+    fn spec(&self) -> crate::input::PcmSpec {
+        self.inner.spec()
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        self.inner.read_chunk(max_frames, output)
+    }
+}
+
 pub(crate) fn inspect_caf_total_samples<R: Read + Seek>(reader: &mut R) -> Result<u64> {
     let parsed = parse_caf(reader, false)?;
     total_samples_from_byte_len_with_descriptor(parsed.data_size, parsed.descriptor)
-}
-
-pub(crate) fn read_caf_for_encode<R: Read + Seek>(
-    reader: &mut R,
-) -> Result<crate::input::EncodeWavData> {
-    let parsed = parse_caf(reader, true)?;
-    read_raw_bytes_for_encode(parsed.data.expect("data requested"), parsed.descriptor)
 }
 
 fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCaf> {
@@ -79,6 +137,7 @@ fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCa
         u64::try_from(desc_header.size).expect("desc size validated"),
     )?;
 
+    let mut data_offset = None;
     let mut data_size = None;
     let mut data = None;
     let mut channel_layout = None;
@@ -102,6 +161,8 @@ fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCa
                 let _edit_count = read_u32_be(reader)?;
                 let audio_size = chunk_size - 4;
                 data_size = Some(audio_size);
+                let payload_offset = reader.stream_position()?;
+                data_offset = Some(payload_offset);
                 if read_data {
                     let data_len = usize::try_from(audio_size).map_err(|_| {
                         Error::UnsupportedWav("PCM payload exceeds memory-addressable size".into())
@@ -134,6 +195,7 @@ fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCa
 
     Ok(ParsedCaf {
         descriptor,
+        data_offset: data_offset.ok_or(Error::InvalidWav("missing CAF data chunk"))?,
         data_size: data_size.ok_or(Error::InvalidWav("missing CAF data chunk"))?,
         data,
     })
@@ -311,9 +373,10 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        CAF_LAYOUT_TAG_USE_CHANNEL_BITMAP, CAF_MAGIC, CHAN_CHUNK_ID, DATA_CHUNK_ID, DESC_CHUNK_ID,
-        LPCM_FORMAT_ID, inspect_caf_total_samples, read_caf_for_encode,
+        CAF_LAYOUT_TAG_USE_CHANNEL_BITMAP, CAF_MAGIC, CHAN_CHUNK_ID, CafReader, DATA_CHUNK_ID,
+        DESC_CHUNK_ID, LPCM_FORMAT_ID, inspect_caf_total_samples,
     };
+    use crate::input::EncodePcmStream;
 
     fn append_chunk(bytes: &mut Vec<u8>, chunk_id: [u8; 4], payload: &[u8]) {
         bytes.extend_from_slice(&chunk_id);
@@ -401,22 +464,25 @@ mod tests {
             inspect_caf_total_samples(&mut Cursor::new(&bytes)).unwrap(),
             2
         );
-        let parsed = read_caf_for_encode(&mut Cursor::new(bytes)).unwrap();
-        assert_eq!(parsed.wav.samples, vec![1, -2, 3, -4]);
+        let reader = CafReader::new(Cursor::new(bytes)).unwrap();
+        let mut stream = reader.into_pcm_stream();
+        let mut samples = Vec::new();
+        stream.read_chunk(2, &mut samples).unwrap();
+        assert_eq!(samples, vec![1, -2, 3, -4]);
     }
 
     #[test]
     fn rejects_packet_tables_in_stage_three() {
         let mut bytes = caf_lpcm_bytes(44_100, 2, 16, 16, true, &[1, -2, 3, -4]);
         append_chunk(&mut bytes, *b"pakt", &[0; 24]);
-        let error = read_caf_for_encode(&mut Cursor::new(bytes)).unwrap_err();
+        let error = CafReader::new(Cursor::new(bytes)).unwrap_err();
         assert!(error.to_string().contains("packet table"));
     }
 
     #[test]
     fn rejects_multichannel_without_supported_layout_mapping() {
         let bytes = caf_lpcm_bytes(48_000, 4, 16, 16, true, &[0; 16]);
-        let error = read_caf_for_encode(&mut Cursor::new(bytes)).unwrap_err();
+        let error = CafReader::new(Cursor::new(bytes)).unwrap_err();
         assert!(error.to_string().contains("channel layout"));
     }
 
@@ -428,7 +494,7 @@ mod tests {
         chan.extend_from_slice(&0x0033u32.to_be_bytes());
         chan.extend_from_slice(&0u32.to_be_bytes());
         append_chunk(&mut bytes, CHAN_CHUNK_ID, &chan);
-        let parsed = read_caf_for_encode(&mut Cursor::new(bytes)).unwrap();
-        assert_eq!(parsed.wav.spec.channel_mask, 0x0033);
+        let parsed = CafReader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(parsed.spec().channel_mask, 0x0033);
     }
 }

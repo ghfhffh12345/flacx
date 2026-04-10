@@ -39,16 +39,21 @@ by default; add `progress` when you want callback-driven progress from Rust.
 Then encode a supported PCM container to FLAC from Rust:
 
 ```rust
-use flacx::{Encoder, EncoderConfig, level::Level};
+use flacx::{EncoderConfig, read_pcm_reader, level::Level};
+use std::{fs::File, io::BufWriter};
 
 let config = EncoderConfig::builder()
     .level(Level::Level8)
     .threads(4)
     .build();
 
-Encoder::new(config)
-    .encode_file("input.wav", "output.flac")
-    .unwrap();
+let reader = read_pcm_reader(File::open("input.wav").unwrap()).unwrap();
+let metadata = reader.metadata().clone();
+let stream = reader.into_pcm_stream();
+let writer = BufWriter::new(File::create("output.flac").unwrap());
+let mut encoder = config.into_encoder(writer);
+encoder.set_metadata(metadata);
+encoder.encode(stream).unwrap();
 ```
 
 And decode FLAC back to a supported PCM container:
@@ -61,9 +66,10 @@ Decoder::default()
     .unwrap();
 ```
 
-If you want the explicit adapter/core path instead of the convenience helpers,
-the library crate also exposes `flacx::core::{PcmStream, read_pcm_stream,
-write_pcm_stream, Encoder, Decoder}`.
+If you want one-shot orchestration instead of the explicit reader/session path,
+use `flacx::builtin::{encode_file, encode_bytes, decode_file, decode_bytes}`.
+The explicit core remains available under `flacx::core::{read_pcm_reader,
+write_pcm_stream, EncoderConfig, Encoder, Decoder}`.
 
 See [`docs/flacx-user-guide.md`](docs/flacx-user-guide.md) for the task-oriented
 crate usage guide, or [`crates/flacx/README.md`](crates/flacx/README.md) for the

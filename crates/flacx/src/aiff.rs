@@ -2,8 +2,8 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::{
     error::{Error, Result},
-    input::{EncodeWavData, WavData, WavSpec},
-    md5::streaminfo_md5,
+    input::WavSpec,
+    metadata::EncodeMetadata,
     pcm::{PcmEnvelope, container_bits_from_valid_bits, ordinary_channel_mask},
 };
 
@@ -42,36 +42,96 @@ struct CommonChunk {
     endianness: SampleEndianness,
 }
 
-pub(crate) fn inspect_aiff_total_samples<R: Read + Seek>(reader: &mut R) -> Result<u64> {
-    Ok(parse_aiff_layout(reader)?.total_samples)
+/// Reader façade for AIFF/AIFC encode inputs.
+#[derive(Debug, Clone)]
+pub struct AiffReader<R> {
+    reader: R,
+    spec: WavSpec,
+    metadata: EncodeMetadata,
+    envelope: PcmEnvelope,
+    endianness: SampleEndianness,
 }
 
-pub(crate) fn read_aiff_for_encode<R: Read + Seek>(reader: &mut R) -> Result<EncodeWavData> {
-    let layout = parse_aiff_layout(reader)?;
-    reader.seek(SeekFrom::Start(layout.data_offset))?;
-    let data_len = usize::try_from(layout.data_size)
-        .map_err(|_| Error::UnsupportedWav("PCM payload exceeds memory-addressable size".into()))?;
-    let mut data = vec![0u8; data_len];
-    reader.read_exact(&mut data)?;
-    let samples = decode_aiff_samples(&data, layout.envelope, layout.endianness)?;
-    let wav = WavData {
-        spec: WavSpec {
-            sample_rate: layout.sample_rate,
-            channels: layout.envelope.channels as u8,
-            bits_per_sample: layout.envelope.valid_bits_per_sample as u8,
-            total_samples: layout.total_samples,
-            bytes_per_sample: layout.envelope.container_bits_per_sample / 8,
-            channel_mask: layout.envelope.channel_mask,
-        },
-        samples,
-    };
-    let streaminfo_md5 = streaminfo_md5(wav.spec, &wav.samples)?;
+impl<R: Read + Seek> AiffReader<R> {
+    pub fn new(mut reader: R) -> Result<Self> {
+        let layout = parse_aiff_layout(&mut reader)?;
+        reader.seek(SeekFrom::Start(layout.data_offset))?;
+        Ok(Self {
+            reader,
+            spec: WavSpec {
+                sample_rate: layout.sample_rate,
+                channels: layout.envelope.channels as u8,
+                bits_per_sample: layout.envelope.valid_bits_per_sample as u8,
+                total_samples: layout.total_samples,
+                bytes_per_sample: layout.envelope.container_bits_per_sample / 8,
+                channel_mask: layout.envelope.channel_mask,
+            },
+            metadata: EncodeMetadata::default(),
+            envelope: layout.envelope,
+            endianness: layout.endianness,
+        })
+    }
 
-    Ok(EncodeWavData {
-        wav,
-        metadata: Default::default(),
-        streaminfo_md5,
-    })
+    #[must_use]
+    pub fn spec(&self) -> WavSpec {
+        self.spec
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> &EncodeMetadata {
+        &self.metadata
+    }
+
+    #[must_use]
+    pub fn into_pcm_stream(self) -> AiffPcmStream<R> {
+        AiffPcmStream {
+            reader: self.reader,
+            spec: self.spec,
+            envelope: self.envelope,
+            endianness: self.endianness,
+            remaining_frames: self.spec.total_samples,
+            frame_bytes: usize::from(self.envelope.channels)
+                * usize::from(self.envelope.container_bits_per_sample / 8),
+        }
+    }
+}
+
+/// Single-pass PCM stream produced by [`AiffReader`].
+#[derive(Debug, Clone)]
+pub struct AiffPcmStream<R> {
+    reader: R,
+    spec: WavSpec,
+    envelope: PcmEnvelope,
+    endianness: SampleEndianness,
+    remaining_frames: u64,
+    frame_bytes: usize,
+}
+
+impl<R: Read + Seek> crate::input::EncodePcmStream for AiffPcmStream<R> {
+    fn spec(&self) -> WavSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        let frames = self.remaining_frames.min(max_frames as u64) as usize;
+        if frames == 0 {
+            return Ok(0);
+        }
+
+        let byte_len = frames
+            .checked_mul(self.frame_bytes)
+            .ok_or_else(|| Error::UnsupportedWav("AIFF chunk size overflows".into()))?;
+        let mut data = vec![0u8; byte_len];
+        self.reader.read_exact(&mut data)?;
+        let samples = decode_aiff_samples(&data, self.envelope, self.endianness)?;
+        output.extend(samples);
+        self.remaining_frames -= frames as u64;
+        Ok(frames)
+    }
+}
+
+pub(crate) fn inspect_aiff_total_samples<R: Read + Seek>(reader: &mut R) -> Result<u64> {
+    Ok(parse_aiff_layout(reader)?.total_samples)
 }
 
 fn parse_aiff_layout<R: Read + Seek>(reader: &mut R) -> Result<ParsedAiffLayout> {
@@ -418,9 +478,10 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        AIFC_FORM_TYPE, AIFC_NONE, AIFC_SOWT, AIFF_FORM_TYPE, inspect_aiff_total_samples,
-        read_aiff_for_encode,
+        AIFC_FORM_TYPE, AIFC_NONE, AIFC_SOWT, AIFF_FORM_TYPE, AiffReader,
+        inspect_aiff_total_samples,
     };
+    use crate::input::EncodePcmStream;
 
     fn encode_extended_u32(value: u32) -> [u8; 10] {
         assert!(value > 0);
@@ -538,11 +599,15 @@ mod tests {
             inspect_aiff_total_samples(&mut Cursor::new(&bytes)).unwrap(),
             2
         );
-        let parsed = read_aiff_for_encode(&mut Cursor::new(bytes)).unwrap();
-        assert_eq!(parsed.wav.spec.sample_rate, 48_000);
-        assert_eq!(parsed.wav.spec.channels, 3);
-        assert_eq!(parsed.wav.spec.bits_per_sample, 24);
-        assert_eq!(parsed.wav.samples, vec![1, -2, 3, -4, 5, -6]);
+        let reader = AiffReader::new(Cursor::new(bytes)).unwrap();
+        let spec = reader.spec();
+        let mut stream = reader.into_pcm_stream();
+        let mut samples = Vec::new();
+        stream.read_chunk(2, &mut samples).unwrap();
+        assert_eq!(spec.sample_rate, 48_000);
+        assert_eq!(spec.channels, 3);
+        assert_eq!(spec.bits_per_sample, 24);
+        assert_eq!(samples, vec![1, -2, 3, -4, 5, -6]);
     }
 
     #[test]
@@ -555,8 +620,8 @@ mod tests {
             44_100,
             &[1, -2, 3, -4],
         );
-        let parsed_none = read_aiff_for_encode(&mut Cursor::new(none)).unwrap();
-        assert_eq!(parsed_none.wav.spec.bits_per_sample, 20);
+        let parsed_none = AiffReader::new(Cursor::new(none)).unwrap();
+        assert_eq!(parsed_none.spec().bits_per_sample, 20);
 
         let sowt = aiff_like_bytes(
             AIFC_FORM_TYPE,
@@ -566,15 +631,18 @@ mod tests {
             44_100,
             &[10, -11, 12, -13],
         );
-        let parsed_sowt = read_aiff_for_encode(&mut Cursor::new(sowt)).unwrap();
-        assert_eq!(parsed_sowt.wav.samples, vec![10, -11, 12, -13]);
+        let parsed_sowt = AiffReader::new(Cursor::new(sowt)).unwrap();
+        let mut stream = parsed_sowt.into_pcm_stream();
+        let mut samples = Vec::new();
+        stream.read_chunk(2, &mut samples).unwrap();
+        assert_eq!(samples, vec![10, -11, 12, -13]);
     }
 
     #[test]
     fn rejects_unsupported_aifc_compression_variants() {
         for compression in [*b"ACE2", *b"ACE8", *b"MAC3", *b"MAC6", *b"fl32", *b"????"] {
             let bytes = aiff_like_bytes(AIFC_FORM_TYPE, Some(compression), 16, 1, 44_100, &[1, -1]);
-            let error = read_aiff_for_encode(&mut Cursor::new(bytes)).unwrap_err();
+            let error = AiffReader::new(Cursor::new(bytes)).unwrap_err();
             assert!(error.to_string().contains("AIFC"));
         }
     }
@@ -582,7 +650,7 @@ mod tests {
     #[test]
     fn rejects_sowt_outside_16bit_pcm() {
         let bytes = aiff_like_bytes(AIFC_FORM_TYPE, Some(AIFC_SOWT), 24, 1, 44_100, &[1, -1]);
-        let error = read_aiff_for_encode(&mut Cursor::new(bytes)).unwrap_err();
+        let error = AiffReader::new(Cursor::new(bytes)).unwrap_err();
         assert!(error.to_string().contains("16-bit"));
     }
 
@@ -595,7 +663,7 @@ mod tests {
             .expect("SSND chunk present");
         let payload_size_offset = ssnd_header + 4;
         bytes[payload_size_offset..payload_size_offset + 4].copy_from_slice(&8u32.to_be_bytes());
-        let error = read_aiff_for_encode(&mut Cursor::new(bytes)).unwrap_err();
+        let error = AiffReader::new(Cursor::new(bytes)).unwrap_err();
         assert!(error.to_string().contains("sample frame count"));
     }
 
@@ -603,7 +671,7 @@ mod tests {
     fn rejects_denormal_sample_rates_without_panicking() {
         let mut bytes = aiff_like_bytes(AIFF_FORM_TYPE, None, 16, 1, 44_100, &[1, -1, 2, -2]);
         bytes[28..38].copy_from_slice(&[0x00, 0x01, 0x80, 0, 0, 0, 0, 0, 0, 0]);
-        let error = read_aiff_for_encode(&mut Cursor::new(bytes)).unwrap_err();
+        let error = AiffReader::new(Cursor::new(bytes)).unwrap_err();
         assert!(
             error.to_string().contains("sample rate") || error.to_string().contains("fractional")
         );

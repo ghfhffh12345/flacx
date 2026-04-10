@@ -5,7 +5,7 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, Encoder, EncoderConfig, RecompressConfig, Recompressor, decode_bytes,
+    DecodeConfig, EncoderConfig, RecompressConfig, Recompressor, builtin::decode_bytes,
     level::Level,
 };
 use flacx_cli::{
@@ -16,6 +16,7 @@ use flacx_cli::{
 #[path = "../../flacx/tests/support/mod.rs"]
 mod support;
 
+use support::TestEncoder as Encoder;
 use support::{
     aifc_pcm_bytes, aiff_pcm_bytes, caf_lpcm_bytes, cuesheet_block, extensible_pcm_wav_bytes,
     pcm_wav_bytes, raw_pcm_bytes, raw_seektable_block, replace_flac_optional_metadata,

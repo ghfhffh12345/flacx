@@ -1,6 +1,7 @@
-use flacx::{Encoder, EncoderConfig, decode_bytes};
+use flacx::{EncoderConfig, builtin::decode_bytes};
 
 mod support;
+use support::TestEncoder as Encoder;
 
 #[cfg(feature = "aiff")]
 use support::{aifc_pcm_bytes, aiff_pcm_bytes};

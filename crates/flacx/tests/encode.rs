@@ -1,8 +1,9 @@
 use std::io::Cursor;
 
-use flacx::{Encoder, EncoderConfig, decode_bytes};
+use flacx::{EncoderConfig, builtin::decode_bytes};
 
 mod support;
+use support::TestEncoder as Encoder;
 
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, decode_with_ffmpeg,

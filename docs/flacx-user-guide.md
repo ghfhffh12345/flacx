@@ -42,25 +42,25 @@ your workflow.
 
 | Goal | Recommended API |
 | --- | --- |
-| Convert one file with defaults | `encode_file`, `decode_file`, `recompress_file` |
-| Convert in-memory data | `encode_bytes`, `decode_bytes`, `recompress_bytes` |
-| Reuse settings across many jobs | `Encoder`, `Decoder`, `Recompressor` |
-| Work with decoded samples directly | `read_pcm_stream`, `write_pcm_stream`, `encode_pcm_stream`, `decode_pcm_stream` |
-| Encode raw PCM without a container header | `encode_raw`, `encode_raw_file`, `RawPcmDescriptor` |
+| Convert one file with defaults | `builtin::encode_file`, `builtin::decode_file`, `builtin::recompress_file` |
+| Convert in-memory data | `builtin::encode_bytes`, `builtin::decode_bytes`, `builtin::recompress_bytes` |
+| Reuse settings across many jobs | `EncoderConfig::into_encoder(...)`, `Decoder`, `Recompressor` |
+| Inspect spec/metadata before encoding | `read_pcm_reader`, family readers such as `WavReader` |
+| Work with decoded samples directly | `write_pcm_stream`, `decode_pcm_stream` |
 | Show progress in your own UI | `*_with_progress` methods with the `progress` feature |
 
 A practical rule of thumb:
 
-- use free functions for quick one-shot conversions
-- use `Encoder`, `Decoder`, or `Recompressor` when you need configuration or reuse
-- use typed PCM or raw PCM APIs only when you need explicit control
+- use `builtin::*` for quick one-shot conversions
+- use reader -> spec/metadata -> stream -> session when you need explicit control
+- use `Decoder` or `Recompressor` directly when you need decode/recompress reuse
 
 ## Encode PCM containers to FLAC
 
 ### Quick file-to-file encode
 
 ```rust
-use flacx::encode_file;
+use flacx::builtin::encode_file;
 
 let summary = encode_file("input.wav", "output.flac")?;
 println!("encoded {} samples", summary.total_samples);
@@ -72,10 +72,10 @@ disk.
 ### Encode in memory
 
 ```rust
-use flacx::Encoder;
+use flacx::builtin::encode_bytes;
 
 let wav_bytes = std::fs::read("input.wav")?;
-let flac_bytes = Encoder::default().encode_bytes(&wav_bytes)?;
+let flac_bytes = encode_bytes(&wav_bytes)?;
 std::fs::write("output.flac", flac_bytes)?;
 ```
 
@@ -85,12 +85,15 @@ memory.
 ### Encode from custom readers and writers
 
 ```rust
-use flacx::Encoder;
+use flacx::{EncoderConfig, read_pcm_reader};
 use std::fs::File;
 
-let input = File::open("input.wav")?;
-let output = File::create("output.flac")?;
-Encoder::default().encode(input, output)?;
+let reader = read_pcm_reader(File::open("input.wav")?)?;
+let metadata = reader.metadata().clone();
+let stream = reader.into_pcm_stream();
+let mut encoder = EncoderConfig::default().into_encoder(File::create("output.flac")?);
+encoder.set_metadata(metadata);
+encoder.encode(stream)?;
 ```
 
 Use this style when your application already works with `Read + Seek` and
@@ -99,17 +102,22 @@ Use this style when your application already works with `Read + Seek` and
 ### Reuse one configured encoder
 
 ```rust
-use flacx::{Encoder, EncoderConfig, level::Level};
+use flacx::{EncoderConfig, read_pcm_reader, level::Level};
+use std::fs::File;
 
-let encoder = Encoder::new(
-    EncoderConfig::builder()
-        .level(Level::Level8)
-        .threads(4)
-        .build(),
-);
+let config = EncoderConfig::builder()
+    .level(Level::Level8)
+    .threads(4)
+    .build();
 
-encoder.encode_file("take01.wav", "take01.flac")?;
-encoder.encode_file("take02.wav", "take02.flac")?;
+for (input_path, output_path) in [("take01.wav", "take01.flac"), ("take02.wav", "take02.flac")] {
+    let reader = read_pcm_reader(File::open(input_path)?)?;
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = config.clone().into_encoder(File::create(output_path)?);
+    encoder.set_metadata(metadata);
+    encoder.encode(stream)?;
+}
 ```
 
 This is the right shape for batch jobs or applications that want consistent
@@ -142,14 +150,12 @@ The most useful encoder settings are:
 Example:
 
 ```rust
-use flacx::{Encoder, EncoderConfig, level::Level};
+use flacx::{EncoderConfig, level::Level};
 
-let encoder = Encoder::new(
-    EncoderConfig::default()
-        .with_level(Level::Level5)
-        .with_threads(8)
-        .with_block_size(4096),
-);
+let config = EncoderConfig::default()
+    .with_level(Level::Level5)
+    .with_threads(8)
+    .with_block_size(4096);
 ```
 
 Guidance:
@@ -163,7 +169,7 @@ Guidance:
 ### Quick FLAC-to-WAV decode
 
 ```rust
-use flacx::decode_file;
+use flacx::builtin::decode_file;
 
 let summary = decode_file("input.flac", "output.wav")?;
 println!("decoded {} frames", summary.frame_count);
@@ -253,63 +259,39 @@ let decoder = Decoder::new(
 );
 ```
 
-## Work with typed PCM streams
+## Inspect spec and metadata before encoding
 
-If you want to inspect, transform, or hand off sample data yourself, use the
-typed PCM API instead of going directly from file to file.
+If you want to inspect or control encode inputs explicitly, start from a family
+reader and then hand its stream into a writer-owning encoder session.
 
 ```rust
-use std::io::Cursor;
-use flacx::{Decoder, Encoder, PcmContainer, read_pcm_stream, write_pcm_stream};
+use std::{fs::File, io::Cursor};
+use flacx::{Decoder, EncoderConfig, PcmContainer, read_pcm_reader, write_pcm_stream};
 
-let wav_bytes = std::fs::read("input.wav")?;
-let stream = read_pcm_stream(Cursor::new(&wav_bytes))?;
+let reader = read_pcm_reader(File::open("input.wav")?)?;
+let spec = reader.spec();
+let metadata = reader.metadata().clone();
+let stream = reader.into_pcm_stream();
 
-let mut flac_output = Cursor::new(Vec::new());
-Encoder::default().encode_pcm_stream(&stream, &mut flac_output)?;
+let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+encoder.set_metadata(metadata);
+encoder.encode(stream)?;
 
-let decoded = Decoder::default().decode_pcm_stream(Cursor::new(flac_output.into_inner()))?;
+let decoded = Decoder::default().decode_pcm_stream(Cursor::new(encoder.into_inner().into_inner()))?;
 let mut wav_output = Cursor::new(Vec::new());
 write_pcm_stream(&mut wav_output, &decoded, PcmContainer::Wave)?;
+
+assert!(spec.sample_rate > 0);
 ```
 
 Use this path when you need to:
 
-- inspect `sample_rate`, `channels`, or `bits_per_sample`
-- run your own processing between decode and re-encode
-- choose the output PCM container explicitly
+- inspect `sample_rate`, `channels`, or `bits_per_sample` before encoding
+- inspect or preserve encode-side metadata before the session starts
+- choose when the sample stream begins flowing
 - avoid relying on extension-based behavior
 
-## Encode raw PCM explicitly
-
-If your source is raw PCM rather than WAV, AIFF, or CAF, describe it with
-`RawPcmDescriptor`.
-
-```rust
-use std::io::Cursor;
-use flacx::{Encoder, RawPcmByteOrder, RawPcmDescriptor};
-
-let raw_bytes = std::fs::read("input.pcm")?;
-let descriptor = RawPcmDescriptor {
-    sample_rate: 44_100,
-    channels: 2,
-    valid_bits_per_sample: 16,
-    container_bits_per_sample: 16,
-    byte_order: RawPcmByteOrder::LittleEndian,
-    channel_mask: None,
-};
-
-let mut output = Cursor::new(Vec::new());
-Encoder::default().encode_raw(Cursor::new(raw_bytes), &mut output, descriptor)?;
-```
-
-Important raw PCM rules:
-
-- `flacx` does **not** infer raw PCM layout for you
-- you must provide sample rate, channel count, bit depth, and byte order
-- for 3 to 8 channels, provide a non-zero `channel_mask`
-
-You can also inspect raw PCM before encoding:
+Raw PCM remains inspectable via explicit descriptors:
 
 ```rust
 use std::io::Cursor;
@@ -343,9 +325,15 @@ Then use the progress-aware methods.
 ### Encode progress
 
 ```rust
-use flacx::{Encoder, ProgressSnapshot};
+use flacx::{EncoderConfig, ProgressSnapshot, read_pcm_reader};
+use std::fs::File;
 
-Encoder::default().encode_file_with_progress("input.wav", "output.flac", |snapshot: ProgressSnapshot| {
+let reader = read_pcm_reader(File::open("input.wav")?)?;
+let metadata = reader.metadata().clone();
+let stream = reader.into_pcm_stream();
+let mut encoder = EncoderConfig::default().into_encoder(File::create("output.flac")?);
+encoder.set_metadata(metadata);
+encoder.encode_with_progress(stream, |snapshot: ProgressSnapshot| {
     println!(
         "encoded {} / {} samples",
         snapshot.processed_samples,
@@ -436,9 +424,9 @@ These helpers are useful for:
 
 For many applications, these three entry points are enough:
 
-1. `encode_file(...)`
-2. `decode_file(...)`
-3. `recompress_file(...)`
+1. `builtin::encode_file(...)`
+2. `builtin::decode_file(...)`
+3. `builtin::recompress_file(...)`
 
 ### Reuse configured codec objects for batches
 

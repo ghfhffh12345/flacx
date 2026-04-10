@@ -1,7 +1,9 @@
 #[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
-use flacx::{DecodeConfig, Decoder, Encoder, PcmContainer};
+use flacx::{DecodeConfig, Decoder, PcmContainer};
 
 mod support;
+#[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
+use support::TestEncoder as Encoder;
 
 #[cfg(not(feature = "caf"))]
 use support::caf_lpcm_bytes;

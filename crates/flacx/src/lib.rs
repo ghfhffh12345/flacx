@@ -2,8 +2,8 @@
 //!
 //! `flacx` is the reusable library crate in this workspace. The public surface
 //! is intentionally layered so callers — and maintainers reading the exported
-//! API — can distinguish the explicit codec pipeline from the thin convenience
-//! wrappers built on top of it.
+//! API — can distinguish the explicit codec pipeline from the thin built-in
+//! wrappers layered on top of it.
 //!
 //! This crate-level documentation is architecture-first. It is meant to answer
 //! “what does the public API expose, and how is it organized?” rather than to
@@ -23,19 +23,19 @@
 //! │  │  ├─ Decoder / DecodeSummary
 //! │  │  └─ Recompressor / RecompressProgress / RecompressPhase
 //! │  ├─ typed PCM boundary
-//! │  │  ├─ PcmStream / PcmStreamSpec / PcmContainer
-//! │  │  ├─ read_pcm_stream / write_pcm_stream
+//! │  │  ├─ PcmReader / AnyPcmStream / PcmStream / PcmStreamSpec / PcmContainer
+//! │  │  ├─ read_pcm_reader / write_pcm_stream
 //! │  │  └─ inspect_pcm_total_samples / inspect_raw_pcm_total_samples
 //! │  └─ support surfaces
-//! │     ├─ RawPcmDescriptor / RawPcmByteOrder
+//! │     ├─ EncodeMetadata / RawPcmDescriptor / RawPcmByteOrder
 //! │     └─ level
 //! ├─ inspectors
 //! │  ├─ inspect_wav_total_samples
 //! │  └─ inspect_flac_total_samples
-//! ├─ convenience
-//! │  ├─ encode_file / encode_bytes
-//! │  ├─ decode_file / decode_bytes
-//! │  ├─ recompress_file / recompress_bytes
+//! ├─ builtin
+//! │  ├─ builtin::encode_file / builtin::encode_bytes
+//! │  ├─ builtin::decode_file / builtin::decode_bytes
+//! │  ├─ builtin::recompress_file / builtin::recompress_bytes
 //! │  └─ re-exported inspection helpers
 //! └─ progress (feature = "progress")
 //!    ├─ ProgressSnapshot
@@ -47,8 +47,8 @@
 //!
 //! | Layer | Public surface | Responsibility |
 //! | --- | --- | --- |
-//! | Explicit core | [`core`], [`Encoder`], [`Decoder`], [`Recompressor`], config/builders, typed PCM helpers | Owns codec configuration, typed PCM handoff, summary reporting, and explicit encode/decode/recompress entry points. |
-//! | Convenience/orchestration | [`convenience`], top-level `*_file` / `*_bytes` helpers | Owns one-shot file/byte routing and extension-driven ergonomics without becoming a second policy engine. |
+//! | Explicit core | [`core`], [`Encoder`], [`Decoder`], [`Recompressor`], config/builders, reader/stream helpers | Owns codec configuration, reader-driven PCM handoff, summary reporting, and explicit encode/decode/recompress entry points. |
+//! | Builtin/orchestration | [`builtin`] | Owns one-shot file/byte routing and extension-driven ergonomics without becoming a second policy engine. |
 //! | Support surfaces | [`level`], raw PCM helpers, inspector helpers, optional progress types | Exposes stable supporting concepts that sit beside the core pipeline. |
 //!
 //! ## Source structure snapshot
@@ -60,12 +60,12 @@
 //! crates/flacx/src/
 //! ├─ lib.rs                 # public re-exports and crate contract
 //! ├─ config.rs              # encode/decode config + builders
-//! ├─ convenience.rs         # one-shot file/byte orchestration helpers
+//! ├─ convenience.rs         # implementation backing the public `builtin` module
 //! ├─ encoder.rs             # encode façade
 //! ├─ decode.rs              # decode façade
 //! ├─ recompress.rs          # subordinate FLAC→FLAC façade
-//! ├─ pcm.rs                 # typed PCM boundary (`PcmStream`, `PcmSpec`, `PcmContainer`)
-//! ├─ input.rs               # container dispatch for PCM ingest
+//! ├─ pcm.rs                 # typed PCM values shared with decode/write-side APIs
+//! ├─ input.rs               # encode-side reader/stream contracts + dispatch
 //! ├─ wav_input.rs           # WAV/RF64/Wave64 reader family
 //! ├─ wav_output.rs          # WAV-family writer family
 //! ├─ decode_output.rs       # decode-side temp output + commit helpers
@@ -96,7 +96,7 @@
 //! ## Reading guide
 //!
 //! - Start with [`core`] when you want the explicit architecture story.
-//! - Use [`convenience`] when you specifically want the one-shot orchestration
+//! - Use [`builtin`] when you specifically want the one-shot orchestration
 //!   wrappers.
 //! - Use [`level`] for compression presets and [`RawPcmDescriptor`] when PCM
 //!   ingest must be described explicitly instead of inferred from a container.
@@ -119,7 +119,7 @@ mod caf;
 #[cfg(feature = "caf")]
 mod caf_output;
 mod config;
-pub mod convenience;
+mod convenience;
 mod crc;
 mod decode;
 mod decode_output;
@@ -145,21 +145,38 @@ mod write;
 /// Compression level presets and tuning profiles used by the encoder.
 pub mod level;
 
+/// Built-in one-shot orchestration helpers layered on top of the explicit core.
+pub mod builtin {
+    pub use crate::convenience::{
+        decode_bytes, decode_file, encode_bytes, encode_file, inspect_flac_total_samples,
+        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, inspect_wav_total_samples,
+        recompress_bytes, recompress_file,
+    };
+}
+
+#[cfg(feature = "aiff")]
+pub use aiff::{AiffPcmStream, AiffReader};
+#[cfg(feature = "caf")]
+pub use caf::{CafPcmStream, CafReader};
 pub use config::{DecodeBuilder, DecodeConfig, EncoderBuilder, EncoderConfig};
-pub use convenience::{decode_bytes, decode_file, encode_bytes, encode_file};
 pub use decode::{DecodeSummary, Decoder};
 pub use encoder::{EncodeSummary, Encoder};
 pub use error::{Error, Result};
 pub use input::{
-    PcmSpec, PcmSpec as PcmStreamSpec, PcmStream,
-    inspect_wav_total_samples as inspect_pcm_total_samples, read_wav as read_pcm_stream,
+    AnyPcmStream, EncodePcmStream, PcmReader, PcmReaderOptions, PcmSpec, PcmSpec as PcmStreamSpec,
+    PcmStream, inspect_wav_total_samples as inspect_pcm_total_samples, read_pcm_reader,
+    read_pcm_reader_with_options,
 };
+pub use metadata::EncodeMetadata;
 pub use pcm::PcmContainer;
-pub use raw::{RawPcmByteOrder, RawPcmDescriptor, inspect_raw_pcm_total_samples};
+pub use raw::{
+    RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream, inspect_raw_pcm_total_samples,
+};
 pub use recompress::{
     RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress,
-    Recompressor, recompress_bytes, recompress_file,
+    Recompressor,
 };
+pub use wav_input::{WavPcmStream, WavReader, WavReaderOptions};
 
 /// Inspect a supported PCM-container stream and return its total sample count without decoding it.
 ///
@@ -197,13 +214,20 @@ pub fn write_pcm_stream<W: std::io::Write>(
 /// Explicit core surface for callers that want the typed/configured pipeline
 /// without the one-shot convenience wrappers.
 pub mod core {
+    #[cfg(feature = "aiff")]
+    pub use crate::{AiffPcmStream, AiffReader};
+    #[cfg(feature = "caf")]
+    pub use crate::{CafPcmStream, CafReader};
     pub use crate::{
-        DecodeBuilder, DecodeConfig, DecodeSummary, Decoder, EncodeSummary, Encoder,
-        EncoderBuilder, EncoderConfig, PcmContainer, PcmStream, PcmStreamSpec, RawPcmByteOrder,
-        RawPcmDescriptor, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,
-        RecompressProgress, Recompressor, inspect_pcm_total_samples, inspect_raw_pcm_total_samples,
-        read_pcm_stream, write_pcm_stream,
+        DecodeBuilder, DecodeConfig, DecodeSummary, Decoder, EncodeMetadata, EncodePcmStream,
+        EncodeSummary, Encoder, EncoderBuilder, EncoderConfig, PcmContainer, PcmReader,
+        PcmReaderOptions, PcmStream, PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor,
+        RawPcmReader, RawPcmStream, RecompressBuilder, RecompressConfig, RecompressMode,
+        RecompressPhase, RecompressProgress, Recompressor, inspect_pcm_total_samples,
+        inspect_raw_pcm_total_samples, read_pcm_reader, read_pcm_reader_with_options,
+        write_pcm_stream,
     };
+    pub use crate::{WavPcmStream, WavReader, WavReaderOptions};
 
     #[cfg(feature = "progress")]
     pub use crate::{DecodeProgress, EncodeProgress, ProgressSnapshot};
@@ -223,13 +247,17 @@ pub struct _ProgressTypeFeatureDisabledDoc;
 
 #[cfg(not(feature = "progress"))]
 #[doc = r#"```compile_fail
-use flacx::Encoder;
+use flacx::{EncoderConfig, read_pcm_reader};
 
 fn main() {
-    let encoder = Encoder::default();
     let input = std::io::Cursor::new(Vec::<u8>::new());
-    let mut output = std::io::Cursor::new(Vec::<u8>::new());
-    let _ = encoder.encode_with_progress(input, &mut output, |_| Ok(()));
+    let reader = read_pcm_reader(input).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let output = std::io::Cursor::new(Vec::<u8>::new());
+    let mut encoder = EncoderConfig::default().into_encoder(output);
+    encoder.set_metadata(metadata);
+    let _ = encoder.encode_with_progress(stream, |_| Ok(()));
 }
 ```"#]
 #[doc(hidden)]

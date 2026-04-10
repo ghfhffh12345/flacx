@@ -28,12 +28,12 @@ explicit configs + typed boundaries
            FLAC read/write core
                 │
                 ▼
-   convenience helpers route into the same core
+   builtin helpers route into the same core
 ```
 
 The key architectural distinction is:
 - **explicit core** = the semantic center of the crate
-- **convenience/orchestration** = wrappers that route into that core
+- **builtin/orchestration** = wrappers that route into that core
 
 The documentation should preserve that reading order.
 
@@ -43,7 +43,7 @@ The documentation should preserve that reading order.
 flacx
 ├─ modules
 │  ├─ core
-│  ├─ convenience
+│  ├─ builtin
 │  └─ level
 ├─ config/builders
 │  ├─ EncoderConfig / EncoderBuilder
@@ -55,7 +55,7 @@ flacx
 │  └─ Recompressor / RecompressMode / RecompressPhase / RecompressProgress
 ├─ typed boundary
 │  ├─ PcmStream / PcmStreamSpec / PcmContainer
-│  ├─ read_pcm_stream / write_pcm_stream
+│  ├─ read_pcm_reader / write_pcm_stream
 │  └─ RawPcmDescriptor / RawPcmByteOrder
 ├─ inspectors
 │  ├─ inspect_wav_total_samples
@@ -72,8 +72,8 @@ flacx
 
 | Layer | Public entry points | What it owns | What it should not become |
 | --- | --- | --- | --- |
-| Explicit core | `core`, configs/builders, `Encoder`, `Decoder`, `Recompressor`, typed PCM helpers | configuration, typed handoff, explicit encode/decode/recompress operations, summaries | a path-oriented convenience story |
-| Convenience/orchestration | `convenience`, flat `*_file` / `*_bytes` helpers | one-shot path/byte routing and extension-driven ergonomics | a duplicate policy engine |
+| Explicit core | `core`, configs/builders, `Encoder`, `Decoder`, `Recompressor`, reader/session helpers | configuration, reader-driven handoff, explicit encode/decode/recompress operations, summaries | a path-oriented builtin story |
+| Builtin/orchestration | `builtin`, namespaced `*_file` / `*_bytes` helpers | one-shot path/byte routing and extension-driven ergonomics | a duplicate policy engine |
 | Container adaptation | public typed boundary plus family-specific behavior behind the scenes | container parsing/writing and family-specific translation | the place where top-level architecture is explained first |
 | Support surfaces | `level`, inspector helpers, raw PCM helpers, progress types | supporting concepts adjacent to the core | the primary conceptual center |
 
@@ -85,7 +85,7 @@ This is the structural snapshot that currently supports the public API story:
 crates/flacx/src/
 ├─ lib.rs
 ├─ config.rs
-├─ convenience.rs
+├─ convenience.rs         # implementation backing the public `builtin` module
 ├─ encoder.rs
 ├─ decode.rs
 ├─ recompress.rs

@@ -436,28 +436,58 @@ pub(crate) fn digest_bytes(bytes: &[u8]) -> [u8; 16] {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn streaminfo_md5(spec: WavSpec, samples: &[i32]) -> Result<[u8; 16]> {
-    let envelope = PcmEnvelope {
-        channels: u16::from(spec.channels),
-        valid_bits_per_sample: u16::from(spec.bits_per_sample),
-        container_bits_per_sample: container_bits_from_valid_bits(u16::from(spec.bits_per_sample)),
-        channel_mask: spec.channel_mask,
-    };
-    let mut md5 = Md5::new();
-    let mut buffer = Vec::with_capacity(CHUNK_CAPACITY);
+    let mut accumulator = StreaminfoMd5::new(spec);
+    accumulator.update_samples(samples)?;
+    accumulator.finalize()
+}
 
-    for &sample in samples {
-        append_encoded_sample(&mut buffer, sample, envelope)?;
-        if buffer.len() >= CHUNK_CAPACITY {
-            md5.update(&buffer);
-            buffer.clear();
+pub struct StreaminfoMd5 {
+    envelope: PcmEnvelope,
+    md5: Md5,
+    buffer: Vec<u8>,
+}
+
+impl StreaminfoMd5 {
+    pub(crate) fn new(spec: WavSpec) -> Self {
+        Self {
+            envelope: PcmEnvelope {
+                channels: u16::from(spec.channels),
+                valid_bits_per_sample: u16::from(spec.bits_per_sample),
+                container_bits_per_sample: container_bits_from_valid_bits(u16::from(
+                    spec.bits_per_sample,
+                )),
+                channel_mask: spec.channel_mask,
+            },
+            md5: Md5::new(),
+            buffer: Vec::with_capacity(CHUNK_CAPACITY),
         }
     }
 
-    if !buffer.is_empty() {
-        md5.update(&buffer);
+    pub(crate) fn update_samples(&mut self, samples: &[i32]) -> Result<()> {
+        for &sample in samples {
+            append_encoded_sample(&mut self.buffer, sample, self.envelope)?;
+            if self.buffer.len() >= CHUNK_CAPACITY {
+                self.md5.update(&self.buffer);
+                self.buffer.clear();
+            }
+        }
+        Ok(())
     }
 
-    Ok(md5.finalize())
+    pub(crate) fn update_bytes(&mut self, bytes: &[u8]) {
+        if !self.buffer.is_empty() {
+            self.md5.update(&self.buffer);
+            self.buffer.clear();
+        }
+        self.md5.update(bytes);
+    }
+
+    pub(crate) fn finalize(mut self) -> Result<[u8; 16]> {
+        if !self.buffer.is_empty() {
+            self.md5.update(&self.buffer);
+        }
+        Ok(self.md5.finalize())
+    }
 }
 
 #[allow(dead_code)]

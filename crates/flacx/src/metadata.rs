@@ -50,7 +50,7 @@ impl FxmdChunkPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct EncodeMetadata {
+pub struct EncodeMetadata {
     preserved: Option<PreservedMetadataBundle>,
     vorbis_comment: Option<VorbisCommentBlock>,
     cuesheet: Option<CueSheetBlock>,

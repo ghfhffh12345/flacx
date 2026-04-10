@@ -43,9 +43,10 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, Decoder, Encoder, EncoderConfig, Error, ProgressSnapshot, RawPcmDescriptor,
-    RecompressConfig, RecompressPhase, RecompressProgress, Recompressor, Result,
-    inspect_flac_total_samples, inspect_raw_pcm_total_samples, inspect_wav_total_samples,
+    DecodeConfig, Decoder, EncoderConfig, Error, PcmReaderOptions, ProgressSnapshot,
+    RawPcmDescriptor, RawPcmReader, RecompressConfig, RecompressPhase, RecompressProgress,
+    Recompressor, Result, inspect_flac_total_samples, inspect_raw_pcm_total_samples,
+    inspect_wav_total_samples, read_pcm_reader_with_options,
 };
 use walkdir::WalkDir;
 
@@ -267,24 +268,35 @@ pub fn encode_command(
             item.overall_total_samples,
         );
         let result = if let Some(raw_descriptor) = command.raw_descriptor {
-            Encoder::new(command.config.clone()).encode_raw_file_with_progress(
-                &item.input,
-                &item.output,
-                raw_descriptor,
-                |update| {
-                    progress.observe(update)?;
-                    Ok(())
-                },
-            )
+            let reader = RawPcmReader::new(File::open(&item.input)?, raw_descriptor)?;
+            let stream = reader.into_pcm_stream()?;
+            let mut encoder = command
+                .config
+                .clone()
+                .into_encoder(File::create(&item.output)?);
+            encoder.encode_with_progress(stream, |update| {
+                progress.observe(update)?;
+                Ok(())
+            })
         } else {
-            Encoder::new(command.config.clone()).encode_file_with_progress(
-                &item.input,
-                &item.output,
-                |update| {
-                    progress.observe(update)?;
-                    Ok(())
+            let reader = read_pcm_reader_with_options(
+                File::open(&item.input)?,
+                PcmReaderOptions {
+                    capture_fxmd: command.config.capture_fxmd,
+                    strict_fxmd_validation: command.config.strict_fxmd_validation,
                 },
-            )
+            )?;
+            let metadata = reader.metadata().clone();
+            let stream = reader.into_pcm_stream();
+            let mut encoder = command
+                .config
+                .clone()
+                .into_encoder(File::create(&item.output)?);
+            encoder.set_metadata(metadata);
+            encoder.encode_with_progress(stream, |update| {
+                progress.observe(update)?;
+                Ok(())
+            })
         };
 
         match result {

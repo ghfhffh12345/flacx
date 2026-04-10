@@ -1,11 +1,12 @@
 use std::{fs, io::Cursor};
 
-use flacx::{Decoder, Encoder, RecompressConfig, RecompressMode, Recompressor, recompress_bytes};
+use flacx::{Decoder, RecompressConfig, RecompressMode, Recompressor, builtin::recompress_bytes};
 
 #[cfg(feature = "progress")]
 use flacx::{RecompressPhase, RecompressProgress};
 
 mod support;
+use support::TestEncoder as Encoder;
 
 use support::{
     application_block, flac_metadata_blocks, pcm_wav_bytes, picture_block,
