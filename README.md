@@ -65,7 +65,9 @@ If you want the explicit adapter/core path instead of the convenience helpers,
 the library crate also exposes `flacx::core::{PcmStream, read_pcm_stream,
 write_pcm_stream, Encoder, Decoder}`.
 
-See [`crates/flacx/README.md`](crates/flacx/README.md) for the crate-focused usage guide.
+See [`docs/flacx-user-guide.md`](docs/flacx-user-guide.md) for the task-oriented
+crate usage guide, or [`crates/flacx/README.md`](crates/flacx/README.md) for the
+public API architecture guide.
 
 ### CLI
 
@@ -156,6 +158,8 @@ required secret setup, and manual recovery notes.
 
 - [`crates/flacx/README.md`](crates/flacx/README.md) — crate-level public API
   architecture guide
+- [`docs/flacx-user-guide.md`](docs/flacx-user-guide.md) — task-oriented guide
+  for using the `flacx` Rust crate
 - [`docs/flacx-public-api-architecture.md`](docs/flacx-public-api-architecture.md) —
   expanded maintainer-oriented guide to the current public surface and source
   structure

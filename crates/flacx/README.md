@@ -14,6 +14,9 @@ This document is intentionally **not** a beginner tutorial or convenience-first
 walkthrough. It is the public-facing architecture companion to the crate rustdoc
 in `crates/flacx/src/lib.rs`.
 
+If you want a task-oriented guide for using the crate from application code,
+start with [`docs/flacx-user-guide.md`](../../docs/flacx-user-guide.md).
+
 Use it when you need to answer questions like:
 - what conceptual surfaces does `flacx` expose?
 - where is the explicit core vs the convenience layer?
