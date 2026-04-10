@@ -1,9 +1,9 @@
 //! Shared configuration types for the `flacx` encoder and decoder.
 //!
 //! The crate exposes two small configuration values:
-//! [`EncoderConfig`] for WAV-to-FLAC conversion and [`DecodeConfig`] for
-//! FLAC-to-WAV conversion. Both are cheap to clone and can be constructed
-//! directly or through their builders.
+//! [`EncoderConfig`] for PCM-container-to-FLAC conversion and [`DecodeConfig`]
+//! for FLAC-to-PCM-container conversion. Both are cheap to clone and can be
+//! constructed directly or through their builders.
 //!
 //! Use [`EncoderConfig::builder`] / [`DecodeConfig::builder`] when you want a
 //! fluent configuration flow, and use the `with_*` methods when you want to
@@ -11,7 +11,7 @@
 
 use crate::{PcmContainer, level::Level};
 
-/// User-facing encoder configuration for WAV-to-FLAC conversion.
+/// User-facing encoder configuration for PCM-container-to-FLAC conversion.
 ///
 /// `EncoderConfig` backs both [`EncoderBuilder`] and [`crate::Encoder`]. The default
 /// encoder configuration uses the highest preset (`Level::Level8`), the host's
@@ -197,7 +197,7 @@ impl EncoderBuilder {
     }
 }
 
-/// User-facing decode configuration for FLAC-to-WAV conversion.
+/// User-facing decode configuration for FLAC-to-PCM-container conversion.
 ///
 /// `DecodeConfig` backs both [`DecodeBuilder`] and [`crate::Decoder`]. The default
 /// decode configuration uses the host's available parallelism when it can be

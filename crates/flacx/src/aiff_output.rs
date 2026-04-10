@@ -500,7 +500,8 @@ mod tests {
             payload.extend_from_slice(&[0u8; 13]);
             payload.push(0);
         }
-        payload.extend_from_slice(&(u64::from(points.last().copied().unwrap_or(0)) + 1).to_be_bytes());
+        payload
+            .extend_from_slice(&(u64::from(points.last().copied().unwrap_or(0)) + 1).to_be_bytes());
         payload.push(170);
         payload.extend_from_slice(&[0u8; 12]);
         payload.push(0);

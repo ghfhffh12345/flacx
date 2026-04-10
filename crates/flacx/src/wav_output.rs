@@ -1,8 +1,10 @@
 use std::{io::Write, sync::mpsc, thread};
 
+#[cfg(feature = "aiff")]
+use crate::aiff_output::{AiffContainer, write_aiff_with_metadata_and_md5};
+#[cfg(feature = "caf")]
+use crate::caf_output::write_caf;
 use crate::{
-    aiff_output::{AiffContainer, write_aiff_with_metadata_and_md5},
-    caf_output::write_caf,
     error::{Error, Result},
     input::{
         PcmEnvelope, WavSpec, append_encoded_sample, container_bits_from_valid_bits,
@@ -44,6 +46,21 @@ impl Default for WavMetadataWriteOptions {
 }
 
 #[allow(dead_code)]
+fn wav_feature_disabled_error() -> Error {
+    Error::UnsupportedWav("RIFF/WAVE family output requires the `wav` cargo feature".into())
+}
+
+#[allow(dead_code)]
+fn aiff_feature_disabled_error() -> Error {
+    Error::UnsupportedWav("AIFF/AIFC output requires the `aiff` cargo feature".into())
+}
+
+#[allow(dead_code)]
+fn caf_feature_disabled_error() -> Error {
+    Error::UnsupportedWav("CAF output requires the `caf` cargo feature".into())
+}
+
+#[allow(dead_code)]
 pub(crate) fn write_wav<W: Write>(writer: &mut W, spec: WavSpec, samples: &[i32]) -> Result<()> {
     write_wav_with_metadata(writer, spec, samples, &WavMetadata::default())
 }
@@ -73,27 +90,43 @@ pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
 ) -> Result<[u8; 16]> {
     match options.container {
         PcmContainer::Aiff => {
-            return write_aiff_with_metadata_and_md5(
-                writer,
-                spec,
-                samples,
-                metadata,
-                AiffContainer::Aiff,
-            );
+            return write_aiff(writer, spec, samples, metadata);
         }
         PcmContainer::Aifc => {
-            return write_aiff_with_metadata_and_md5(
-                writer,
-                spec,
-                samples,
-                metadata,
-                AiffContainer::AifcNone,
-            );
+            return write_aifc(writer, spec, samples, metadata);
         }
         PcmContainer::Caf => {
-            return write_caf(writer, spec, samples, metadata);
+            return write_caf_container(writer, spec, samples, metadata);
+        }
+        PcmContainer::Auto => {
+            #[cfg(not(feature = "wav"))]
+            {
+                #[cfg(feature = "aiff")]
+                {
+                    return write_aiff_with_metadata_and_md5(
+                        writer,
+                        spec,
+                        samples,
+                        metadata,
+                        AiffContainer::Aiff,
+                    );
+                }
+                #[cfg(all(not(feature = "aiff"), feature = "caf"))]
+                {
+                    return write_caf(writer, spec, samples, metadata);
+                }
+                #[cfg(all(not(feature = "aiff"), not(feature = "caf")))]
+                {
+                    return Err(wav_feature_disabled_error());
+                }
+            }
         }
         _ => {}
+    }
+
+    #[cfg(not(feature = "wav"))]
+    {
+        return Err(wav_feature_disabled_error());
     }
 
     if !(1..=8).contains(&spec.channels) {
@@ -254,6 +287,11 @@ fn resolve_pcm_container(
     metadata_chunks: &[([u8; 4], Vec<u8>)],
     data_bytes: u64,
 ) -> Result<PcmContainer> {
+    #[cfg(not(feature = "wav"))]
+    {
+        return resolve_pcm_container_without_wav(requested);
+    }
+
     let wave_riff_size = 4u64
         + riff_chunk_serialized_size(fmt_payload_len)
         + metadata_chunks
@@ -265,6 +303,7 @@ fn resolve_pcm_container(
 
     match requested {
         PcmContainer::Auto => {
+            ensure_output_container_enabled(PcmContainer::Auto)?;
             if wave_riff_size <= u64::from(u32::MAX) {
                 Ok(PcmContainer::Wave)
             } else {
@@ -272,6 +311,7 @@ fn resolve_pcm_container(
             }
         }
         PcmContainer::Wave => {
+            ensure_output_container_enabled(PcmContainer::Wave)?;
             if wave_riff_size > u64::from(u32::MAX) {
                 Err(Error::UnsupportedWav(
                     "decoded WAV output exceeds RIFF size limits; use RF64 or Wave64".into(),
@@ -280,12 +320,103 @@ fn resolve_pcm_container(
                 Ok(PcmContainer::Wave)
             }
         }
-        PcmContainer::Rf64 => Ok(PcmContainer::Rf64),
-        PcmContainer::Wave64 => Ok(PcmContainer::Wave64),
-        PcmContainer::Aiff => Ok(PcmContainer::Aiff),
-        PcmContainer::Aifc => Ok(PcmContainer::Aifc),
-        PcmContainer::Caf => Ok(PcmContainer::Caf),
+        PcmContainer::Rf64 => {
+            ensure_output_container_enabled(PcmContainer::Rf64)?;
+            Ok(PcmContainer::Rf64)
+        }
+        PcmContainer::Wave64 => {
+            ensure_output_container_enabled(PcmContainer::Wave64)?;
+            Ok(PcmContainer::Wave64)
+        }
+        PcmContainer::Aiff => {
+            ensure_output_container_enabled(PcmContainer::Aiff)?;
+            Ok(PcmContainer::Aiff)
+        }
+        PcmContainer::Aifc => {
+            ensure_output_container_enabled(PcmContainer::Aifc)?;
+            Ok(PcmContainer::Aifc)
+        }
+        PcmContainer::Caf => {
+            ensure_output_container_enabled(PcmContainer::Caf)?;
+            Ok(PcmContainer::Caf)
+        }
     }
+}
+
+fn feature_disabled_output_error(container: PcmContainer) -> Error {
+    Error::UnsupportedWav(format!(
+        "{} output requires the `{}` cargo feature",
+        container.family_label(),
+        container.feature_name()
+    ))
+}
+
+pub(crate) fn ensure_output_container_enabled(container: PcmContainer) -> Result<()> {
+    if container.is_enabled() {
+        Ok(())
+    } else {
+        Err(feature_disabled_output_error(container))
+    }
+}
+
+#[cfg(feature = "aiff")]
+fn write_aiff<W: Write>(
+    writer: &mut W,
+    spec: WavSpec,
+    samples: &[i32],
+    metadata: &WavMetadata,
+) -> Result<[u8; 16]> {
+    write_aiff_with_metadata_and_md5(writer, spec, samples, metadata, AiffContainer::Aiff)
+}
+
+#[cfg(not(feature = "aiff"))]
+fn write_aiff<W: Write>(
+    _writer: &mut W,
+    _spec: WavSpec,
+    _samples: &[i32],
+    _metadata: &WavMetadata,
+) -> Result<[u8; 16]> {
+    Err(feature_disabled_output_error(PcmContainer::Aiff))
+}
+
+#[cfg(feature = "aiff")]
+fn write_aifc<W: Write>(
+    writer: &mut W,
+    spec: WavSpec,
+    samples: &[i32],
+    metadata: &WavMetadata,
+) -> Result<[u8; 16]> {
+    write_aiff_with_metadata_and_md5(writer, spec, samples, metadata, AiffContainer::AifcNone)
+}
+
+#[cfg(not(feature = "aiff"))]
+fn write_aifc<W: Write>(
+    _writer: &mut W,
+    _spec: WavSpec,
+    _samples: &[i32],
+    _metadata: &WavMetadata,
+) -> Result<[u8; 16]> {
+    Err(feature_disabled_output_error(PcmContainer::Aifc))
+}
+
+#[cfg(feature = "caf")]
+fn write_caf_container<W: Write>(
+    writer: &mut W,
+    spec: WavSpec,
+    samples: &[i32],
+    metadata: &WavMetadata,
+) -> Result<[u8; 16]> {
+    write_caf(writer, spec, samples, metadata)
+}
+
+#[cfg(not(feature = "caf"))]
+fn write_caf_container<W: Write>(
+    _writer: &mut W,
+    _spec: WavSpec,
+    _samples: &[i32],
+    _metadata: &WavMetadata,
+) -> Result<[u8; 16]> {
+    Err(feature_disabled_output_error(PcmContainer::Caf))
 }
 
 fn write_wave_header_and_chunks<W: Write>(

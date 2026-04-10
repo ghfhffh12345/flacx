@@ -1,27 +1,22 @@
 # flacx
 
-High-performance PCM-container/FLAC conversion and FLAC recompression for Rust.
+Rust를 위한 고성능 PCM 컨테이너/FLAC 변환 및 FLAC 재압축.
 
-`flacx` is the publishable library crate in this workspace. This README is the
-crate-level architecture guide for maintainers and contributors who need to
-re-orient themselves around the **current public API surface** quickly.
+`flacx`는 이 워크스페이스에서 게시 가능한 라이브러리 크레이트입니다. 이 README는 **현재 공개 API 표면**을 빠르게 다시 파악해야 하는 메인터이너와 기여자를 위한 크레이트 수준 아키텍처 가이드입니다.
 
 > Warning: this crate is still experimental. The current `fxmd` layout is the canonical `v1` format, and historical `fxmd` payload variants are not supported.
 
 ## Documentation intent
 
-This document is intentionally **not** a beginner tutorial or convenience-first
-walkthrough. It is the public-facing architecture companion to the crate rustdoc
-in `crates/flacx/src/lib.rs`.
+이 문서는 의도적으로 초보자용 튜토리얼이나 편의성 우선 워크스루가 아닙니다. 이것은 `crates/flacx/src/lib.rs`에 있는 크레이트 rustdoc의 공개 아키텍처 동반 문서입니다.
 
-Use it when you need to answer questions like:
-- what conceptual surfaces does `flacx` expose?
-- where is the explicit core vs the convenience layer?
-- which source files currently carry those surfaces?
-- which feature gates shape the public contract?
+다음과 같은 질문에 답해야 할 때 이 문서를 사용하세요:
+- `flacx`는 어떤 개념적 표면을 노출하는가?
+- explicit core와 convenience layer는 어디에서 나뉘는가?
+- 현재 어떤 소스 파일이 그 표면을 담당하는가?
+- 어떤 feature gate가 공개 계약을 형성하는가?
 
-For the larger structural view, see
-[`docs/flacx-public-api-architecture.md`](../../docs/flacx-public-api-architecture.md).
+더 큰 구조적 관점은 [`docs/flacx-public-api-architecture.ko.md`](../../docs/flacx-public-api-architecture.ko.md)를 참고하세요.
 
 ## Package surface
 
@@ -30,13 +25,13 @@ For the larger structural view, see
 flacx = "0.8.2"
 ```
 
-Default feature families:
+기본 feature 패밀리:
 - `wav` => RIFF/WAVE, RF64, Wave64
 - `aiff` => AIFF, AIFC
 - `caf` => CAF
 
-Optional feature:
-- `progress` => callback-oriented progress reporting
+선택적 feature:
+- `progress` => 콜백 지향 진행 상황 보고
 
 ## Public API interface map
 
@@ -104,19 +99,17 @@ crate root
 
 | Layer | Public API surface | Ownership |
 | --- | --- | --- |
-| Explicit core | `flacx::core`, config/builders, codec façades, typed PCM helpers | The source of truth for codec configuration, typed PCM handoff, explicit encode/decode/recompress operations, and summary reporting. |
-| Convenience/orchestration | `flacx::convenience`, flat `*_file` / `*_bytes` helpers | One-shot file and byte workflows, extension inference, and lightweight routing into the core. |
-| Support surfaces | `level`, raw PCM helpers, inspectors, progress types | Supporting concepts that remain public without becoming the main architecture story. |
+| Explicit core | `flacx::core`, config/builders, codec façades, typed PCM helpers | 코덱 구성, typed PCM handoff, 명시적 encode/decode/recompress 동작, 요약 보고를 위한 단일 진실 원천입니다. |
+| Convenience/orchestration | `flacx::convenience`, flat `*_file` / `*_bytes` helpers | 파일 및 바이트 워크플로, 확장자 추론, core로의 경량 라우팅을 담당합니다. |
+| Support surfaces | `level`, raw PCM helpers, inspectors, progress types | 주요 아키텍처 스토리가 되지 않으면서 공개 상태를 유지하는 보조 개념입니다. |
 
 ### Key rule
 
-The architecture should be read **from the explicit core outward**. The
-convenience layer is intentionally thin and should not be treated as the
-semantic center of the crate.
+아키텍처는 **explicit core에서 바깥쪽으로** 읽어야 합니다. convenience layer는 의도적으로 얇게 유지되며 크레이트의 의미적 중심으로 취급되어서는 안 됩니다.
 
 ## Current source structure snapshot
 
-The current source tree that backs the public contract is:
+현재 공개 계약을 뒷받침하는 소스 트리는 다음과 같습니다:
 
 ```text
 crates/flacx/src/
@@ -146,8 +139,7 @@ crates/flacx/src/
 └─ progress.rs            # optional progress support
 ```
 
-This tree is intentionally architectural rather than exhaustive: it highlights
-which files anchor the public story instead of documenting every helper module.
+이 트리는 의도적으로 아키텍처 중심이며 완전 열거형이 아닙니다. 즉, 모든 helper 모듈을 문서화하기보다 어떤 파일이 공개 스토리를 고정하는지 강조합니다.
 
 ## Interface map: outside-in view
 
@@ -177,10 +169,10 @@ supported PCM container / raw PCM / FLAC
 
 | Feature | Public effect |
 | --- | --- |
-| `wav` | Enables RIFF/WAVE, RF64, and Wave64 ingest/output surfaces. |
-| `aiff` | Enables AIFF and the bounded AIFC surface. |
-| `caf` | Enables the bounded CAF surface. |
-| `progress` | Enables `ProgressSnapshot`, `EncodeProgress`, `DecodeProgress`, and progress-capable methods. |
+| `wav` | RIFF/WAVE, RF64, Wave64 입력/출력 표면을 활성화합니다. |
+| `aiff` | AIFF와 제한된 AIFC 표면을 활성화합니다. |
+| `caf` | 제한된 CAF 표면을 활성화합니다. |
+| `progress` | `ProgressSnapshot`, `EncodeProgress`, `DecodeProgress`, 진행 상황 지원 메서드를 활성화합니다. |
 
 ## Public surface notes
 
@@ -189,17 +181,14 @@ supported PCM container / raw PCM / FLAC
 - `DecodeConfig` / `DecodeBuilder`
 - `RecompressConfig` / `RecompressBuilder`
 
-These are the first place to look when the question is “what knobs does the
-public API intentionally expose?”
+공개 API가 의도적으로 어떤 조정 손잡이를 노출하는지 궁금할 때 가장 먼저 봐야 할 곳입니다.
 
 ### Codec façades
 - `Encoder`
 - `Decoder`
 - `Recompressor`
 
-These are the stable façade types that express the main explicit workflows. The
-recompress path is public, but it should be narrated as secondary to the
-encode/decode architecture.
+이들은 주요 명시적 워크플로를 표현하는 안정된 façade 타입입니다. recompress 경로 역시 공개되어 있지만, encode/decode 아키텍처에 종속된 것으로 서술되어야 합니다.
 
 ### Typed PCM boundary
 - `PcmStream`
@@ -208,38 +197,34 @@ encode/decode architecture.
 - `read_pcm_stream`
 - `write_pcm_stream`
 
-This is the seam between container adapters and the FLAC codec pipeline.
+이것은 컨테이너 adapter와 FLAC 코덱 파이프라인 사이의 이음새입니다.
 
 ### Convenience/orchestration surface
 - `encode_file`, `encode_bytes`
 - `decode_file`, `decode_bytes`
 - `recompress_file`, `recompress_bytes`
 
-These helpers are important, but they are wrappers around the same explicit
-surfaces above rather than a separate architectural center.
+이 helper들은 중요하지만, 별도의 아키텍처 중심이 아니라 위의 동일한 명시적 표면을 감싸는 wrapper입니다.
 
 ## Metadata and preservation note
 
-The public documentation should continue to treat metadata preservation as part
-of the crate contract, but not as the top-level orientation story. In
-particular:
-- the canonical private preservation chunk is the unified `fxmd v1` layout,
-- historical `fxmd` payload variants are intentionally unsupported,
-- decoded WAV-family output may carry preservation metadata even when the audio
-  samples are unchanged.
+공개 문서는 계속해서 metadata preservation을 크레이트 계약의 일부로 다뤄야 하지만, 최상위 방향성 스토리로 두어서는 안 됩니다. 특히:
+- canonical private preservation chunk는 통합된 `fxmd v1` 레이아웃입니다
+- 과거 `fxmd` payload variant는 의도적으로 지원되지 않습니다
+- 디코드된 WAV-family 출력은 오디오 샘플이 변하지 않더라도 preservation metadata를 포함할 수 있습니다
 
 ## Documentation consistency contract
 
-When updating public docs, keep these surfaces aligned:
-1. `crates/flacx/src/lib.rs` — crate contract and public re-export map
-2. `crates/flacx/README.md` — architecture-at-a-glance guide
-3. `docs/flacx-public-api-architecture.md` — expanded structural guide
+공개 문서를 업데이트할 때는 다음 표면을 정렬된 상태로 유지하세요:
+1. `crates/flacx/src/lib.rs` — 크레이트 계약과 공개 re-export 맵
+2. `crates/flacx/README.md` — 한눈에 보는 아키텍처 가이드
+3. `docs/flacx-public-api-architecture.md` — 확장된 구조 가이드
 
-If one of those changes, the other two should be checked for drift.
+이들 중 하나가 바뀌면 다른 둘도 드리프트가 없는지 확인해야 합니다.
 
 ## Related docs
 
 - [`crates/flacx/src/lib.rs`](src/lib.rs) — crate rustdoc source
-- [`docs/flacx-public-api-architecture.md`](../../docs/flacx-public-api-architecture.md) — expanded architecture guide
-- [`../../README.md`](../../README.md) — workspace overview
-- [`../../docs/flacx-major-refactor-review.md`](../../docs/flacx-major-refactor-review.md) — refactor review and maintainer checklist
+- [`docs/flacx-public-api-architecture.ko.md`](../../docs/flacx-public-api-architecture.ko.md) — 확장된 아키텍처 가이드
+- [`../../README.ko.md`](../../README.ko.md) — 워크스페이스 개요
+- [`../../docs/flacx-major-refactor-review.ko.md`](../../docs/flacx-major-refactor-review.ko.md) — 리팩터 검토와 메인터이너 체크리스트

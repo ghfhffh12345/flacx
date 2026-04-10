@@ -45,6 +45,7 @@ pub(crate) fn inspect_raw_pcm_total_samples_impl<R: Read + Seek>(
     total_samples_from_byte_len(end.saturating_sub(start), validated.frame_bytes)
 }
 
+#[allow(dead_code)]
 pub(crate) fn total_samples_from_byte_len_with_descriptor(
     byte_len: u64,
     descriptor: RawPcmDescriptor,

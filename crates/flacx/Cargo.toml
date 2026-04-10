@@ -11,8 +11,11 @@ keywords = ["audio", "flac", "wav", "codec"]
 categories = ["compression", "multimedia::audio"]
 
 [features]
-default = []
+default = ["wav", "aiff", "caf"]
 progress = []
+wav = []
+aiff = []
+caf = []
 
 [dependencies]
 bitstream-io.workspace = true

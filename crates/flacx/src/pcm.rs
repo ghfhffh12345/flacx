@@ -1,5 +1,21 @@
 use crate::error::{Error, Result};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PcmSpec {
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub bits_per_sample: u8,
+    pub total_samples: u64,
+    pub bytes_per_sample: u16,
+    pub channel_mask: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PcmStream {
+    pub spec: PcmSpec,
+    pub samples: Vec<i32>,
+}
+
 const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -12,6 +28,32 @@ pub enum PcmContainer {
     Aiff,
     Aifc,
     Caf,
+}
+
+impl PcmContainer {
+    pub(crate) const fn family_label(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Wave | Self::Rf64 | Self::Wave64 => "WAV/RF64/Wave64",
+            Self::Aiff | Self::Aifc => "AIFF/AIFC",
+            Self::Caf => "CAF",
+        }
+    }
+
+    pub(crate) const fn feature_name(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Wave | Self::Rf64 | Self::Wave64 => "wav",
+            Self::Aiff | Self::Aifc => "aiff",
+            Self::Caf => "caf",
+        }
+    }
+
+    pub(crate) fn is_enabled(self) -> bool {
+        match self {
+            Self::Auto | Self::Wave | Self::Rf64 | Self::Wave64 => cfg!(feature = "wav"),
+            Self::Aiff | Self::Aifc => cfg!(feature = "aiff"),
+            Self::Caf => cfg!(feature = "caf"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

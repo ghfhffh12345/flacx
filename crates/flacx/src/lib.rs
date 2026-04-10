@@ -1,146 +1,129 @@
 //! High-performance PCM-container/FLAC conversion and recompression for Rust.
 //!
-//! The `flacx` crate is the reusable library layer in this workspace. It
-//! exposes compact encode and decode façades, builder-backed configuration
-//! types, a FLAC recompression façade, byte-oriented helpers, stream
-//! inspection helpers, and optional progress reporting.
+//! `flacx` is the reusable library crate in this workspace. The public surface
+//! is intentionally layered so callers — and maintainers reading the exported
+//! API — can distinguish the explicit codec pipeline from the thin convenience
+//! wrappers built on top of it.
 //!
-//! The API is intentionally small:
+//! This crate-level documentation is architecture-first. It is meant to answer
+//! “what does the public API expose, and how is it organized?” rather than to
+//! serve as a beginner tutorial.
 //!
-//! - [`EncoderConfig`] and [`DecodeConfig`] hold user-facing settings.
-//! - [`RecompressConfig`] exposes curated FLAC-to-FLAC recompression settings.
-//! - [`Encoder`], [`Decoder`], and [`Recompressor`] provide the main streaming
-//!   façades.
-//! - [`encode_file`], [`encode_bytes`], [`decode_file`], and [`decode_bytes`]
-//!   offer convenience entry points for one-off use.
-//! - [`RawPcmDescriptor`] and [`inspect_raw_pcm_total_samples`] cover explicit
-//!   raw signed-integer PCM ingest.
-//! - [`recompress_file`] and [`recompress_bytes`] provide convenience
-//!   FLAC-to-FLAC entry points.
-//! - [`inspect_wav_total_samples`] and [`inspect_flac_total_samples`] let you
-//!   read stream totals without running a full conversion.
-//! - [`level`] exposes the compression presets used by the encoder.
-//! - The optional `progress` feature adds callback-friendly progress
-//!   reporting.
+//! ## Public API interface map
 //!
-//! ## Quick start
-//!
-//! Encode a supported PCM container to FLAC with the default level and a custom thread count:
-//!
-//! ```no_run
-//! use flacx::{Encoder, EncoderConfig, level::Level};
-//!
-//! let config = EncoderConfig::builder()
-//!     .level(Level::Level8)
-//!     .threads(4)
-//!     .build();
-//!
-//! Encoder::new(config)
-//!     .encode_file("input.wav", "output.flac")
-//!     .unwrap();
+//! ```text
+//! flacx
+//! ├─ core
+//! │  ├─ config/builders
+//! │  │  ├─ EncoderConfig / EncoderBuilder
+//! │  │  ├─ DecodeConfig / DecodeBuilder
+//! │  │  └─ RecompressConfig / RecompressBuilder
+//! │  ├─ streaming façades
+//! │  │  ├─ Encoder / EncodeSummary
+//! │  │  ├─ Decoder / DecodeSummary
+//! │  │  └─ Recompressor / RecompressProgress / RecompressPhase
+//! │  ├─ typed PCM boundary
+//! │  │  ├─ PcmStream / PcmStreamSpec / PcmContainer
+//! │  │  ├─ read_pcm_stream / write_pcm_stream
+//! │  │  └─ inspect_pcm_total_samples / inspect_raw_pcm_total_samples
+//! │  └─ support surfaces
+//! │     ├─ RawPcmDescriptor / RawPcmByteOrder
+//! │     └─ level
+//! ├─ inspectors
+//! │  ├─ inspect_wav_total_samples
+//! │  └─ inspect_flac_total_samples
+//! ├─ convenience
+//! │  ├─ encode_file / encode_bytes
+//! │  ├─ decode_file / decode_bytes
+//! │  ├─ recompress_file / recompress_bytes
+//! │  └─ re-exported inspection helpers
+//! └─ progress (feature = "progress")
+//!    ├─ ProgressSnapshot
+//!    ├─ EncodeProgress / DecodeProgress
+//!    └─ progress-enabled encode/decode/recompress methods
 //! ```
 //!
-//! Decode a FLAC file back to a supported PCM container:
+//! ## Layer contract
 //!
-//! ```no_run
-//! use flacx::Decoder;
+//! | Layer | Public surface | Responsibility |
+//! | --- | --- | --- |
+//! | Explicit core | [`core`], [`Encoder`], [`Decoder`], [`Recompressor`], config/builders, typed PCM helpers | Owns codec configuration, typed PCM handoff, summary reporting, and explicit encode/decode/recompress entry points. |
+//! | Convenience/orchestration | [`convenience`], top-level `*_file` / `*_bytes` helpers | Owns one-shot file/byte routing and extension-driven ergonomics without becoming a second policy engine. |
+//! | Support surfaces | [`level`], raw PCM helpers, inspector helpers, optional progress types | Exposes stable supporting concepts that sit beside the core pipeline. |
 //!
-//! Decoder::default()
-//!     .decode_file("input.flac", "output.aiff")
-//!     .unwrap();
+//! ## Source structure snapshot
+//!
+//! The current crate layout is intentionally readable from the public surface
+//! inward:
+//!
+//! ```text
+//! crates/flacx/src/
+//! ├─ lib.rs                 # public re-exports and crate contract
+//! ├─ config.rs              # encode/decode config + builders
+//! ├─ convenience.rs         # one-shot file/byte orchestration helpers
+//! ├─ encoder.rs             # encode façade
+//! ├─ decode.rs              # decode façade
+//! ├─ recompress.rs          # subordinate FLAC→FLAC façade
+//! ├─ pcm.rs                 # typed PCM boundary (`PcmStream`, `PcmSpec`, `PcmContainer`)
+//! ├─ input.rs               # container dispatch for PCM ingest
+//! ├─ wav_input.rs           # WAV/RF64/Wave64 reader family
+//! ├─ wav_output.rs          # WAV-family writer family
+//! ├─ decode_output.rs       # decode-side temp output + commit helpers
+//! ├─ encode_pipeline.rs     # encode planning helpers
+//! ├─ metadata.rs            # public metadata-facing helpers
+//! ├─ metadata/
+//! │  ├─ blocks.rs           # FLAC metadata block model
+//! │  └─ draft.rs            # metadata drafting/translation helpers
+//! ├─ read/
+//! │  ├─ mod.rs              # FLAC read orchestration
+//! │  ├─ frame.rs            # FLAC frame parsing/decoding
+//! │  └─ metadata.rs         # FLAC metadata parsing + inspection
+//! ├─ write/
+//! │  ├─ mod.rs              # FLAC write orchestration
+//! │  └─ frame.rs            # frame/subframe serialization
+//! └─ progress.rs            # optional callback-oriented progress reporting
 //! ```
 //!
-//! Recompress an existing FLAC with a different output profile:
+//! ## Feature-gated surface
 //!
-//! ```no_run
-//! use flacx::{Decoder, RecompressConfig, RecompressMode, Recompressor, level::Level};
+//! Format families are coarse feature gates:
 //!
-//! let config = RecompressConfig::builder()
-//!     .mode(RecompressMode::Default)
-//!     .level(Level::Level0)
-//!     .threads(2)
-//!     .build();
+//! - `wav` => RIFF/WAVE, RF64, Wave64
+//! - `aiff` => AIFF, AIFC
+//! - `caf` => CAF
+//! - `progress` => callback-friendly progress reporting
 //!
-//! Recompressor::new(config)
-//!     .recompress_file("input.flac", "input.recompressed.flac")
-//!     .unwrap();
+//! ## Reading guide
 //!
-//! let original = Decoder::default().decode_bytes(&std::fs::read("input.flac").unwrap()).unwrap();
-//! let recompressed = Decoder::default()
-//!     .decode_bytes(&std::fs::read("input.recompressed.flac").unwrap())
-//!     .unwrap();
-//! assert_eq!(original, recompressed);
-//! ```
+//! - Start with [`core`] when you want the explicit architecture story.
+//! - Use [`convenience`] when you specifically want the one-shot orchestration
+//!   wrappers.
+//! - Use [`level`] for compression presets and [`RawPcmDescriptor`] when PCM
+//!   ingest must be described explicitly instead of inferred from a container.
+//! - In the repository, `crates/flacx/README.md` mirrors this crate contract,
+//!   and `docs/flacx-public-api-architecture.md` expands the public API into a
+//!   maintainer-oriented architecture guide with structural artifacts.
 //!
-//! ## Helpers and inspectors
+//! ## Scope of this rustdoc
 //!
-//! The convenience functions are useful when you want to stay in memory or
-//! inspect a stream before converting it:
+//! The crate docs intentionally stop at the architectural layer map and the
+//! exported interface. They do not attempt to narrate the full internal
+//! execution path of encode, decode, or recompress operations.
 //!
-//! ```no_run
-//! use std::io::Cursor;
-//! use flacx::{
-//!     decode_bytes, encode_bytes, inspect_flac_total_samples, inspect_wav_total_samples,
-//! };
-//!
-//! let wav_bytes = std::fs::read("input.aiff").unwrap();
-//! let total_samples = inspect_wav_total_samples(Cursor::new(&wav_bytes)).unwrap();
-//! let flac_bytes = encode_bytes(&wav_bytes).unwrap();
-//! let flac_total_samples = inspect_flac_total_samples(Cursor::new(&flac_bytes)).unwrap();
-//! let wav_round_trip = decode_bytes(&flac_bytes).unwrap();
-//!
-//! assert_eq!(total_samples, flac_total_samples);
-//! assert!(!wav_round_trip.is_empty());
-//! ```
-//!
-//! ## Progress feature
-//!
-//! When the `progress` feature is enabled, encode/decode operations can report
-//! [`ProgressSnapshot`] updates, and recompress operations can report
-//! phase-aware [`RecompressProgress`] updates.
-//!
-//! ```no_run
-//! # #[cfg(feature = "progress")]
-//! # {
-//! use flacx::{Encoder, EncoderConfig, ProgressSnapshot, RecompressConfig, Recompressor};
-//!
-//! let encoder = Encoder::new(EncoderConfig::default());
-//! encoder.encode_file_with_progress("input.wav", "output.flac", |progress: ProgressSnapshot| {
-//!     println!("{} / {} samples", progress.processed_samples, progress.total_samples);
-//!     Ok(())
-//! }).unwrap();
-//!
-//! let recompressor = Recompressor::new(RecompressConfig::default());
-//! recompressor.recompress_file_with_progress(
-//!     "input.flac",
-//!     "input.recompressed.flac",
-//!     |progress| {
-//!         println!(
-//!             "{} {} / {}",
-//!             progress.phase.as_str(),
-//!             progress.overall_processed_samples,
-//!             progress.overall_total_samples
-//!         );
-//!         Ok(())
-//!     },
-//! ).unwrap();
-//! # }
-//! ```
-//!
-//! ## Supported scope
-//!
-//! This crate focuses on the current PCM-container <-> FLAC conversion and
-//! FLAC -> FLAC recompression surface used by the workspace. The crate documentation
-//! intentionally stays aligned with the exported API so that docs.rs readers
-//! can use it as the canonical reference.
-
+#[cfg(feature = "aiff")]
 mod aiff;
+#[cfg(feature = "aiff")]
 mod aiff_output;
+#[cfg(feature = "caf")]
 mod caf;
+#[cfg(feature = "caf")]
 mod caf_output;
 mod config;
+pub mod convenience;
 mod crc;
 mod decode;
+mod decode_output;
+mod encode_pipeline;
 mod encoder;
 mod error;
 mod input;
@@ -155,6 +138,7 @@ mod read;
 mod recompress;
 mod reconstruct;
 mod stream_info;
+mod wav_input;
 mod wav_output;
 mod write;
 
@@ -162,9 +146,14 @@ mod write;
 pub mod level;
 
 pub use config::{DecodeBuilder, DecodeConfig, EncoderBuilder, EncoderConfig};
-pub use decode::{DecodeSummary, Decoder, decode_bytes, decode_file};
-pub use encoder::{EncodeSummary, Encoder, encode_bytes, encode_file};
+pub use convenience::{decode_bytes, decode_file, encode_bytes, encode_file};
+pub use decode::{DecodeSummary, Decoder};
+pub use encoder::{EncodeSummary, Encoder};
 pub use error::{Error, Result};
+pub use input::{
+    PcmSpec, PcmSpec as PcmStreamSpec, PcmStream,
+    inspect_wav_total_samples as inspect_pcm_total_samples, read_wav as read_pcm_stream,
+};
 pub use pcm::PcmContainer;
 pub use raw::{RawPcmByteOrder, RawPcmDescriptor, inspect_raw_pcm_total_samples};
 pub use recompress::{
@@ -184,6 +173,41 @@ pub use input::inspect_wav_total_samples;
 ///
 /// This is the FLAC counterpart to [`inspect_wav_total_samples`].
 pub use read::inspect_flac_total_samples;
+
+/// Write a typed [`PcmStream`] out to a supported PCM-container family without
+/// invoking convenience-layer file routing or extension inference.
+pub fn write_pcm_stream<W: std::io::Write>(
+    writer: &mut W,
+    stream: &PcmStream,
+    container: PcmContainer,
+) -> Result<()> {
+    wav_output::write_wav_with_metadata_and_md5_with_options(
+        writer,
+        stream.spec,
+        &stream.samples,
+        &metadata::WavMetadata::default(),
+        wav_output::WavMetadataWriteOptions {
+            emit_fxmd: false,
+            container,
+        },
+    )?;
+    Ok(())
+}
+
+/// Explicit core surface for callers that want the typed/configured pipeline
+/// without the one-shot convenience wrappers.
+pub mod core {
+    pub use crate::{
+        DecodeBuilder, DecodeConfig, DecodeSummary, Decoder, EncodeSummary, Encoder,
+        EncoderBuilder, EncoderConfig, PcmContainer, PcmStream, PcmStreamSpec, RawPcmByteOrder,
+        RawPcmDescriptor, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,
+        RecompressProgress, Recompressor, inspect_pcm_total_samples, inspect_raw_pcm_total_samples,
+        read_pcm_stream, write_pcm_stream,
+    };
+
+    #[cfg(feature = "progress")]
+    pub use crate::{DecodeProgress, EncodeProgress, ProgressSnapshot};
+}
 
 #[cfg(feature = "progress")]
 pub use progress::{DecodeProgress, EncodeProgress, ProgressSnapshot};
