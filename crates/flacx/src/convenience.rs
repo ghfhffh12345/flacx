@@ -1,7 +1,7 @@
 use std::{fs::File, io::Cursor, path::Path};
 
 use crate::{
-    DecodeConfig, EncoderConfig, Result,
+    DecodeConfig, EncoderConfig, RecompressConfig, Result,
     decode::DecodeSummary,
     decode_output::{commit_temp_output, open_temp_output},
     encoder::EncodeSummary,
@@ -9,9 +9,9 @@ use crate::{
     input::read_pcm_reader_with_config,
     pcm::PcmContainer,
     read::{FlacReaderOptions, read_flac_reader_with_options},
+    recompress::{FlacRecompressSource, RecompressSummary},
 };
 
-pub use crate::recompress::{recompress_bytes, recompress_file};
 pub use crate::{
     inspect_flac_total_samples, inspect_pcm_total_samples, inspect_raw_pcm_total_samples,
     inspect_wav_total_samples,
@@ -27,6 +27,18 @@ where
 
 pub fn encode_bytes(input: &[u8]) -> Result<Vec<u8>> {
     encode_bytes_with_config(&EncoderConfig::default(), input)
+}
+
+pub fn recompress_file<P, Q>(input_path: P, output_path: Q) -> Result<RecompressSummary>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    recompress_file_with_config(&RecompressConfig::default(), input_path, output_path)
+}
+
+pub fn recompress_bytes(input: &[u8]) -> Result<Vec<u8>> {
+    recompress_bytes_with_config(&RecompressConfig::default(), input)
 }
 
 pub(crate) fn encode_file_with_config<P, Q>(
@@ -54,6 +66,67 @@ pub(crate) fn encode_bytes_with_config(config: &EncoderConfig, input: &[u8]) -> 
     encoder.set_metadata(metadata);
     encoder.encode(stream)?;
     Ok(encoder.into_inner().into_inner())
+}
+
+pub(crate) fn recompress_bytes_with_config(
+    config: &RecompressConfig,
+    input: &[u8],
+) -> Result<Vec<u8>> {
+    let reader = read_flac_reader_with_options(Cursor::new(input), config.flac_reader_options())?;
+    let source = FlacRecompressSource::from_reader(reader);
+    let mut recompressor = config.clone().into_recompressor(Cursor::new(Vec::new()));
+    recompressor.recompress(source)?;
+    Ok(recompressor.into_inner().into_inner())
+}
+
+pub(crate) fn recompress_file_with_config<P, Q>(
+    config: &RecompressConfig,
+    input_path: P,
+    output_path: Q,
+) -> Result<RecompressSummary>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    let mut progress = crate::progress::NoProgress;
+    recompress_file_with_config_and_progress(config, input_path, output_path, &mut progress)
+}
+
+pub(crate) fn recompress_file_with_config_and_progress<P, Q, R>(
+    config: &RecompressConfig,
+    input_path: P,
+    output_path: Q,
+    progress: &mut R,
+) -> Result<RecompressSummary>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+    R: crate::recompress::RecompressProgressSink,
+{
+    let input_path = input_path.as_ref();
+    let output_path = output_path.as_ref();
+    let (temp_path, temp_file) = open_temp_output(output_path)?;
+
+    let result = (|| {
+        let reader =
+            read_flac_reader_with_options(File::open(input_path)?, config.flac_reader_options())?;
+        let source = FlacRecompressSource::from_reader(reader);
+        let mut recompressor = config.clone().into_recompressor(temp_file);
+        recompressor.recompress_with_sink(source, progress)
+    })();
+    match result {
+        Ok(summary) => {
+            if let Err(error) = commit_temp_output(&temp_path, output_path) {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(error);
+            }
+            Ok(summary)
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(error)
+        }
+    }
 }
 
 pub fn decode_file<P, Q>(input_path: P, output_path: Q) -> Result<DecodeSummary>

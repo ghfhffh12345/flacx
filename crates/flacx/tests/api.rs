@@ -6,9 +6,10 @@ use std::{
 };
 
 use flacx::{
-    DecodePcmStream, DecodeSummary, EncodePcmStream, EncoderConfig, PcmSpec, RawPcmByteOrder,
-    RawPcmDescriptor, WavReader, builtin, inspect_raw_pcm_total_samples, level::Level,
-    read_flac_reader, read_pcm_reader, write_pcm_stream,
+    DecodePcmStream, DecodeSummary, EncodePcmStream, EncoderConfig, FlacReaderOptions,
+    FlacRecompressSource, PcmSpec, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig,
+    RecompressMode, WavReader, builtin, inspect_raw_pcm_total_samples, level::Level,
+    read_flac_reader, read_flac_reader_with_options, read_pcm_reader, write_pcm_stream,
 };
 
 mod support;
@@ -18,6 +19,19 @@ use support::{
     parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
     wav_data_bytes,
 };
+
+fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {
+    match config.mode() {
+        RecompressMode::Loose | RecompressMode::Default => FlacReaderOptions {
+            strict_seektable_validation: false,
+            strict_channel_mask_provenance: false,
+        },
+        RecompressMode::Strict => FlacReaderOptions {
+            strict_seektable_validation: true,
+            strict_channel_mask_provenance: true,
+        },
+    }
+}
 
 #[test]
 fn builtin_encode_bytes_matches_explicit_reader_session_flow() {
@@ -152,6 +166,32 @@ fn decode_api_accepts_seekable_readers_and_returns_summary() {
     assert_eq!(format.channels, 2);
     assert_eq!(format.sample_rate, 48_000);
     assert_eq!(format.bits_per_sample, 24);
+}
+
+#[test]
+fn explicit_recompress_reader_session_flow_preserves_audio() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_536));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+    let config = RecompressConfig::default()
+        .with_threads(1)
+        .with_block_size(576);
+    let reader =
+        read_flac_reader_with_options(Cursor::new(flac), recompress_reader_options(config))
+            .unwrap();
+    let spec = reader.spec();
+    let source = FlacRecompressSource::from_reader(reader);
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+
+    assert_eq!(source.total_samples(), 1_536);
+    assert_eq!(source.spec(), spec);
+
+    let summary = recompressor.recompress(source).unwrap();
+    let recompressed = recompressor.into_inner().into_inner();
+    let decoded = TestDecoder::default().decode_bytes(&recompressed).unwrap();
+
+    assert_eq!(summary.block_size, 576);
+    assert_eq!(summary.total_samples, 1_536);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
 #[test]
