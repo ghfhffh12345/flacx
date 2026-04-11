@@ -1,6 +1,9 @@
 use std::{fs, io::Cursor};
 
-use flacx::{RecompressConfig, RecompressMode, Recompressor, builtin::recompress_bytes};
+use flacx::{
+    FlacReaderOptions, FlacRecompressSource, RecompressConfig, RecompressMode, RecompressSummary,
+    builtin, read_flac_reader_with_options,
+};
 
 #[cfg(feature = "progress")]
 use flacx::{RecompressPhase, RecompressProgress};
@@ -15,32 +18,56 @@ use support::{
     wav_data_bytes,
 };
 
-#[test]
-fn top_level_recompress_bytes_matches_default_recompressor() {
-    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+fn reader_options(config: RecompressConfig) -> FlacReaderOptions {
+    match config.mode() {
+        RecompressMode::Loose | RecompressMode::Default => FlacReaderOptions {
+            strict_seektable_validation: false,
+            strict_channel_mask_provenance: false,
+        },
+        RecompressMode::Strict => FlacReaderOptions {
+            strict_seektable_validation: true,
+            strict_channel_mask_provenance: true,
+        },
+    }
+}
 
-    let via_function = recompress_bytes(&flac).unwrap();
-    let via_recompressor = Recompressor::default().recompress_bytes(&flac).unwrap();
-
-    assert_eq!(via_function, via_recompressor);
+fn recompress_with_config(
+    config: RecompressConfig,
+    input: &[u8],
+) -> flacx::Result<(Vec<u8>, RecompressSummary)> {
+    let reader = read_flac_reader_with_options(Cursor::new(input), reader_options(config))?;
+    let source = FlacRecompressSource::from_reader(reader);
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+    let summary = recompressor.recompress(source)?;
+    Ok((recompressor.into_inner().into_inner(), summary))
 }
 
 #[test]
-fn recompress_api_accepts_seekable_readers_and_preserves_audio() {
+fn builtin_recompress_bytes_matches_explicit_reader_session_flow() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+
+    let via_builtin = builtin::recompress_bytes(&flac).unwrap();
+    let (via_session, summary) =
+        recompress_with_config(RecompressConfig::default(), &flac).unwrap();
+
+    assert_eq!(summary.total_samples, 2_048);
+    assert_eq!(via_builtin, via_session);
+}
+
+#[test]
+fn recompress_api_accepts_reader_first_sources_and_preserves_audio() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
-    let mut output = Cursor::new(Vec::new());
+    let config = RecompressConfig::default()
+        .with_threads(1)
+        .with_block_size(576);
+    let reader = read_flac_reader_with_options(Cursor::new(flac), reader_options(config)).unwrap();
+    let source = FlacRecompressSource::from_reader(reader);
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
 
-    let summary = Recompressor::new(
-        RecompressConfig::default()
-            .with_threads(1)
-            .with_block_size(576),
-    )
-    .recompress(Cursor::new(flac), &mut output)
-    .unwrap();
-
-    let recompressed = output.into_inner();
+    let summary = recompressor.recompress(source).unwrap();
+    let recompressed = recompressor.into_inner().into_inner();
     let decoded = DecodeHarness::default()
         .decode_bytes(&recompressed)
         .unwrap();
@@ -53,27 +80,21 @@ fn recompress_api_accepts_seekable_readers_and_preserves_audio() {
 }
 
 #[test]
-fn recompress_file_uses_configured_options() {
+fn builtin_recompress_file_matches_explicit_reader_session_output() {
     let wav = pcm_wav_bytes(16, 1, 32_000, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let input_path = unique_temp_path("flac");
     let output_path = unique_temp_path("flac");
     fs::write(&input_path, &flac).unwrap();
 
-    let summary = Recompressor::new(
-        RecompressConfig::default()
-            .with_threads(1)
-            .with_block_size(576),
-    )
-    .recompress_file(&input_path, &output_path)
-    .unwrap();
+    let summary = builtin::recompress_file(&input_path, &output_path).unwrap();
+    let bytes_from_file = fs::read(&output_path).unwrap();
+    let (bytes_from_memory, session_summary) =
+        recompress_with_config(RecompressConfig::default(), &flac).unwrap();
 
-    assert_eq!(summary.block_size, 576);
-    assert!(output_path.exists());
-    let decoded = DecodeHarness::default()
-        .decode_bytes(&fs::read(&output_path).unwrap())
-        .unwrap();
-    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+    assert_eq!(summary.total_samples, 2_048);
+    assert_eq!(summary, session_summary);
+    assert_eq!(bytes_from_file, bytes_from_memory);
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
@@ -95,7 +116,7 @@ fn recompress_preserves_optional_metadata_blocks() {
     );
     let source = replace_flac_optional_metadata(&flac, &[application.clone(), picture.clone()]);
 
-    let recompressed = Recompressor::default().recompress_bytes(&source).unwrap();
+    let (recompressed, _) = recompress_with_config(RecompressConfig::default(), &source).unwrap();
     let blocks = flac_metadata_blocks(&recompressed);
 
     let recompressed_application = blocks
@@ -120,9 +141,11 @@ fn recompress_strict_mode_rejects_invalid_seektable() {
         &[seektable_block(&[(128, 1_024, 128), (64, 0, 64)])],
     );
 
-    let strict = Recompressor::new(RecompressConfig::default().with_mode(RecompressMode::Strict))
-        .recompress_bytes(&malformed)
-        .unwrap_err();
+    let strict = recompress_with_config(
+        RecompressConfig::default().with_mode(RecompressMode::Strict),
+        &malformed,
+    )
+    .unwrap_err();
 
     assert!(
         strict
@@ -158,11 +181,14 @@ fn recompress_builder_matches_fluent_config() {
 fn recompress_progress_reports_decode_then_encode_phases() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
-    let mut output = Cursor::new(Vec::new());
+    let config = RecompressConfig::default().with_threads(1);
+    let reader = read_flac_reader_with_options(Cursor::new(flac), reader_options(config)).unwrap();
+    let source = FlacRecompressSource::from_reader(reader);
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
     let mut updates = Vec::<RecompressProgress>::new();
 
-    Recompressor::new(RecompressConfig::default().with_threads(1))
-        .recompress_with_progress(Cursor::new(flac), &mut output, |progress| {
+    recompressor
+        .recompress_with_progress(source, |progress| {
             updates.push(progress);
             Ok(())
         })

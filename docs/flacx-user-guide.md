@@ -44,7 +44,7 @@ your workflow.
 | --- | --- |
 | Convert one file with defaults | `builtin::encode_file`, `builtin::decode_file`, `builtin::recompress_file` |
 | Convert in-memory data | `builtin::encode_bytes`, `builtin::decode_bytes`, `builtin::recompress_bytes` |
-| Reuse settings across many jobs | `EncoderConfig::into_encoder(...)`, `Decoder`, `Recompressor` |
+| Reuse settings across many jobs | `EncoderConfig::into_encoder(...)`, `DecodeConfig::into_decoder(...)`, `RecompressConfig::into_recompressor(...)` |
 | Inspect spec/metadata before encoding | `read_pcm_reader`, family readers such as `WavReader` |
 | Work with decoded samples directly | `read_flac_reader`, `write_pcm_stream` |
 | Show progress in your own UI | `*_with_progress` methods with the `progress` feature |
@@ -53,7 +53,7 @@ A practical rule of thumb:
 
 - use `builtin::*` for quick one-shot conversions
 - use reader -> spec/metadata -> stream -> session when you need explicit control
-- use `Decoder` or `Recompressor` directly when you need decode/recompress reuse
+- use `DecodeConfig::into_decoder(...)` or `RecompressConfig::into_recompressor(...)` when you need reusable decode/recompress sessions
 
 ## Encode PCM containers to FLAC
 
@@ -356,9 +356,15 @@ decoder.decode_with_progress(stream, |snapshot: ProgressSnapshot| {
 ### Recompress progress
 
 ```rust
-use flacx::{RecompressProgress, Recompressor};
+use flacx::{
+    FlacRecompressSource, RecompressConfig, RecompressProgress, read_flac_reader,
+};
 
-Recompressor::default().recompress_file_with_progress("input.flac", "output.flac", |progress: RecompressProgress| {
+let reader = read_flac_reader(std::fs::File::open("input.flac")?)?;
+let source = FlacRecompressSource::from_reader(reader);
+let mut recompressor = RecompressConfig::default()
+    .into_recompressor(std::fs::File::create("output.flac")?);
+recompressor.recompress_with_progress(source, |progress: RecompressProgress| {
     println!(
         "{}: {} / {} samples",
         progress.phase.as_str(),
@@ -375,16 +381,20 @@ Use recompression when the input is already FLAC and you want a new FLAC output
 with different settings.
 
 ```rust
-use flacx::{RecompressConfig, Recompressor, level::Level};
+use flacx::{
+    FlacRecompressSource, RecompressConfig, level::Level, read_flac_reader,
+};
 
-let recompressor = Recompressor::new(
-    RecompressConfig::builder()
-        .level(Level::Level5)
-        .threads(4)
-        .build(),
-);
+let reader = read_flac_reader(std::fs::File::open("input.flac")?)?;
+let source = FlacRecompressSource::from_reader(reader);
+let mut recompressor = RecompressConfig::builder()
+    .level(Level::Level5)
+    .threads(4)
+    .build()
+    .into_recompressor(std::fs::File::create("output.flac")?);
 
-recompressor.recompress_file("input.flac", "output.flac")?;
+let summary = recompressor.recompress(source)?;
+println!("recompressed {} samples", summary.total_samples);
 ```
 
 If you need stricter or looser behavior, `RecompressMode` lets you choose
@@ -426,7 +436,7 @@ For many applications, these three entry points are enough:
 ### Reuse configured codec objects for batches
 
 If you process many files with the same settings, create one `Encoder`,
-`Decoder`, or `Recompressor` and reuse it.
+`Decoder`, or a writer-owning recompress session and reuse it.
 
 ### Prefer explicit output selection when format matters
 

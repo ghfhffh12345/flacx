@@ -43,10 +43,11 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, EncoderConfig, Error, FlacReaderOptions, PcmReaderOptions, ProgressSnapshot,
-    RawPcmDescriptor, RawPcmReader, RecompressConfig, RecompressPhase, RecompressProgress,
-    Recompressor, Result, inspect_flac_total_samples, inspect_raw_pcm_total_samples,
-    inspect_wav_total_samples, read_flac_reader_with_options, read_pcm_reader_with_options,
+    DecodeConfig, EncoderConfig, Error, FlacReaderOptions, FlacRecompressSource, PcmReaderOptions,
+    ProgressSnapshot, RawPcmDescriptor, RawPcmReader, RecompressConfig, RecompressMode,
+    RecompressPhase, RecompressProgress, Result, inspect_flac_total_samples,
+    inspect_raw_pcm_total_samples, inspect_wav_total_samples, read_flac_reader_with_options,
+    read_pcm_reader_with_options,
 };
 use walkdir::WalkDir;
 
@@ -373,6 +374,27 @@ pub fn decode_command(
     Ok(())
 }
 
+fn recompress_temp_output_path(path: &Path) -> PathBuf {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("out");
+    path.with_extension(format!("{extension}.tmp"))
+}
+
+fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {
+    match config.mode() {
+        RecompressMode::Loose | RecompressMode::Default => FlacReaderOptions {
+            strict_seektable_validation: false,
+            strict_channel_mask_provenance: false,
+        },
+        RecompressMode::Strict => FlacReaderOptions {
+            strict_seektable_validation: true,
+            strict_channel_mask_provenance: true,
+        },
+    }
+}
+
 fn decode_output_container_from_path(path: &Path) -> Result<Option<flacx::PcmContainer>> {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("rf64") => Ok(Some(flacx::PcmContainer::Rf64)),
@@ -416,18 +438,29 @@ pub fn recompress_command(
             item.phase_total_samples,
             item.overall_total_samples,
         );
-        let result = Recompressor::new(command.config).recompress_file_with_progress(
-            &item.input,
-            &item.output,
-            |update: RecompressProgress| {
+        let temp_output = recompress_temp_output_path(&item.output);
+        let result = {
+            let reader = read_flac_reader_with_options(
+                File::open(&item.input)?,
+                recompress_reader_options(command.config),
+            )?;
+            let source = FlacRecompressSource::from_reader(reader);
+            let mut recompressor = command
+                .config
+                .into_recompressor(File::create(&temp_output)?);
+            recompressor.recompress_with_progress(source, |update: RecompressProgress| {
                 progress.observe_recompress(update)?;
                 Ok(())
-            },
-        );
+            })
+        };
 
         match result {
-            Ok(_) => progress.finish_current_file()?,
+            Ok(_) => {
+                fs::rename(&temp_output, &item.output)?;
+                progress.finish_current_file()?
+            }
             Err(error) => {
+                let _ = fs::remove_file(&temp_output);
                 let _ = progress.end();
                 return Err(error);
             }

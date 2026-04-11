@@ -21,7 +21,7 @@
 //! │  ├─ reader / session façades
 //! │  │  ├─ Encoder / EncodeSummary
 //! │  │  ├─ FlacReader / DecodePcmStream / Decoder / DecodeSummary
-//! │  │  └─ Recompressor / RecompressProgress / RecompressPhase
+//! │  │  └─ FlacRecompressSource / Recompressor / RecompressSummary / RecompressProgress / RecompressPhase
 //! │  ├─ typed PCM boundary
 //! │  │  ├─ PcmReader / AnyPcmStream / PcmStream / PcmStreamSpec / PcmContainer
 //! │  │  ├─ read_pcm_reader / write_pcm_stream
@@ -47,7 +47,7 @@
 //!
 //! | Layer | Public surface | Responsibility |
 //! | --- | --- | --- |
-//! | Explicit core | [`core`], [`Encoder`], [`FlacReader`], [`Decoder`], [`Recompressor`], config/builders, reader/stream helpers | Owns codec configuration, reader-driven PCM handoff, summary reporting, and explicit encode/decode/recompress entry points. |
+//! | Explicit core | [`core`], [`Encoder`], [`FlacReader`], [`Decoder`], [`FlacRecompressSource`], [`Recompressor`], config/builders, reader/session helpers | Owns codec configuration, reader-driven handoff, summary reporting, and explicit encode/decode/recompress entry points. |
 //! | Builtin/orchestration | [`builtin`] | Owns one-shot file/byte routing and extension-driven ergonomics without becoming a second policy engine. |
 //! | Support surfaces | [`level`], raw PCM helpers, inspector helpers, optional progress types | Exposes stable supporting concepts that sit beside the core pipeline. |
 //!
@@ -63,7 +63,7 @@
 //! ├─ convenience.rs         # implementation backing the public `builtin` module
 //! ├─ encoder.rs             # encode façade
 //! ├─ decode.rs              # decode façade
-//! ├─ recompress.rs          # subordinate FLAC→FLAC façade
+//! ├─ recompress.rs          # explicit FLAC→FLAC reader/session primitives
 //! ├─ pcm.rs                 # typed PCM values shared with decode/write-side APIs
 //! ├─ input.rs               # encode-side reader/stream contracts + dispatch
 //! ├─ wav_input.rs           # WAV/RF64/Wave64 reader family
@@ -177,8 +177,8 @@ pub use read::{
     DecodePcmStream, FlacReader, FlacReaderOptions, read_flac_reader, read_flac_reader_with_options,
 };
 pub use recompress::{
-    RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress,
-    Recompressor,
+    FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,
+    RecompressProgress, RecompressSummary, Recompressor,
 };
 pub use wav_input::{WavPcmStream, WavReader, WavReaderOptions};
 

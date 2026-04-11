@@ -19,7 +19,7 @@ It complements:
 explicit configs + typed boundaries
                 │
                 ▼
-      Encoder / Decoder / Recompressor
+      Encoder / Decoder / FlacRecompressSource / Recompressor
                 │
                 ▼
       container readers / writers
@@ -52,7 +52,7 @@ flacx
 ├─ codec façades
 │  ├─ Encoder / EncodeSummary
 │  ├─ FlacReader / DecodePcmStream / Decoder / DecodeSummary
-│  └─ Recompressor / RecompressMode / RecompressPhase / RecompressProgress
+│  └─ FlacRecompressSource / Recompressor / RecompressSummary / RecompressMode / RecompressPhase / RecompressProgress
 ├─ typed boundary
 │  ├─ PcmStream / PcmStreamSpec / PcmContainer
 │  ├─ read_pcm_reader / write_pcm_stream
@@ -72,7 +72,7 @@ flacx
 
 | Layer | Public entry points | What it owns | What it should not become |
 | --- | --- | --- | --- |
-| Explicit core | `core`, configs/builders, `Encoder`, `FlacReader`, `Decoder`, `Recompressor`, reader/session helpers | configuration, reader-driven handoff, explicit encode/decode/recompress operations, summaries | a path-oriented builtin story |
+| Explicit core | `core`, configs/builders, `Encoder`, `FlacReader`, `Decoder`, `FlacRecompressSource`, `Recompressor`, reader/session helpers | configuration, reader-driven handoff, explicit encode/decode/recompress operations, summaries | a path-oriented builtin story |
 | Builtin/orchestration | `builtin`, namespaced `*_file` / `*_bytes` helpers | one-shot path/byte routing and extension-driven ergonomics | a duplicate policy engine |
 | Container adaptation | public typed boundary plus family-specific behavior behind the scenes | container parsing/writing and family-specific translation | the place where top-level architecture is explained first |
 | Support surfaces | `level`, inspector helpers, raw PCM helpers, progress types | supporting concepts adjacent to the core | the primary conceptual center |
@@ -130,7 +130,7 @@ crate contract                      lib.rs
 config/builders                     config.rs
 explicit encode façade              encoder.rs + encode_pipeline.rs
 explicit decode façade              decode.rs + decode_output.rs
-recompress façade                   recompress.rs
+explicit recompress session         recompress.rs
 typed PCM boundary                  pcm.rs + input.rs
 WAV-family ingest/output            wav_input.rs + wav_output.rs
 FLAC read/write internals           read/ + write/

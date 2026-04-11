@@ -5,8 +5,8 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, EncoderConfig, RecompressConfig, Recompressor, builtin::decode_bytes,
-    level::Level,
+    DecodeConfig, EncoderConfig, FlacReaderOptions, FlacRecompressSource, RecompressConfig,
+    RecompressMode, builtin::decode_bytes, level::Level, read_flac_reader_with_options,
 };
 use flacx_cli::{
     DecodeCommand, EncodeCommand, RecompressCommand, decode_command, encode_command,
@@ -258,14 +258,28 @@ fn recompress_command_matches_library_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     let cli_bytes = fs::read(&output_path).unwrap();
-    let library_bytes = Recompressor::new(
-        RecompressConfig::default()
-            .with_level(Level::Level0)
-            .with_threads(1)
-            .with_block_size(576),
+    let config = RecompressConfig::default()
+        .with_level(Level::Level0)
+        .with_threads(1)
+        .with_block_size(576);
+    let reader = read_flac_reader_with_options(
+        std::io::Cursor::new(&flac),
+        match config.mode() {
+            RecompressMode::Loose | RecompressMode::Default => FlacReaderOptions {
+                strict_seektable_validation: false,
+                strict_channel_mask_provenance: false,
+            },
+            RecompressMode::Strict => FlacReaderOptions {
+                strict_seektable_validation: true,
+                strict_channel_mask_provenance: true,
+            },
+        },
     )
-    .recompress_bytes(&flac)
     .unwrap();
+    let source = FlacRecompressSource::from_reader(reader);
+    let mut recompressor = config.into_recompressor(std::io::Cursor::new(Vec::new()));
+    recompressor.recompress(source).unwrap();
+    let library_bytes = recompressor.into_inner().into_inner();
     assert_eq!(cli_bytes, library_bytes);
 
     let _ = fs::remove_file(input_path);

@@ -51,7 +51,8 @@ flacx
 │  ├─ RecompressConfig / RecompressBuilder
 │  ├─ Encoder / EncodeSummary
 │  ├─ FlacReader / DecodePcmStream / Decoder / DecodeSummary
-│  ├─ Recompressor / RecompressMode / RecompressPhase / RecompressProgress
+│  ├─ FlacRecompressSource / Recompressor / RecompressSummary
+│  └─ RecompressMode / RecompressPhase / RecompressProgress
 │  ├─ PcmReader / AnyPcmStream / PcmStream / PcmStreamSpec / PcmContainer
 │  ├─ read_pcm_reader / write_pcm_stream
 │  └─ RawPcmDescriptor / RawPcmByteOrder / inspect_raw_pcm_total_samples
@@ -87,7 +88,7 @@ crate root
 ├─ codec façades
 │  ├─ Encoder / EncodeSummary
 │  ├─ Decoder / DecodeSummary
-│  └─ Recompressor / RecompressMode / RecompressPhase / RecompressProgress
+│  └─ FlacRecompressSource / Recompressor / RecompressSummary / RecompressMode / RecompressPhase / RecompressProgress
 ├─ typed PCM + raw PCM boundary
 │  ├─ PcmStream / PcmStreamSpec / PcmContainer
 │  ├─ read_pcm_reader / write_pcm_stream
@@ -128,7 +129,7 @@ crates/flacx/src/
 ├─ convenience.rs         # implementation backing the public `builtin` module
 ├─ encoder.rs             # encode façade
 ├─ decode.rs              # decode façade
-├─ recompress.rs          # subordinate FLAC→FLAC façade
+├─ recompress.rs          # explicit FLAC→FLAC reader/session primitives
 ├─ pcm.rs                 # typed PCM boundary
 ├─ input.rs               # format-family dispatch for PCM ingest
 ├─ wav_input.rs           # WAV/RF64/Wave64 reader family
@@ -163,7 +164,7 @@ supported PCM container / raw PCM / FLAC
                 ▼
   Encoder / Decoder / Recompressor
       │             │            │
-      │             │            └─ subordinate FLAC→FLAC flow
+      │             │            └─ FLAC reader -> recompress source -> writer-owning session
       │             │
       │             └─ decode output + container writers
       │
@@ -198,11 +199,11 @@ public API intentionally expose?”
 ### Codec façades
 - `Encoder`
 - `Decoder`
+- `FlacRecompressSource`
 - `Recompressor`
+- `RecompressSummary`
 
-These are the stable façade types that express the main explicit workflows. The
-recompress path is public, but it should be narrated as secondary to the
-encode/decode architecture.
+These are the stable façade/session types that express the main explicit workflows. Recompress remains public and distinct, but now follows the same inspect-first reader/session story as encode and decode.
 
 ### Typed PCM boundary
 - `PcmStream`

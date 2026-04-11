@@ -1,27 +1,24 @@
-//! FLAC-to-FLAC recompression primitives used by the `flacx` crate.
+//! FLAC-to-FLAC recompression session primitives used by the `flacx` crate.
 //!
-//! The main façade is [`Recompressor`]. Pair it with [`RecompressConfig`] or
-//! [`Recompressor::builder`] to choose the recompress policy, thread count,
-//! compression level, and optional block sizing used when transforming an
-//! existing FLAC stream into a new FLAC stream.
+//! The public recompress flow is reader-driven: parse a [`crate::FlacReader`],
+//! inspect its recovered spec/metadata, convert it into a single-pass
+//! [`FlacRecompressSource`], bind an output writer through
+//! [`RecompressConfig::into_recompressor`], then feed the source into
+//! [`Recompressor::recompress`].
 
-use std::{
-    fs::File,
-    io::{Cursor, Read, Seek, SeekFrom, Write},
-    path::Path,
-};
+use std::io::{Read, Seek, Write};
 
 use crate::{
-    decode_output::{commit_temp_output, open_temp_output},
-    encoder::EncodeSummary,
+    config::EncoderConfig,
+    encoder::{EncodeSummary, Encoder},
     error::Result,
+    input::{EncodePcmStream, WavSpec},
     level::Level,
     md5::{StreaminfoMd5, verify_streaminfo_digest},
+    metadata::EncodeMetadata,
     plan::EncodePlan,
-    progress::{ProgressSink, ProgressSnapshot},
-    read::{
-        FlacPcmStream, FlacReaderOptions, inspect_flac_total_samples, read_flac_reader_with_options,
-    },
+    progress::{NoProgress, ProgressSink, ProgressSnapshot},
+    read::{FlacPcmStream, FlacReader},
 };
 
 /// Mode presets for recompress-side metadata handling and relaxable validation.
@@ -39,9 +36,6 @@ pub enum RecompressMode {
 }
 
 /// User-facing recompression configuration for FLAC-to-FLAC conversion.
-///
-/// The configuration is intentionally recompress-specific rather than exposing
-/// the full nested encode/decode config surfaces directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecompressConfig {
     mode: RecompressMode,
@@ -102,9 +96,6 @@ impl RecompressConfig {
     }
 
     /// Set the output compression level preset.
-    ///
-    /// This resets any explicit block-size override so the selected level once
-    /// again controls the default block size.
     #[must_use]
     pub fn with_level(mut self, level: Level) -> Self {
         self.level = level;
@@ -113,8 +104,6 @@ impl RecompressConfig {
     }
 
     /// Set the worker-thread count used by both recompress phases.
-    ///
-    /// Values are clamped to at least `1`.
     #[must_use]
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
@@ -126,6 +115,21 @@ impl RecompressConfig {
     pub fn with_block_size(mut self, block_size: u16) -> Self {
         self.block_size = Some(block_size);
         self
+    }
+
+    /// Bind an output writer and create a writer-owning recompress session.
+    pub fn into_recompressor<W>(self, writer: W) -> Recompressor<W>
+    where
+        W: Write + Seek,
+    {
+        Recompressor::new(writer, self)
+    }
+
+    pub(crate) fn flac_reader_options(self) -> crate::FlacReaderOptions {
+        crate::FlacReaderOptions {
+            strict_seektable_validation: self.decode_config().strict_seektable_validation,
+            strict_channel_mask_provenance: self.decode_config().strict_channel_mask_provenance,
+        }
     }
 
     fn decode_config(self) -> crate::DecodeConfig {
@@ -146,8 +150,8 @@ impl RecompressConfig {
         }
     }
 
-    fn encode_config(self) -> crate::EncoderConfig {
-        let mut base = crate::EncoderConfig::default()
+    fn encode_config(self) -> EncoderConfig {
+        let mut base = EncoderConfig::default()
             .with_level(self.level)
             .with_threads(self.threads);
         if let Some(block_size) = self.block_size {
@@ -210,6 +214,14 @@ impl RecompressBuilder {
     pub fn build(self) -> RecompressConfig {
         self.config
     }
+
+    /// Finish building the configuration and bind an output writer.
+    pub fn into_recompressor<W>(self, writer: W) -> Recompressor<W>
+    where
+        W: Write + Seek,
+    {
+        self.build().into_recompressor(writer)
+    }
 }
 
 /// Phase marker for recompress progress reporting.
@@ -250,26 +262,119 @@ pub struct RecompressProgress {
     pub total_frames: usize,
 }
 
-/// Primary library façade for FLAC-to-FLAC recompression.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Recompressor {
-    config: RecompressConfig,
+/// Summary of the FLAC stream produced by a recompress operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecompressSummary {
+    pub frame_count: usize,
+    pub total_samples: u64,
+    pub block_size: u16,
+    pub min_frame_size: u32,
+    pub max_frame_size: u32,
+    pub min_block_size: u16,
+    pub max_block_size: u16,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub bits_per_sample: u8,
 }
 
-impl Recompressor {
-    /// Create a builder initialized from [`RecompressConfig::builder`].
+impl From<EncodeSummary> for RecompressSummary {
+    fn from(value: EncodeSummary) -> Self {
+        Self {
+            frame_count: value.frame_count,
+            total_samples: value.total_samples,
+            block_size: value.block_size,
+            min_frame_size: value.min_frame_size,
+            max_frame_size: value.max_frame_size,
+            min_block_size: value.min_block_size,
+            max_block_size: value.max_block_size,
+            sample_rate: value.sample_rate,
+            channels: value.channels,
+            bits_per_sample: value.bits_per_sample,
+        }
+    }
+}
+
+/// Reader-to-session handoff for explicit FLAC recompression.
+pub struct FlacRecompressSource<R> {
+    metadata: EncodeMetadata,
+    total_samples: u64,
+    stream: VerifyingPcmStream<R>,
+}
+
+impl<R: Read + Seek> FlacRecompressSource<R> {
+    /// Convert an inspected [`FlacReader`] into the single-pass recompress source.
     #[must_use]
-    pub fn builder() -> RecompressBuilder {
-        RecompressConfig::builder()
+    pub fn from_reader(reader: FlacReader<R>) -> Self {
+        let metadata = reader.metadata().clone().into_encode_metadata();
+        let total_samples = reader.spec().total_samples;
+        let stream_info = reader.stream_info();
+        let stream = VerifyingPcmStream::new(reader.into_pcm_stream(), stream_info.md5);
+        Self {
+            metadata,
+            total_samples,
+            stream,
+        }
     }
 
-    /// Construct a recompressor from a configuration value.
+    /// Return the PCM spec that will be fed into the recompress session.
     #[must_use]
-    pub fn new(config: RecompressConfig) -> Self {
-        Self { config }
+    pub fn spec(&self) -> WavSpec {
+        self.stream.spec()
     }
 
-    /// Return the configuration currently stored in the recompressor.
+    /// Return the staged encode metadata that will be preserved on recompress.
+    #[must_use]
+    pub fn metadata(&self) -> &EncodeMetadata {
+        &self.metadata
+    }
+
+    /// Replace the staged metadata before recompression begins.
+    pub fn set_metadata(&mut self, metadata: EncodeMetadata) {
+        self.metadata = metadata;
+    }
+
+    /// Return a new source with different staged metadata.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: EncodeMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Return the total sample count recorded on the input FLAC stream.
+    #[must_use]
+    pub fn total_samples(&self) -> u64 {
+        self.total_samples
+    }
+}
+
+impl<R: Read + Seek> EncodePcmStream for FlacRecompressSource<R> {
+    fn spec(&self) -> WavSpec {
+        self.stream.spec()
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        self.stream.read_chunk(max_frames, output)
+    }
+}
+
+/// Writer-owning FLAC-to-FLAC recompress session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recompressor<W> {
+    config: RecompressConfig,
+    writer: W,
+}
+
+impl<W> Recompressor<W>
+where
+    W: Write + Seek,
+{
+    /// Construct a writer-owning recompress session from a writer and config.
+    #[must_use]
+    pub fn new(writer: W, config: RecompressConfig) -> Self {
+        Self { config, writer }
+    }
+
+    /// Return the configuration currently stored in the recompress session.
     #[must_use]
     pub fn config(&self) -> RecompressConfig {
         self.config
@@ -277,179 +382,132 @@ impl Recompressor {
 
     /// Return a new recompressor with a different recompress mode.
     #[must_use]
-    pub fn with_mode(self, mode: RecompressMode) -> Self {
-        Self::new(self.config.with_mode(mode))
+    pub fn with_mode(mut self, mode: RecompressMode) -> Self {
+        self.config = self.config.with_mode(mode);
+        self
     }
 
     /// Return a new recompressor with a different output compression level.
     #[must_use]
-    pub fn with_level(self, level: Level) -> Self {
-        Self::new(self.config.with_level(level))
+    pub fn with_level(mut self, level: Level) -> Self {
+        self.config = self.config.with_level(level);
+        self
     }
 
     /// Return a new recompressor with a different shared worker-thread count.
     #[must_use]
-    pub fn with_threads(self, threads: usize) -> Self {
-        Self::new(self.config.with_threads(threads))
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.config = self.config.with_threads(threads);
+        self
     }
 
     /// Return a new recompressor with a fixed block-size override.
     #[must_use]
-    pub fn with_block_size(self, block_size: u16) -> Self {
-        Self::new(self.config.with_block_size(block_size))
+    pub fn with_block_size(mut self, block_size: u16) -> Self {
+        self.config = self.config.with_block_size(block_size);
+        self
     }
 
-    /// Recompress a FLAC reader into FLAC output.
-    pub fn recompress<R, W>(&self, input: R, output: W) -> Result<EncodeSummary>
+    /// Return a shared reference to the owned output writer.
+    #[must_use]
+    pub fn writer(&self) -> &W {
+        &self.writer
+    }
+
+    /// Return a mutable reference to the owned output writer.
+    pub fn writer_mut(&mut self) -> &mut W {
+        &mut self.writer
+    }
+
+    /// Consume the session and return the owned writer.
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    /// Recompress a single-pass FLAC source into the owned writer.
+    pub fn recompress<R>(&mut self, source: FlacRecompressSource<R>) -> Result<RecompressSummary>
     where
         R: Read + Seek,
-        W: Write + Seek,
     {
-        let mut ignore = |_progress: RecompressProgress| Ok(());
-        self.recompress_into(input, output, &mut ignore)
+        let mut progress = NoProgress;
+        self.recompress_with_sink(source, &mut progress)
     }
 
     #[cfg(feature = "progress")]
-    /// Recompress a FLAC reader into FLAC output while reporting phase-aware progress.
-    pub fn recompress_with_progress<R, W, F>(
-        &self,
-        input: R,
-        output: W,
+    /// Recompress a single-pass FLAC source while reporting phase-aware progress.
+    pub fn recompress_with_progress<R, F>(
+        &mut self,
+        source: FlacRecompressSource<R>,
         mut on_progress: F,
-    ) -> Result<EncodeSummary>
+    ) -> Result<RecompressSummary>
     where
         R: Read + Seek,
-        W: Write + Seek,
         F: FnMut(RecompressProgress) -> Result<()>,
     {
-        self.recompress_into(input, output, &mut on_progress)
+        self.recompress_with_sink(source, &mut on_progress)
     }
 
-    /// Recompress from one file path to another.
-    pub fn recompress_file<P, Q>(&self, input_path: P, output_path: Q) -> Result<EncodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        let mut ignore = |_progress: RecompressProgress| Ok(());
-        self.recompress_file_with_sink(input_path, output_path, &mut ignore)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Recompress from one file path to another while reporting phase-aware progress.
-    pub fn recompress_file_with_progress<P, Q, F>(
-        &self,
-        input_path: P,
-        output_path: Q,
-        mut on_progress: F,
-    ) -> Result<EncodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-        F: FnMut(RecompressProgress) -> Result<()>,
-    {
-        self.recompress_file_with_sink(input_path, output_path, &mut on_progress)
-    }
-
-    /// Recompress an in-memory FLAC buffer and return the FLAC bytes.
-    pub fn recompress_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
-        let mut output = Cursor::new(Vec::new());
-        self.recompress(Cursor::new(input), &mut output)?;
-        Ok(output.into_inner())
-    }
-
-    fn recompress_into<R, W, F>(
-        &self,
-        mut input: R,
-        output: W,
-        on_progress: &mut F,
-    ) -> Result<EncodeSummary>
+    pub(crate) fn recompress_with_sink<R, P>(
+        &mut self,
+        source: FlacRecompressSource<R>,
+        progress: &mut P,
+    ) -> Result<RecompressSummary>
     where
         R: Read + Seek,
-        W: Write + Seek,
-        F: FnMut(RecompressProgress) -> Result<()>,
+        P: RecompressProgressSink,
     {
-        let total_samples = inspect_flac_total_samples(&mut input)?;
-        input.seek(SeekFrom::Start(0))?;
-        let overall_total_samples = overall_total_samples(total_samples);
-        on_progress(RecompressProgress {
+        let total_samples = source.total_samples();
+        progress.on_progress(RecompressProgress {
             phase: RecompressPhase::Decode,
             phase_processed_samples: 0,
             phase_total_samples: total_samples,
             overall_processed_samples: 0,
-            overall_total_samples,
+            overall_total_samples: overall_total_samples(total_samples),
             completed_frames: 0,
             total_frames: 0,
         })?;
 
-        let reader = read_flac_reader_with_options(
-            input,
-            FlacReaderOptions {
-                strict_seektable_validation: self
-                    .config
-                    .decode_config()
-                    .strict_seektable_validation,
-                strict_channel_mask_provenance: self
-                    .config
-                    .decode_config()
-                    .strict_channel_mask_provenance,
-            },
-        )?;
-        let metadata = reader.metadata().clone().into_encode_metadata();
-        let stream_info = reader.stream_info();
         let encode_config = self.config.encode_config();
-        let encode_plan = EncodePlan::new(reader.spec(), encode_config.clone())?;
-        on_progress(RecompressProgress {
+        let encode_plan = EncodePlan::new(source.spec(), encode_config.clone())?;
+        progress.on_progress(RecompressProgress {
             phase: RecompressPhase::Encode,
             phase_processed_samples: 0,
             phase_total_samples: total_samples,
             overall_processed_samples: total_samples,
-            overall_total_samples,
+            overall_total_samples: overall_total_samples(total_samples),
             completed_frames: 0,
             total_frames: encode_plan.total_frames,
         })?;
-        let stream = VerifyingPcmStream::new(reader.into_pcm_stream(), stream_info.md5);
+
+        let metadata = source.metadata().clone();
         let mut encode_progress = EncodePhaseProgress {
-            callback: on_progress,
+            sink: progress,
             total_samples,
         };
-        let mut encoder = encode_config.into_encoder(output);
+        let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
         encoder.set_metadata(metadata);
-        encoder.encode_with_sink(stream, &mut encode_progress)
+        let summary = encoder.encode_with_sink(source, &mut encode_progress)?;
+        Ok(summary.into())
     }
+}
 
-    fn recompress_file_with_sink<P, Q, F>(
-        &self,
-        input_path: P,
-        output_path: Q,
-        on_progress: &mut F,
-    ) -> Result<EncodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-        F: FnMut(RecompressProgress) -> Result<()>,
-    {
-        let input_path = input_path.as_ref();
-        let output_path = output_path.as_ref();
-        let (temp_path, temp_file) = open_temp_output(output_path)?;
+pub(crate) trait RecompressProgressSink {
+    fn on_progress(&mut self, progress: RecompressProgress) -> Result<()>;
+}
 
-        let result = (|| {
-            let input = File::open(input_path)?;
-            self.recompress_into(input, temp_file, on_progress)
-        })();
-        match result {
-            Ok(summary) => {
-                if let Err(error) = commit_temp_output(&temp_path, output_path) {
-                    let _ = std::fs::remove_file(&temp_path);
-                    return Err(error);
-                }
-                Ok(summary)
-            }
-            Err(error) => {
-                let _ = std::fs::remove_file(&temp_path);
-                Err(error)
-            }
-        }
+impl RecompressProgressSink for crate::progress::NoProgress {
+    fn on_progress(&mut self, _progress: RecompressProgress) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "progress")]
+impl<F> RecompressProgressSink for F
+where
+    F: FnMut(RecompressProgress) -> Result<()>,
+{
+    fn on_progress(&mut self, progress: RecompressProgress) -> Result<()> {
+        self(progress)
     }
 }
 
@@ -469,14 +527,18 @@ impl<R> VerifyingPcmStream<R> {
             verified: false,
         }
     }
-}
 
-impl<R: Read + Seek> crate::input::EncodePcmStream for VerifyingPcmStream<R> {
-    fn spec(&self) -> crate::input::WavSpec {
+    fn spec(&self) -> WavSpec {
         self.inner.spec()
     }
+}
 
-    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> crate::Result<usize> {
+impl<R: Read + Seek> EncodePcmStream for VerifyingPcmStream<R> {
+    fn spec(&self) -> WavSpec {
+        self.spec()
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
         let mut chunk = Vec::new();
         let frames = self.inner.read_chunk(max_frames, &mut chunk)?;
         if frames == 0 {
@@ -498,17 +560,17 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for VerifyingPcmStream<R> {
     }
 }
 
-struct EncodePhaseProgress<'a, F> {
-    callback: &'a mut F,
+struct EncodePhaseProgress<'a, P> {
+    sink: &'a mut P,
     total_samples: u64,
 }
 
-impl<F> ProgressSink for EncodePhaseProgress<'_, F>
+impl<P> ProgressSink for EncodePhaseProgress<'_, P>
 where
-    F: FnMut(RecompressProgress) -> Result<()>,
+    P: RecompressProgressSink,
 {
     fn on_frame(&mut self, progress: ProgressSnapshot) -> Result<()> {
-        (self.callback)(RecompressProgress {
+        self.sink.on_progress(RecompressProgress {
             phase: RecompressPhase::Encode,
             phase_processed_samples: progress.processed_samples,
             phase_total_samples: progress.total_samples,
@@ -524,18 +586,4 @@ where
 
 const fn overall_total_samples(total_samples: u64) -> u64 {
     total_samples.saturating_mul(2)
-}
-
-/// Convenience wrapper around the default [`Recompressor`] for file-path input.
-pub fn recompress_file<P, Q>(input_path: P, output_path: Q) -> Result<EncodeSummary>
-where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-{
-    Recompressor::default().recompress_file(input_path, output_path)
-}
-
-/// Convenience wrapper around the default [`Recompressor`] for in-memory input.
-pub fn recompress_bytes(input: &[u8]) -> Result<Vec<u8>> {
-    Recompressor::default().recompress_bytes(input)
 }
