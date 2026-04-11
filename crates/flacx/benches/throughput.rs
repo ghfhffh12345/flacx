@@ -6,7 +6,10 @@ use std::{
 };
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use flacx::{DecodeConfig, Decoder, EncoderConfig, PcmReaderOptions, read_pcm_reader_with_options};
+use flacx::{
+    DecodeConfig, EncoderConfig, FlacReaderOptions, PcmReaderOptions,
+    read_flac_reader_with_options, read_pcm_reader_with_options,
+};
 
 #[path = "../tests/support/mod.rs"]
 mod support;
@@ -148,13 +151,24 @@ fn run_decode_corpus(
     corpus: &BenchmarkCorpus,
     threads: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let decoder = Decoder::new(DecodeConfig::default().with_threads(threads));
+    let config = DecodeConfig::default().with_threads(threads);
     with_temp_dir("flacx-library-bench-decode", |output_root| {
         for input in &corpus.flac_inputs {
             let output = output_root
                 .join(input.file_stem().expect("fixture file stem"))
                 .with_extension("wav");
-            decoder.decode_file(input, &output)?;
+            let reader = read_flac_reader_with_options(
+                File::open(input)?,
+                FlacReaderOptions {
+                    strict_seektable_validation: config.strict_seektable_validation,
+                    strict_channel_mask_provenance: config.strict_channel_mask_provenance,
+                },
+            )?;
+            let metadata = reader.metadata().clone();
+            let stream = reader.into_pcm_stream();
+            let mut decoder = config.clone().into_decoder(File::create(&output)?);
+            decoder.set_metadata(metadata);
+            decoder.decode(stream)?;
         }
         Ok(())
     })

@@ -59,17 +59,22 @@ encoder.encode(stream).unwrap();
 And decode FLAC back to a supported PCM container:
 
 ```rust
-use flacx::Decoder;
+use flacx::{DecodeConfig, read_flac_reader};
+use std::{fs::File, io::BufWriter};
 
-Decoder::default()
-    .decode_file("input.flac", "output.wav")
-    .unwrap();
+let reader = read_flac_reader(File::open("input.flac").unwrap()).unwrap();
+let metadata = reader.metadata().clone();
+let stream = reader.into_pcm_stream();
+let writer = BufWriter::new(File::create("output.wav").unwrap());
+let mut decoder = DecodeConfig::default().into_decoder(writer);
+decoder.set_metadata(metadata);
+decoder.decode(stream).unwrap();
 ```
 
 If you want one-shot orchestration instead of the explicit reader/session path,
 use `flacx::builtin::{encode_file, encode_bytes, decode_file, decode_bytes}`.
 The explicit core remains available under `flacx::core::{read_pcm_reader,
-write_pcm_stream, EncoderConfig, Encoder, Decoder}`.
+read_flac_reader, write_pcm_stream, EncoderConfig, DecodeConfig, Encoder, Decoder}`.
 
 See [`docs/flacx-user-guide.md`](docs/flacx-user-guide.md) for the task-oriented
 crate usage guide, or [`crates/flacx/README.md`](crates/flacx/README.md) for the

@@ -1,9 +1,9 @@
 use std::{io::Write, sync::mpsc, thread};
 
 #[cfg(feature = "aiff")]
-use crate::aiff_output::{AiffContainer, write_aiff_with_metadata_and_md5};
+use crate::aiff_output::{AiffContainer, AiffStreamWriter, write_aiff_with_metadata_and_md5};
 #[cfg(feature = "caf")]
-use crate::caf_output::write_caf;
+use crate::caf_output::{CafStreamWriter, write_caf};
 use crate::{
     error::{Error, Result},
     input::{
@@ -34,6 +34,249 @@ const W64_CHUNK_GUID_SUFFIX: [u8; 12] = [
 pub(crate) struct WavMetadataWriteOptions {
     pub(crate) emit_fxmd: bool,
     pub(crate) container: PcmContainer,
+}
+
+pub(crate) enum StreamingPcmWriter<W: Write> {
+    Riff(RiffStreamWriter<W>),
+    #[cfg(feature = "aiff")]
+    Aiff(AiffStreamWriter<W>),
+    #[cfg(feature = "caf")]
+    Caf(CafStreamWriter<W>),
+}
+
+pub(crate) struct RiffStreamWriter<W: Write> {
+    writer: W,
+    envelope: PcmEnvelope,
+    w64_padding: usize,
+    buffer: Vec<u8>,
+}
+
+impl<W: Write> StreamingPcmWriter<W> {
+    pub(crate) fn new(
+        mut writer: W,
+        spec: WavSpec,
+        metadata: &WavMetadata,
+        options: WavMetadataWriteOptions,
+    ) -> Result<Self> {
+        match options.container {
+            PcmContainer::Aiff => {
+                #[cfg(feature = "aiff")]
+                {
+                    return Ok(Self::Aiff(AiffStreamWriter::new(
+                        writer,
+                        spec,
+                        metadata,
+                        AiffContainer::Aiff,
+                    )?));
+                }
+                #[cfg(not(feature = "aiff"))]
+                {
+                    return Err(feature_disabled_output_error(PcmContainer::Aiff));
+                }
+            }
+            PcmContainer::Aifc => {
+                #[cfg(feature = "aiff")]
+                {
+                    return Ok(Self::Aiff(AiffStreamWriter::new(
+                        writer,
+                        spec,
+                        metadata,
+                        AiffContainer::AifcNone,
+                    )?));
+                }
+                #[cfg(not(feature = "aiff"))]
+                {
+                    return Err(feature_disabled_output_error(PcmContainer::Aifc));
+                }
+            }
+            PcmContainer::Caf => {
+                #[cfg(feature = "caf")]
+                {
+                    return Ok(Self::Caf(CafStreamWriter::new(writer, spec, metadata)?));
+                }
+                #[cfg(not(feature = "caf"))]
+                {
+                    return Err(feature_disabled_output_error(PcmContainer::Caf));
+                }
+            }
+            _ => {}
+        }
+
+        #[cfg(not(feature = "wav"))]
+        {
+            return Err(feature_disabled_output_error(PcmContainer::Wave));
+        }
+
+        if !(1..=8).contains(&spec.channels) {
+            return Err(Error::UnsupportedWav(format!(
+                "only the ordinary 1..8 channel envelope is supported, found {} channels",
+                spec.channels
+            )));
+        }
+        if !matches!(spec.bytes_per_sample, 1..=4) {
+            return Err(Error::UnsupportedWav(format!(
+                "only byte-aligned PCM containers are supported, found {} bytes/sample",
+                spec.bytes_per_sample
+            )));
+        }
+        if !(4..=32).contains(&spec.bits_per_sample) {
+            return Err(Error::UnsupportedWav(format!(
+                "only FLAC-native 4..32 valid bits/sample are supported, found {}",
+                spec.bits_per_sample
+            )));
+        }
+
+        let container_bits_per_sample =
+            container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
+        if spec.bytes_per_sample * 8 != container_bits_per_sample {
+            return Err(Error::UnsupportedWav(format!(
+                "bytes/sample does not match the chosen container width for {} valid bits/sample",
+                spec.bits_per_sample
+            )));
+        }
+        let ordinary_mask = ordinary_channel_mask(u16::from(spec.channels)).ok_or_else(|| {
+            Error::UnsupportedWav(format!(
+                "no ordinary channel mask exists for {} channels",
+                spec.channels
+            ))
+        })?;
+        let channel_mask = spec.channel_mask;
+        if !is_supported_channel_mask(u16::from(spec.channels), channel_mask) {
+            return Err(Error::UnsupportedWav(format!(
+                "channel mask {channel_mask:#010x} is not supported on output for {} channels",
+                spec.channels
+            )));
+        }
+        let envelope = PcmEnvelope {
+            channels: u16::from(spec.channels),
+            valid_bits_per_sample: u16::from(spec.bits_per_sample),
+            container_bits_per_sample,
+            channel_mask,
+        };
+        let use_canonical_pcm = spec.channels <= 2
+            && envelope.valid_bits_per_sample == envelope.container_bits_per_sample
+            && channel_mask == ordinary_mask;
+        let block_align = usize::from(spec.channels) * usize::from(container_bits_per_sample / 8);
+        let fmt_payload = fmt_chunk_payload(
+            spec,
+            container_bits_per_sample,
+            block_align,
+            channel_mask,
+            use_canonical_pcm,
+        );
+        let metadata_chunks = wav_metadata_chunks(metadata, options.emit_fxmd);
+        let data_bytes = spec
+            .total_samples
+            .checked_mul(u64::from(spec.channels))
+            .and_then(|count| count.checked_mul(u64::from(container_bits_per_sample / 8)))
+            .ok_or_else(|| Error::UnsupportedWav("decoded sample bytes overflow".into()))?;
+        let resolved_container = resolve_pcm_container(
+            options.container,
+            fmt_payload.len(),
+            &metadata_chunks,
+            data_bytes,
+        )?;
+        let w64_padding = match resolved_container {
+            PcmContainer::Wave => {
+                write_wave_header_and_chunks(
+                    &mut writer,
+                    &fmt_payload,
+                    &metadata_chunks,
+                    data_bytes,
+                )?;
+                0
+            }
+            PcmContainer::Rf64 => {
+                write_rf64_header_and_chunks(
+                    &mut writer,
+                    spec.total_samples,
+                    &fmt_payload,
+                    &metadata_chunks,
+                    data_bytes,
+                )?;
+                0
+            }
+            PcmContainer::Wave64 => {
+                write_w64_header_and_chunks(
+                    &mut writer,
+                    &fmt_payload,
+                    &metadata_chunks,
+                    data_bytes,
+                )?;
+                w64_padding(data_bytes as usize)
+            }
+            _ => unreachable!(),
+        };
+
+        Ok(Self::Riff(RiffStreamWriter {
+            writer,
+            envelope,
+            w64_padding,
+            buffer: Vec::with_capacity(64 * 1024),
+        }))
+    }
+
+    pub(crate) fn write_samples_and_update_md5(
+        &mut self,
+        samples: &[i32],
+        md5: &mut crate::md5::StreaminfoMd5,
+    ) -> Result<()> {
+        match self {
+            Self::Riff(writer) => writer.write_samples_and_update_md5(samples, md5),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(writer) => {
+                md5.update_samples(samples)?;
+                writer.write_samples(samples)
+            }
+            #[cfg(feature = "caf")]
+            Self::Caf(writer) => {
+                md5.update_samples(samples)?;
+                writer.write_samples(samples)
+            }
+        }
+    }
+
+    pub(crate) fn finish(self, md5: Option<&mut crate::md5::StreaminfoMd5>) -> Result<W> {
+        match self {
+            Self::Riff(writer) => writer.finish(md5),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(writer) => writer.finish(),
+            #[cfg(feature = "caf")]
+            Self::Caf(writer) => writer.finish(),
+        }
+    }
+}
+
+impl<W: Write> RiffStreamWriter<W> {
+    fn write_samples_and_update_md5(
+        &mut self,
+        samples: &[i32],
+        md5: &mut crate::md5::StreaminfoMd5,
+    ) -> Result<()> {
+        for &sample in samples {
+            append_encoded_sample(&mut self.buffer, sample, self.envelope)?;
+            if self.buffer.len() >= 64 * 1024 {
+                self.writer.write_all(&self.buffer)?;
+                md5.update_bytes(&self.buffer);
+                self.buffer.clear();
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, md5: Option<&mut crate::md5::StreaminfoMd5>) -> Result<W> {
+        if !self.buffer.is_empty() {
+            if let Some(md5) = md5 {
+                md5.update_bytes(&self.buffer);
+            }
+            self.writer.write_all(&self.buffer)?;
+        }
+        if self.w64_padding != 0 {
+            self.writer.write_all(&vec![0u8; self.w64_padding])?;
+        }
+        self.writer.flush()?;
+        Ok(self.writer)
+    }
 }
 
 impl Default for WavMetadataWriteOptions {

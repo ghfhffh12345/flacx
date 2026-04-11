@@ -5,7 +5,7 @@ use crate::{
         FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, SEEKTABLE_BLOCK_TYPE, validate_seektable_payload,
     },
 };
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 
 pub(super) fn resolve_channel_mask(
     channels: u8,
@@ -70,6 +70,7 @@ pub fn inspect_flac_total_samples<R: Read>(mut reader: R) -> Result<u64> {
     Ok(StreamInfo::from_bytes(raw).total_samples)
 }
 
+#[allow(dead_code)]
 pub(super) fn parse_metadata(
     bytes: &[u8],
     strict_seektable_validation: bool,
@@ -158,6 +159,85 @@ pub(super) fn parse_metadata(
         stream_info.ok_or(Error::InvalidFlac("missing STREAMINFO block"))?,
         metadata,
         offset,
+    ))
+}
+
+pub(super) fn parse_metadata_from_reader<R: Read + Seek>(
+    reader: &mut R,
+    strict_seektable_validation: bool,
+) -> Result<(StreamInfo, WavMetadata, u64)> {
+    let start = reader.stream_position()?;
+    let mut magic = [0u8; 4];
+    read_exact_or_invalid(reader, &mut magic, "file is too short")?;
+    if &magic != FLAC_MAGIC {
+        return Err(Error::InvalidFlac("expected fLaC stream marker"));
+    }
+
+    let mut saw_streaminfo = false;
+    let mut stream_info = None;
+    let mut metadata = WavMetadata::default();
+    let mut saw_seektable = false;
+    loop {
+        let mut header = [0u8; 4];
+        read_exact_or_invalid(reader, &mut header, "metadata block header is truncated")?;
+        let is_last = header[0] & 0x80 != 0;
+        let block_type = header[0] & 0x7f;
+        let block_len = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+        let mut payload = vec![0u8; block_len];
+        read_exact_or_invalid(reader, &mut payload, "metadata block body is truncated")?;
+
+        if !saw_streaminfo {
+            if block_type != STREAMINFO_BLOCK_TYPE || block_len != 34 {
+                return Err(Error::InvalidFlac(
+                    "first metadata block must be a 34-byte STREAMINFO block",
+                ));
+            }
+            let mut raw = [0u8; 34];
+            raw.copy_from_slice(&payload);
+            stream_info = Some(StreamInfo::from_bytes(raw));
+            saw_streaminfo = true;
+        } else if block_type == SEEKTABLE_BLOCK_TYPE {
+            let seektable_result = validate_seektable_payload(&payload);
+            let seektable_is_valid = seektable_result.is_ok();
+            if strict_seektable_validation {
+                seektable_result?;
+                if saw_seektable {
+                    return Err(Error::InvalidFlac(
+                        "stream must not contain more than one seektable metadata block",
+                    ));
+                }
+            }
+            if seektable_is_valid {
+                let info = stream_info.expect("streaminfo parsed before optional metadata");
+                metadata.ingest_flac_metadata_block(
+                    block_type,
+                    &payload,
+                    info.total_samples,
+                    info.channels,
+                )?;
+            }
+            saw_seektable = true;
+        } else {
+            let info = stream_info.expect("streaminfo parsed before optional metadata");
+            metadata.ingest_flac_metadata_block(
+                block_type,
+                &payload,
+                info.total_samples,
+                info.channels,
+            )?;
+        }
+
+        if is_last {
+            break;
+        }
+    }
+
+    let frame_offset = reader.stream_position()?;
+    reader.seek(SeekFrom::Start(frame_offset.max(start)))?;
+    Ok((
+        stream_info.ok_or(Error::InvalidFlac("missing STREAMINFO block"))?,
+        metadata,
+        frame_offset,
     ))
 }
 

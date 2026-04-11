@@ -18,9 +18,9 @@
 //! │  │  ├─ EncoderConfig / EncoderBuilder
 //! │  │  ├─ DecodeConfig / DecodeBuilder
 //! │  │  └─ RecompressConfig / RecompressBuilder
-//! │  ├─ streaming façades
+//! │  ├─ reader / session façades
 //! │  │  ├─ Encoder / EncodeSummary
-//! │  │  ├─ Decoder / DecodeSummary
+//! │  │  ├─ FlacReader / DecodePcmStream / Decoder / DecodeSummary
 //! │  │  └─ Recompressor / RecompressProgress / RecompressPhase
 //! │  ├─ typed PCM boundary
 //! │  │  ├─ PcmReader / AnyPcmStream / PcmStream / PcmStreamSpec / PcmContainer
@@ -47,7 +47,7 @@
 //!
 //! | Layer | Public surface | Responsibility |
 //! | --- | --- | --- |
-//! | Explicit core | [`core`], [`Encoder`], [`Decoder`], [`Recompressor`], config/builders, reader/stream helpers | Owns codec configuration, reader-driven PCM handoff, summary reporting, and explicit encode/decode/recompress entry points. |
+//! | Explicit core | [`core`], [`Encoder`], [`FlacReader`], [`Decoder`], [`Recompressor`], config/builders, reader/stream helpers | Owns codec configuration, reader-driven PCM handoff, summary reporting, and explicit encode/decode/recompress entry points. |
 //! | Builtin/orchestration | [`builtin`] | Owns one-shot file/byte routing and extension-driven ergonomics without becoming a second policy engine. |
 //! | Support surfaces | [`level`], raw PCM helpers, inspector helpers, optional progress types | Exposes stable supporting concepts that sit beside the core pipeline. |
 //!
@@ -98,8 +98,8 @@
 //! - Start with [`core`] when you want the explicit architecture story.
 //! - Use [`builtin`] when you specifically want the one-shot orchestration
 //!   wrappers.
-//! - Use [`level`] for compression presets and [`RawPcmDescriptor`] when PCM
-//!   ingest must be described explicitly instead of inferred from a container.
+//! - Use [`level`] for compression presets, [`RawPcmDescriptor`] for explicit
+//!   raw PCM ingest, and [`FlacReader`] for explicit decode-side control.
 //! - In the repository, `crates/flacx/README.md` mirrors this crate contract,
 //!   and `docs/flacx-public-api-architecture.md` expands the public API into a
 //!   maintainer-oriented architecture guide with structural artifacts.
@@ -168,9 +168,13 @@ pub use input::{
     read_pcm_reader_with_options,
 };
 pub use metadata::EncodeMetadata;
+pub use metadata::WavMetadata as DecodeMetadata;
 pub use pcm::PcmContainer;
 pub use raw::{
     RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream, inspect_raw_pcm_total_samples,
+};
+pub use read::{
+    DecodePcmStream, FlacReader, FlacReaderOptions, read_flac_reader, read_flac_reader_with_options,
 };
 pub use recompress::{
     RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress,
@@ -219,12 +223,13 @@ pub mod core {
     #[cfg(feature = "caf")]
     pub use crate::{CafPcmStream, CafReader};
     pub use crate::{
-        DecodeBuilder, DecodeConfig, DecodeSummary, Decoder, EncodeMetadata, EncodePcmStream,
-        EncodeSummary, Encoder, EncoderBuilder, EncoderConfig, PcmContainer, PcmReader,
-        PcmReaderOptions, PcmStream, PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor,
-        RawPcmReader, RawPcmStream, RecompressBuilder, RecompressConfig, RecompressMode,
-        RecompressPhase, RecompressProgress, Recompressor, inspect_pcm_total_samples,
-        inspect_raw_pcm_total_samples, read_pcm_reader, read_pcm_reader_with_options,
+        DecodeBuilder, DecodeConfig, DecodeMetadata, DecodePcmStream, DecodeSummary, Decoder,
+        EncodeMetadata, EncodePcmStream, EncodeSummary, Encoder, EncoderBuilder, EncoderConfig,
+        FlacReader, FlacReaderOptions, PcmContainer, PcmReader, PcmReaderOptions, PcmStream,
+        PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream,
+        RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress,
+        Recompressor, inspect_pcm_total_samples, inspect_raw_pcm_total_samples, read_flac_reader,
+        read_flac_reader_with_options, read_pcm_reader, read_pcm_reader_with_options,
         write_pcm_stream,
     };
     pub use crate::{WavPcmStream, WavReader, WavReaderOptions};
@@ -265,13 +270,17 @@ pub struct _ProgressMethodFeatureDisabledDoc;
 
 #[cfg(not(feature = "progress"))]
 #[doc = r#"```compile_fail
-use flacx::Decoder;
+use flacx::{DecodeConfig, read_flac_reader};
 
 fn main() {
-    let decoder = Decoder::default();
     let input = std::io::Cursor::new(Vec::<u8>::new());
-    let mut output = std::io::Cursor::new(Vec::<u8>::new());
-    let _ = decoder.decode_with_progress(input, &mut output, |_| Ok(()));
+    let reader = read_flac_reader(input).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let output = std::io::Cursor::new(Vec::<u8>::new());
+    let mut decoder = DecodeConfig::default().into_decoder(output);
+    decoder.set_metadata(metadata);
+    let _ = decoder.decode_with_progress(stream, |_| Ok(()));
 }
 ```"#]
 #[doc(hidden)]

@@ -123,7 +123,7 @@ impl EncodeMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct WavMetadata {
+pub struct WavMetadata {
     preserved: PreservedMetadataBundle,
     vorbis_comment: Option<VorbisCommentBlock>,
     cuesheet: Option<CueSheetBlock>,

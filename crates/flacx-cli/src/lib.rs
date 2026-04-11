@@ -43,10 +43,10 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, Decoder, EncoderConfig, Error, PcmReaderOptions, ProgressSnapshot,
+    DecodeConfig, EncoderConfig, Error, FlacReaderOptions, PcmReaderOptions, ProgressSnapshot,
     RawPcmDescriptor, RawPcmReader, RecompressConfig, RecompressPhase, RecompressProgress,
     Recompressor, Result, inspect_flac_total_samples, inspect_raw_pcm_total_samples,
-    inspect_wav_total_samples, read_pcm_reader_with_options,
+    inspect_wav_total_samples, read_flac_reader_with_options, read_pcm_reader_with_options,
 };
 use walkdir::WalkDir;
 
@@ -337,14 +337,28 @@ pub fn decode_command(
             item.phase_total_samples,
             item.overall_total_samples,
         );
-        let result = Decoder::new(command.config).decode_file_with_progress(
-            &item.input,
-            &item.output,
-            |update| {
+        let output_container = decode_output_container_from_path(&item.output)?
+            .unwrap_or(command.config.output_container);
+        let result = {
+            let reader = read_flac_reader_with_options(
+                File::open(&item.input)?,
+                FlacReaderOptions {
+                    strict_seektable_validation: command.config.strict_seektable_validation,
+                    strict_channel_mask_provenance: command.config.strict_channel_mask_provenance,
+                },
+            )?;
+            let metadata = reader.metadata().clone();
+            let stream = reader.into_pcm_stream();
+            let mut decoder = command
+                .config
+                .with_output_container(output_container)
+                .into_decoder(File::create(&item.output)?);
+            decoder.set_metadata(metadata);
+            decoder.decode_with_progress(stream, |update| {
                 progress.observe(update)?;
                 Ok(())
-            },
-        );
+            })
+        };
 
         match result {
             Ok(_) => progress.finish_current_file()?,
@@ -357,6 +371,23 @@ pub fn decode_command(
 
     progress.finish()?;
     Ok(())
+}
+
+fn decode_output_container_from_path(path: &Path) -> Result<Option<flacx::PcmContainer>> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("rf64") => Ok(Some(flacx::PcmContainer::Rf64)),
+        Some(ext) if ext.eq_ignore_ascii_case("w64") => Ok(Some(flacx::PcmContainer::Wave64)),
+        Some(ext) if ext.eq_ignore_ascii_case("aif") || ext.eq_ignore_ascii_case("aiff") => {
+            Ok(Some(flacx::PcmContainer::Aiff))
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("aifc") => Ok(Some(flacx::PcmContainer::Aifc)),
+        Some(ext) if ext.eq_ignore_ascii_case("caf") => Ok(Some(flacx::PcmContainer::Caf)),
+        Some(ext) if ext.eq_ignore_ascii_case("wav") => Ok(Some(flacx::PcmContainer::Wave)),
+        Some(ext) => Err(Error::Decode(format!(
+            "unsupported decode output extension '.{ext}'"
+        ))),
+        None => Ok(None),
+    }
 }
 
 pub fn recompress_command(

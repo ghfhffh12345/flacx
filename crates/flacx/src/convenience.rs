@@ -1,13 +1,14 @@
 use std::{fs::File, io::Cursor, path::Path};
 
 use crate::{
-    EncoderConfig, Result,
-    decode::{DecodeSummary, Decoder},
+    DecodeConfig, EncoderConfig, Result,
+    decode::DecodeSummary,
     decode_output::{commit_temp_output, open_temp_output},
     encoder::EncodeSummary,
     error::Error,
     input::read_pcm_reader_with_config,
     pcm::PcmContainer,
+    read::{FlacReaderOptions, read_flac_reader_with_options},
 };
 
 pub use crate::recompress::{recompress_bytes, recompress_file};
@@ -60,21 +61,31 @@ where
     P: AsRef<Path>,
     Q: AsRef<Path>,
 {
-    decode_file_with_decoder(&Decoder::default(), input_path, output_path)
+    decode_file_with_config(&DecodeConfig::default(), input_path, output_path)
 }
 
 pub fn decode_bytes(input: &[u8]) -> Result<Vec<u8>> {
-    decode_bytes_with_decoder(&Decoder::default(), input)
+    decode_bytes_with_config(&DecodeConfig::default(), input)
 }
 
-pub(crate) fn decode_bytes_with_decoder(decoder: &Decoder, input: &[u8]) -> Result<Vec<u8>> {
-    let mut output = Cursor::new(Vec::new());
-    decoder.decode(Cursor::new(input), &mut output)?;
-    Ok(output.into_inner())
+pub(crate) fn decode_bytes_with_config(config: &DecodeConfig, input: &[u8]) -> Result<Vec<u8>> {
+    let reader = read_flac_reader_with_options(
+        Cursor::new(input),
+        FlacReaderOptions {
+            strict_seektable_validation: config.strict_seektable_validation,
+            strict_channel_mask_provenance: config.strict_channel_mask_provenance,
+        },
+    )?;
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut decoder = config.clone().into_decoder(Cursor::new(Vec::new()));
+    decoder.set_metadata(metadata);
+    decoder.decode(stream)?;
+    Ok(decoder.into_inner().into_inner())
 }
 
-pub(crate) fn decode_file_with_decoder<P, Q>(
-    decoder: &Decoder,
+pub(crate) fn decode_file_with_config<P, Q>(
+    config: &DecodeConfig,
     input_path: P,
     output_path: Q,
 ) -> Result<DecodeSummary>
@@ -83,11 +94,11 @@ where
     Q: AsRef<Path>,
 {
     let mut progress = crate::progress::NoProgress;
-    decode_file_with_decoder_and_progress(decoder, input_path, output_path, &mut progress)
+    decode_file_with_config_and_progress(config, input_path, output_path, &mut progress)
 }
 
-pub(crate) fn decode_file_with_decoder_and_progress<P, Q, R>(
-    decoder: &Decoder,
+pub(crate) fn decode_file_with_config_and_progress<P, Q, R>(
+    config: &DecodeConfig,
     input_path: P,
     output_path: Q,
     progress: &mut R,
@@ -100,13 +111,25 @@ where
     let input_path = input_path.as_ref();
     let output_path = output_path.as_ref();
     let (temp_path, temp_file) = open_temp_output(output_path)?;
-    let output_container = inferred_output_container_from_path(output_path)?
-        .unwrap_or(decoder.config().output_container);
+    let output_container =
+        inferred_output_container_from_path(output_path)?.unwrap_or(config.output_container);
 
     let result = (|| {
-        let input = File::open(input_path)?;
-        let mut temp_file = temp_file;
-        decoder.decode_with_output_container(input, &mut temp_file, output_container, progress)
+        let reader = read_flac_reader_with_options(
+            File::open(input_path)?,
+            FlacReaderOptions {
+                strict_seektable_validation: config.strict_seektable_validation,
+                strict_channel_mask_provenance: config.strict_channel_mask_provenance,
+            },
+        )?;
+        let metadata = reader.metadata().clone();
+        let stream = reader.into_pcm_stream();
+        let mut decoder = config
+            .clone()
+            .with_output_container(output_container)
+            .into_decoder(temp_file);
+        decoder.set_metadata(metadata);
+        decoder.decode_with_sink(stream, progress)
     })();
     match result {
         Ok(summary) => {

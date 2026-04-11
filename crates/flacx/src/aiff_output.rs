@@ -80,6 +80,81 @@ pub(crate) fn write_aiff_with_metadata_and_md5<W: Write>(
     Ok(streaminfo_md5)
 }
 
+pub(crate) struct AiffStreamWriter<W: Write> {
+    writer: W,
+    envelope: PcmEnvelope,
+    pad_final: bool,
+}
+
+impl<W: Write> AiffStreamWriter<W> {
+    pub(crate) fn new(
+        mut writer: W,
+        spec: WavSpec,
+        metadata: &WavMetadata,
+        container: AiffContainer,
+    ) -> Result<Self> {
+        let envelope = validate_aiff_output_spec(spec)?;
+        let container = resolve_container(container);
+        let mut chunks = Vec::<([u8; 4], Vec<u8>)>::new();
+
+        if matches!(container, AiffContainer::AifcNone) {
+            chunks.push((FVER_CHUNK_ID, AIFC_FVER_VERSION.to_be_bytes().to_vec()));
+        }
+        chunks.push((COMM_CHUNK_ID, comm_chunk_payload(spec, envelope, container)));
+        chunks.extend(aiff_metadata_chunks(metadata));
+        if let Some(payload) = mark_chunk_payload(metadata) {
+            chunks.push((MARK_CHUNK_ID, payload));
+        }
+
+        let frame_bytes =
+            u64::from(envelope.channels) * u64::from(envelope.container_bits_per_sample / 8);
+        let data_bytes = spec.total_samples.checked_mul(frame_bytes).ok_or_else(|| {
+            Error::UnsupportedWav("AIFF/AIFC data section exceeds addressable range".into())
+        })?;
+        let ssnd_payload_len = ssnd_chunk_payload_len(data_bytes);
+        let form_type = match container {
+            AiffContainer::Aiff | AiffContainer::Auto => AIFF_FORM_TYPE,
+            AiffContainer::AifcNone => AIFC_FORM_TYPE,
+        };
+        let form_size = aiff_form_size(&chunks, ssnd_payload_len)?;
+        write_aiff_header(&mut writer, form_type, form_size)?;
+        for (chunk_id, payload) in &chunks {
+            write_aiff_chunk(&mut writer, chunk_id, payload)?;
+        }
+        writer.write_all(&SSND_CHUNK_ID)?;
+        writer.write_all(
+            &u32::try_from(ssnd_payload_len)
+                .map_err(|_| Error::UnsupportedWav("AIFF SSND chunk exceeds 4 GiB".into()))?
+                .to_be_bytes(),
+        )?;
+        writer.write_all(&0u32.to_be_bytes())?;
+        writer.write_all(&0u32.to_be_bytes())?;
+
+        Ok(Self {
+            writer,
+            envelope,
+            pad_final: !ssnd_payload_len.is_multiple_of(2),
+        })
+    }
+
+    pub(crate) fn write_samples(&mut self, samples: &[i32]) -> Result<()> {
+        for &sample in samples {
+            let mut buffer = Vec::with_capacity(4);
+            append_aiff_encoded_sample(&mut buffer, sample, self.envelope)?;
+            self.writer.write_all(&buffer)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<W> {
+        if self.pad_final {
+            self.writer.write_all(&[0])?;
+        }
+        self.writer.flush()?;
+        Ok(self.writer)
+    }
+}
+
 fn resolve_container(container: AiffContainer) -> AiffContainer {
     match container {
         AiffContainer::Auto => AiffContainer::Aiff,
@@ -88,6 +163,25 @@ fn resolve_container(container: AiffContainer) -> AiffContainer {
 }
 
 fn validate_aiff_output_shape(spec: WavSpec, samples: &[i32]) -> Result<PcmEnvelope> {
+    let envelope = validate_aiff_output_spec(spec)?;
+
+    if !samples.len().is_multiple_of(usize::from(spec.channels)) {
+        return Err(Error::Decode(
+            "decoded samples are not aligned to the channel count".into(),
+        ));
+    }
+
+    let frames = samples.len() / usize::from(spec.channels);
+    if frames as u64 != spec.total_samples {
+        return Err(Error::Decode(
+            "decoded samples do not match the declared total sample count".into(),
+        ));
+    }
+
+    Ok(envelope)
+}
+
+fn validate_aiff_output_spec(spec: WavSpec) -> Result<PcmEnvelope> {
     if !(1..=8).contains(&spec.channels) {
         return Err(Error::UnsupportedWav(format!(
             "AIFF/AIFC output only supports ordinary 1..8 channel PCM, found {} channels",
@@ -106,12 +200,6 @@ fn validate_aiff_output_shape(spec: WavSpec, samples: &[i32]) -> Result<PcmEnvel
             "AIFF/AIFC output cannot preserve non-ordinary channel mask {:#010x} for {} channels",
             spec.channel_mask, spec.channels
         )));
-    }
-
-    if !samples.len().is_multiple_of(usize::from(spec.channels)) {
-        return Err(Error::Decode(
-            "decoded samples are not aligned to the channel count".into(),
-        ));
     }
 
     if !(4..=32).contains(&spec.bits_per_sample) {
@@ -134,16 +222,9 @@ fn validate_aiff_output_shape(spec: WavSpec, samples: &[i32]) -> Result<PcmEnvel
             spec.bits_per_sample
         )));
     }
-
-    let frames = samples.len() / usize::from(spec.channels);
     if spec.total_samples > u64::from(u32::MAX) {
         return Err(Error::UnsupportedWav(
             "AIFF/AIFC output only supports up to 4,294,967,295 sample frames".into(),
-        ));
-    }
-    if frames as u64 != spec.total_samples {
-        return Err(Error::Decode(
-            "decoded samples do not match the declared total sample count".into(),
         ));
     }
 

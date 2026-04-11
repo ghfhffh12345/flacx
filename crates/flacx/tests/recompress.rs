@@ -1,11 +1,12 @@
 use std::{fs, io::Cursor};
 
-use flacx::{Decoder, RecompressConfig, RecompressMode, Recompressor, builtin::recompress_bytes};
+use flacx::{RecompressConfig, RecompressMode, Recompressor, builtin::recompress_bytes};
 
 #[cfg(feature = "progress")]
 use flacx::{RecompressPhase, RecompressProgress};
 
 mod support;
+use support::TestDecoder as DecodeHarness;
 use support::TestEncoder as Encoder;
 
 use support::{
@@ -40,7 +41,9 @@ fn recompress_api_accepts_seekable_readers_and_preserves_audio() {
     .unwrap();
 
     let recompressed = output.into_inner();
-    let decoded = Decoder::default().decode_bytes(&recompressed).unwrap();
+    let decoded = DecodeHarness::default()
+        .decode_bytes(&recompressed)
+        .unwrap();
 
     assert_eq!(summary.block_size, 576);
     assert_eq!(summary.channels, 2);
@@ -67,7 +70,7 @@ fn recompress_file_uses_configured_options() {
 
     assert_eq!(summary.block_size, 576);
     assert!(output_path.exists());
-    let decoded = Decoder::default()
+    let decoded = DecodeHarness::default()
         .decode_bytes(&fs::read(&output_path).unwrap())
         .unwrap();
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));

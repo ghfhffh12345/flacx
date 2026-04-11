@@ -1,11 +1,12 @@
 use super::{
-    ChannelAssignment, DecodeConfig, Error, FLAC_SYNC_CODE, FRAME_CHUNK_SIZE, FrameHeaderNumber,
-    FrameHeaderNumberKind, FrameIndex, FrameResult, ParsedFrame, ProgressSink, Result, StreamInfo,
+    ChannelAssignment, Error, FLAC_SYNC_CODE, FRAME_CHUNK_SIZE, FrameHeaderNumber,
+    FrameHeaderNumberKind, FrameIndex, FrameResult, ParsedFrame, Result, StreamInfo,
     SubframeHeader,
 };
 use crate::{
+    DecodeConfig,
     crc::{crc8, crc16},
-    progress::ProgressSnapshot,
+    progress::{ProgressSink, ProgressSnapshot},
     reconstruct::{interleave_channels, restore_fixed, restore_lpc, unfold_residual},
 };
 use bitstream_io::{BigEndian, BitRead, BitReader};
@@ -20,6 +21,7 @@ use std::{
     thread,
 };
 
+#[allow(dead_code)]
 pub(super) fn index_frames(
     bytes: &[u8],
     frame_offset: usize,
@@ -58,6 +60,7 @@ pub(super) fn index_frames(
     Ok(frames)
 }
 
+#[allow(dead_code)]
 pub(super) fn decode_frames_parallel<P>(
     bytes: Arc<[u8]>,
     frames: Arc<[FrameIndex]>,
@@ -163,6 +166,7 @@ where
     })
 }
 
+#[allow(dead_code)]
 fn process_frame_result<P>(
     samples: &mut Vec<i32>,
     result: Result<Vec<i32>>,
@@ -183,7 +187,7 @@ where
     Ok(processed_samples)
 }
 
-fn scan_frame(
+pub(super) fn scan_frame(
     bytes: &[u8],
     stream_info: StreamInfo,
     expected_frame_number: u64,
@@ -373,6 +377,14 @@ fn decode_frame(
     Ok(DecodedFrame {
         samples: interleave_channels(parsed.assignment, &channels)?,
     })
+}
+
+pub(super) fn decode_frame_samples(
+    bytes: &[u8],
+    stream_info: StreamInfo,
+    expected_header_number: FrameHeaderNumber,
+) -> Result<Vec<i32>> {
+    decode_frame(bytes, stream_info, expected_header_number).map(|frame| frame.samples)
 }
 
 impl FrameHeaderNumberKind {

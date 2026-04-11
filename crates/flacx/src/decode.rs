@@ -1,26 +1,22 @@
-//! FLAC-to-PCM-container decoding primitives used by the `flacx` crate.
+//! FLAC-to-PCM-container decoding session primitives used by the `flacx` crate.
 //!
-//! The main façade is [`Decoder`]. Pair it with [`DecodeConfig`] or
-//! [`Decoder::builder`] to choose worker-thread count, output-family, and
-//! channel-mask provenance handling before decoding.
+//! The public decode flow is reader-driven: parse a FLAC reader, inspect its
+//! spec/metadata, bind an output writer through [`DecodeConfig::into_decoder`],
+//! then feed the resulting single-pass PCM stream into [`Decoder::decode`].
 
-use std::{
-    io::{Read, Seek, Write},
-    path::Path,
-};
+use std::io::{Seek, Write};
 
 use crate::{
     config::{DecodeBuilder, DecodeConfig},
-    convenience,
-    decode_output::decode_with_output_container,
+    decode_output::decode_stream_to_container,
     error::Result,
-    pcm::PcmContainer,
+    metadata::WavMetadata,
     progress::{NoProgress, ProgressSink},
-    read::read_flac_for_decode,
+    read::DecodePcmStream,
 };
 
 #[cfg(feature = "progress")]
-use crate::progress::CallbackProgress;
+use crate::progress::{CallbackProgress, ProgressSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Summary of the PCM stream produced by a decode operation.
@@ -49,284 +45,153 @@ pub struct DecodeSummary {
     pub bits_per_sample: u8,
 }
 
-/// Primary library façade for FLAC-to-PCM-container conversion.
-///
-/// Construct a decoder from [`DecodeConfig`] and call one of the decode
-/// methods depending on your input shape:
-///
-/// - [`Decoder::decode`] for generic `Read + Seek` sources
-/// - [`Decoder::decode_file`] for file paths
-/// - [`Decoder::decode_bytes`] for in-memory input
-///
-/// The decoder itself is cheap to copy and holds only its configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Decoder {
+/// Writer-owning FLAC-to-PCM-container decode session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decoder<W> {
     config: DecodeConfig,
+    writer: W,
+    metadata: WavMetadata,
 }
 
-impl Default for Decoder {
-    fn default() -> Self {
-        Self::new(DecodeConfig::default())
+impl DecodeConfig {
+    /// Bind an output writer and create a writer-owning decode session.
+    pub fn into_decoder<W>(self, writer: W) -> Decoder<W>
+    where
+        W: Write + Seek,
+    {
+        Decoder::new(writer, self)
     }
 }
 
-impl Decoder {
+impl DecodeBuilder {
+    /// Finish building the configuration and bind an output writer.
+    pub fn into_decoder<W>(self, writer: W) -> Decoder<W>
+    where
+        W: Write + Seek,
+    {
+        self.build().into_decoder(writer)
+    }
+}
+
+impl<W> Decoder<W>
+where
+    W: Write + Seek,
+{
     /// Create a builder initialized from [`DecodeConfig::builder`].
     #[must_use]
     pub fn builder() -> DecodeBuilder {
         DecodeConfig::builder()
     }
 
-    /// Construct a decoder from a configuration value.
+    /// Construct a writer-owning decode session from a writer and config.
     #[must_use]
-    pub fn new(config: DecodeConfig) -> Self {
-        Self { config }
+    pub fn new(writer: W, config: DecodeConfig) -> Self {
+        Self {
+            config,
+            writer,
+            metadata: WavMetadata::default(),
+        }
     }
 
-    /// Return the configuration currently stored in the decoder.
+    /// Return the configuration currently stored in the decode session.
     #[must_use]
     pub fn config(&self) -> DecodeConfig {
         self.config
     }
 
+    /// Return the metadata currently staged onto the decode session.
+    #[must_use]
+    pub fn metadata(&self) -> &WavMetadata {
+        &self.metadata
+    }
+
+    /// Replace the staged decode metadata.
+    pub fn set_metadata(&mut self, metadata: WavMetadata) {
+        self.metadata = metadata;
+    }
+
+    /// Return a new session with different staged metadata.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: WavMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     /// Return a new decoder with a different worker thread count.
     #[must_use]
-    pub fn with_threads(self, threads: usize) -> Self {
-        Self::new(self.config.with_threads(threads))
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.config = self.config.with_threads(threads);
+        self
     }
 
-    /// Decode a FLAC reader into PCM-container output.
+    /// Return a new decoder with a different output container policy.
+    #[must_use]
+    pub fn with_output_container(mut self, output_container: crate::PcmContainer) -> Self {
+        self.config = self.config.with_output_container(output_container);
+        self
+    }
+
+    /// Return the owned output writer by value.
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    /// Decode a PCM stream into the owned writer.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use std::io::Cursor;
-    /// use flacx::Decoder;
+    /// use flacx::{DecodeConfig, read_flac_reader};
     ///
-    /// let input = Cursor::new(std::fs::read("input.flac").unwrap());
-    /// let mut output = Cursor::new(Vec::new());
-    /// Decoder::default().decode(input, &mut output).unwrap();
+    /// let reader = read_flac_reader(std::fs::File::open("input.flac").unwrap()).unwrap();
+    /// let metadata = reader.metadata().clone();
+    /// let stream = reader.into_pcm_stream();
+    /// let mut decoder = DecodeConfig::default()
+    ///     .into_decoder(std::io::Cursor::new(Vec::new()));
+    /// decoder.set_metadata(metadata);
+    /// decoder.decode(stream).unwrap();
     /// ```
-    pub fn decode<R, W>(&self, input: R, output: W) -> Result<DecodeSummary>
+    pub fn decode<S>(&mut self, mut stream: S) -> Result<DecodeSummary>
     where
-        R: Read + Seek,
-        W: Write + Seek,
+        S: DecodePcmStream,
     {
         let mut progress = NoProgress;
-        self.decode_into(input, output, &mut progress)
-    }
-
-    /// Decode a FLAC reader into an explicit typed PCM stream.
-    pub fn decode_pcm<R>(&self, input: R) -> Result<crate::PcmStream>
-    where
-        R: Read + Seek,
-    {
-        let mut progress = NoProgress;
-        Ok(read_flac_for_decode(input, self.config, &mut progress)?.wav)
-    }
-
-    /// Decode a FLAC reader into an explicit typed PCM stream.
-    ///
-    /// This alias keeps the public API spelling aligned with the decode-side
-    /// typed PCM helpers such as [`crate::write_pcm_stream`].
-    pub fn decode_pcm_stream<R>(&self, input: R) -> Result<crate::PcmStream>
-    where
-        R: Read + Seek,
-    {
-        self.decode_pcm(input)
+        stream.set_threads(self.config.threads);
+        self.decode_with_sink(stream, &mut progress)
     }
 
     #[cfg(feature = "progress")]
-    /// Decode a FLAC reader into an explicit typed PCM stream while reporting progress.
-    pub fn decode_pcm_with_progress<R, F>(
-        &self,
-        input: R,
-        mut on_progress: F,
-    ) -> Result<crate::PcmStream>
-    where
-        R: Read + Seek,
-        F: FnMut(crate::progress::ProgressSnapshot) -> Result<()>,
-    {
-        let mut progress = CallbackProgress::new(&mut on_progress);
-        Ok(read_flac_for_decode(input, self.config, &mut progress)?.wav)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Decode a FLAC reader into an explicit typed PCM stream while reporting progress.
-    ///
-    /// This alias keeps the public API spelling aligned with the decode-side
-    /// typed PCM helpers such as [`crate::write_pcm_stream`].
-    pub fn decode_pcm_stream_with_progress<R, F>(
-        &self,
-        input: R,
-        on_progress: F,
-    ) -> Result<crate::PcmStream>
-    where
-        R: Read + Seek,
-        F: FnMut(crate::progress::ProgressSnapshot) -> Result<()>,
-    {
-        self.decode_pcm_with_progress(input, on_progress)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Decode a FLAC reader into PCM-container output while reporting progress.
-    ///
-    /// The callback receives a [`crate::progress::ProgressSnapshot`] after
-    /// each decoded frame.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # #[cfg(feature = "progress")]
-    /// # {
-    /// use std::io::Cursor;
-    /// use flacx::{Decoder, ProgressSnapshot};
-    ///
-    /// let input = Cursor::new(std::fs::read("input.flac").unwrap());
-    /// let mut output = Cursor::new(Vec::new());
-    /// Decoder::default().decode_with_progress(input, &mut output, |snapshot: ProgressSnapshot| {
-    ///     println!("{} / {} samples", snapshot.processed_samples, snapshot.total_samples);
-    ///     Ok(())
-    /// }).unwrap();
-    /// # }
-    /// ```
-    pub fn decode_with_progress<R, W, F>(
-        &self,
-        input: R,
-        output: W,
+    /// Decode a PCM stream into the owned writer while reporting progress.
+    pub fn decode_with_progress<S, F>(
+        &mut self,
+        mut stream: S,
         mut on_progress: F,
     ) -> Result<DecodeSummary>
     where
-        R: Read + Seek,
-        W: Write + Seek,
-        F: FnMut(crate::progress::ProgressSnapshot) -> Result<()>,
+        S: DecodePcmStream,
+        F: FnMut(ProgressSnapshot) -> Result<()>,
     {
         let mut progress = CallbackProgress::new(&mut on_progress);
-        self.decode_into(input, output, &mut progress)
+        stream.set_threads(self.config.threads);
+        self.decode_with_sink(stream, &mut progress)
     }
 
-    /// Decode from one file path to another.
-    ///
-    /// The output is written through a temporary file and committed on success
-    /// so the destination is only updated when decoding completes.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use flacx::Decoder;
-    ///
-    /// Decoder::default()
-    ///     .decode_file("input.flac", "output.wav")
-    ///     .unwrap();
-    /// ```
-    pub fn decode_file<P, Q>(&self, input_path: P, output_path: Q) -> Result<DecodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        convenience::decode_file_with_decoder(self, input_path, output_path)
-    }
-
-    #[cfg(feature = "progress")]
-    /// Decode from one file path to another while reporting progress.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # #[cfg(feature = "progress")]
-    /// # {
-    /// use flacx::{Decoder, ProgressSnapshot};
-    ///
-    /// Decoder::default()
-    ///     .decode_file_with_progress("input.flac", "output.wav", |snapshot: ProgressSnapshot| {
-    ///         println!("{} / {} frames", snapshot.completed_frames, snapshot.total_frames);
-    ///         Ok(())
-    ///     })
-    ///     .unwrap();
-    /// # }
-    /// ```
-    pub fn decode_file_with_progress<P, Q, F>(
-        &self,
-        input_path: P,
-        output_path: Q,
-        mut on_progress: F,
-    ) -> Result<DecodeSummary>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-        F: FnMut(crate::progress::ProgressSnapshot) -> Result<()>,
-    {
-        let mut progress = CallbackProgress::new(&mut on_progress);
-        convenience::decode_file_with_decoder_and_progress(
-            self,
-            input_path,
-            output_path,
-            &mut progress,
-        )
-    }
-
-    /// Decode an in-memory FLAC buffer and return PCM-container bytes.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use flacx::Decoder;
-    ///
-    /// let flac_bytes = std::fs::read("input.flac").unwrap();
-    /// let wav_bytes = Decoder::default().decode_bytes(&flac_bytes).unwrap();
-    /// assert!(!wav_bytes.is_empty());
-    /// ```
-    pub fn decode_bytes(&self, input: &[u8]) -> Result<Vec<u8>> {
-        convenience::decode_bytes_with_decoder(self, input)
-    }
-
-    fn decode_into<R, W, P>(
-        &self,
-        input: R,
-        mut output: W,
+    pub(crate) fn decode_with_sink<S, P>(
+        &mut self,
+        stream: S,
         progress: &mut P,
     ) -> Result<DecodeSummary>
     where
-        R: Read + Seek,
-        W: Write + Seek,
+        S: DecodePcmStream,
         P: ProgressSink,
     {
-        self.decode_with_output_container(
-            input,
-            &mut output,
-            self.config.output_container,
+        decode_stream_to_container(
+            stream,
+            &mut self.writer,
+            self.metadata.clone(),
+            self.config,
             progress,
         )
-    }
-
-    /// Decode a FLAC stream into an explicitly selected PCM container.
-    pub fn decode_as<R, W>(
-        &self,
-        input: R,
-        mut output: W,
-        output_container: PcmContainer,
-    ) -> Result<DecodeSummary>
-    where
-        R: Read + Seek,
-        W: Write + Seek,
-    {
-        let mut progress = NoProgress;
-        self.decode_with_output_container(input, &mut output, output_container, &mut progress)
-    }
-
-    pub(crate) fn decode_with_output_container<R, W, P>(
-        &self,
-        input: R,
-        output: &mut W,
-        output_container: PcmContainer,
-        progress: &mut P,
-    ) -> Result<DecodeSummary>
-    where
-        R: Read + Seek,
-        W: Write + Seek,
-        P: ProgressSink,
-    {
-        decode_with_output_container(input, output, output_container, self.config, progress)
     }
 }
 
@@ -337,7 +202,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use super::Decoder;
+    use crate::read_flac_reader;
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -355,7 +220,15 @@ mod tests {
         let output_path = unique_path("wav");
         fs::write(&input_path, b"not a flac file").unwrap();
 
-        let result = Decoder::default().decode_file(&input_path, &output_path);
+        let result = (|| {
+            let reader = read_flac_reader(fs::File::open(&input_path)?)?;
+            let metadata = reader.metadata().clone();
+            let stream = reader.into_pcm_stream();
+            let mut decoder =
+                crate::DecodeConfig::default().into_decoder(fs::File::create(&output_path)?);
+            decoder.set_metadata(metadata);
+            decoder.decode(stream)
+        })();
         assert!(result.is_err());
         assert!(!output_path.exists());
 

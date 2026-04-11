@@ -135,45 +135,6 @@ pub fn read_pcm_reader<R: Read + Seek>(reader: R) -> Result<PcmReader<R>> {
     read_pcm_reader_with_options(reader, PcmReaderOptions::default())
 }
 
-pub(crate) struct SlicePcmStream {
-    spec: PcmSpec,
-    samples: Vec<i32>,
-    next_sample: usize,
-}
-
-impl SlicePcmStream {
-    pub(crate) fn new(spec: PcmSpec, samples: Vec<i32>) -> Self {
-        Self {
-            spec,
-            samples,
-            next_sample: 0,
-        }
-    }
-
-    pub(crate) fn from_pcm_stream(stream: PcmStream) -> Self {
-        Self::new(stream.spec, stream.samples)
-    }
-}
-
-impl EncodePcmStream for SlicePcmStream {
-    fn spec(&self) -> PcmSpec {
-        self.spec
-    }
-
-    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
-        let channels = usize::from(self.spec.channels);
-        let remaining_frames = (self.samples.len().saturating_sub(self.next_sample)) / channels;
-        let frames = remaining_frames.min(max_frames);
-        if frames == 0 {
-            return Ok(0);
-        }
-        let next = self.next_sample + frames * channels;
-        output.extend_from_slice(&self.samples[self.next_sample..next]);
-        self.next_sample = next;
-        Ok(frames)
-    }
-}
-
 #[allow(dead_code)]
 pub fn read_wav<R: Read + Seek>(reader: R) -> Result<WavData> {
     #[cfg(not(feature = "wav"))]

@@ -9,48 +9,66 @@ use crate::{
     config::DecodeConfig,
     decode::DecodeSummary,
     error::{Error, Result},
-    md5::verify_streaminfo_digest,
-    pcm::PcmContainer,
-    progress::ProgressSink,
-    read::read_flac_for_decode,
+    md5::{StreaminfoMd5, verify_streaminfo_digest},
+    progress::{ProgressSink, ProgressSnapshot},
+    read::DecodePcmStream,
     stream_info::StreamInfo,
-    wav_output::{
-        WavMetadataWriteOptions, ensure_output_container_enabled,
-        write_wav_with_metadata_and_md5_with_options,
-    },
+    wav_output::{StreamingPcmWriter, WavMetadataWriteOptions, ensure_output_container_enabled},
 };
 
 static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-pub(crate) fn decode_with_output_container<R, W, P>(
-    input: R,
+pub(crate) fn decode_stream_to_container<S, W, P>(
+    mut stream: S,
     output: &mut W,
-    output_container: PcmContainer,
+    metadata: crate::metadata::WavMetadata,
     config: DecodeConfig,
     progress: &mut P,
 ) -> Result<DecodeSummary>
 where
-    R: std::io::Read + Seek,
+    S: DecodePcmStream,
     W: Write + Seek,
     P: ProgressSink,
 {
-    ensure_output_container_enabled(output_container)?;
-    let decoded = read_flac_for_decode(input, config, progress)?;
-    let streaminfo_md5 = write_wav_with_metadata_and_md5_with_options(
+    ensure_output_container_enabled(config.output_container)?;
+    let spec = stream.spec();
+    let total_frames = stream.total_input_frames();
+    let source_info = stream.stream_info();
+    let mut streaminfo_md5 = StreaminfoMd5::new(spec);
+    let mut writer = StreamingPcmWriter::new(
         output,
-        decoded.wav.spec,
-        &decoded.wav.samples,
-        &decoded.metadata,
+        spec,
+        &metadata,
         WavMetadataWriteOptions {
             emit_fxmd: config.emit_fxmd,
-            container: output_container,
+            container: config.output_container,
         },
     )?;
-    verify_streaminfo_digest(streaminfo_md5, decoded.stream_info.md5)?;
-    output.flush()?;
+
+    let mut processed_samples = 0u64;
+    let mut chunk = Vec::new();
+    let chunk_frames = spec.total_samples.min(131_072) as usize;
+    loop {
+        chunk.clear();
+        let frames = stream.read_chunk(chunk_frames, &mut chunk)?;
+        if frames == 0 {
+            break;
+        }
+        writer.write_samples_and_update_md5(&chunk, &mut streaminfo_md5)?;
+        processed_samples += frames as u64;
+        progress.on_frame(ProgressSnapshot {
+            processed_samples,
+            total_samples: spec.total_samples,
+            completed_frames: stream.completed_input_frames(),
+            total_frames,
+        })?;
+    }
+
+    writer.finish(Some(&mut streaminfo_md5))?;
+    verify_streaminfo_digest(streaminfo_md5.finalize()?, source_info.md5)?;
     Ok(summary_from_stream_info(
-        decoded.stream_info,
-        decoded.frame_count,
+        source_info,
+        stream.completed_input_frames(),
     ))
 }
 
