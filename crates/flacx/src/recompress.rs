@@ -15,12 +15,13 @@ use crate::{
     decode_output::{commit_temp_output, open_temp_output},
     encoder::EncodeSummary,
     error::Result,
-    input::SlicePcmStream,
     level::Level,
-    md5::verify_streaminfo_md5,
+    md5::{StreaminfoMd5, verify_streaminfo_digest},
     plan::EncodePlan,
     progress::{ProgressSink, ProgressSnapshot},
-    read::{inspect_flac_total_samples, read_flac_for_decode},
+    read::{
+        FlacPcmStream, FlacReaderOptions, inspect_flac_total_samples, read_flac_reader_with_options,
+    },
 };
 
 /// Mode presets for recompress-side metadata handling and relaxable validation.
@@ -381,15 +382,23 @@ impl Recompressor {
             total_frames: 0,
         })?;
 
-        let decoded = {
-            let mut decode_progress = DecodePhaseProgress {
-                callback: on_progress,
-            };
-            read_flac_for_decode(input, self.config.decode_config(), &mut decode_progress)?
-        };
-
+        let reader = read_flac_reader_with_options(
+            input,
+            FlacReaderOptions {
+                strict_seektable_validation: self
+                    .config
+                    .decode_config()
+                    .strict_seektable_validation,
+                strict_channel_mask_provenance: self
+                    .config
+                    .decode_config()
+                    .strict_channel_mask_provenance,
+            },
+        )?;
+        let metadata = reader.metadata().clone().into_encode_metadata();
+        let stream_info = reader.stream_info();
         let encode_config = self.config.encode_config();
-        let encode_plan = EncodePlan::new(decoded.wav.spec, encode_config.clone())?;
+        let encode_plan = EncodePlan::new(reader.spec(), encode_config.clone())?;
         on_progress(RecompressProgress {
             phase: RecompressPhase::Encode,
             phase_processed_samples: 0,
@@ -399,14 +408,7 @@ impl Recompressor {
             completed_frames: 0,
             total_frames: encode_plan.total_frames,
         })?;
-
-        verify_streaminfo_md5(
-            decoded.wav.spec,
-            &decoded.wav.samples,
-            decoded.stream_info.md5,
-        )?;
-        let metadata = decoded.metadata.into_encode_metadata();
-        let stream = SlicePcmStream::from_pcm_stream(decoded.wav);
+        let stream = VerifyingPcmStream::new(reader.into_pcm_stream(), stream_info.md5);
         let mut encode_progress = EncodePhaseProgress {
             callback: on_progress,
             total_samples,
@@ -451,24 +453,48 @@ impl Recompressor {
     }
 }
 
-struct DecodePhaseProgress<'a, F> {
-    callback: &'a mut F,
+struct VerifyingPcmStream<R> {
+    inner: FlacPcmStream<R>,
+    expected_md5: [u8; 16],
+    md5: Option<StreaminfoMd5>,
+    verified: bool,
 }
 
-impl<F> ProgressSink for DecodePhaseProgress<'_, F>
-where
-    F: FnMut(RecompressProgress) -> Result<()>,
-{
-    fn on_frame(&mut self, progress: ProgressSnapshot) -> Result<()> {
-        (self.callback)(RecompressProgress {
-            phase: RecompressPhase::Decode,
-            phase_processed_samples: progress.processed_samples,
-            phase_total_samples: progress.total_samples,
-            overall_processed_samples: progress.processed_samples,
-            overall_total_samples: overall_total_samples(progress.total_samples),
-            completed_frames: progress.completed_frames,
-            total_frames: progress.total_frames,
-        })
+impl<R> VerifyingPcmStream<R> {
+    fn new(inner: FlacPcmStream<R>, expected_md5: [u8; 16]) -> Self {
+        Self {
+            md5: Some(StreaminfoMd5::new(inner.spec())),
+            expected_md5,
+            inner,
+            verified: false,
+        }
+    }
+}
+
+impl<R: Read + Seek> crate::input::EncodePcmStream for VerifyingPcmStream<R> {
+    fn spec(&self) -> crate::input::WavSpec {
+        self.inner.spec()
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> crate::Result<usize> {
+        let mut chunk = Vec::new();
+        let frames = self.inner.read_chunk(max_frames, &mut chunk)?;
+        if frames == 0 {
+            if !self.verified {
+                verify_streaminfo_digest(
+                    self.md5.take().expect("md5 state present").finalize()?,
+                    self.expected_md5,
+                )?;
+                self.verified = true;
+            }
+            return Ok(0);
+        }
+        self.md5
+            .as_mut()
+            .expect("md5 state present")
+            .update_samples(&chunk)?;
+        output.extend(chunk);
+        Ok(frames)
     }
 }
 

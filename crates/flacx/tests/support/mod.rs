@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 #![allow(unexpected_cfgs)]
-use flacx::{EncodeSummary, EncoderConfig, RawPcmByteOrder, RawPcmDescriptor, read_pcm_reader};
+use flacx::{
+    DecodeConfig, DecodeSummary, EncodeSummary, EncoderConfig, FlacReaderOptions, PcmContainer,
+    RawPcmByteOrder, RawPcmDescriptor, read_flac_reader_with_options, read_pcm_reader,
+};
 use std::{
     env, fs,
     io::{Cursor, Read, Seek, Write},
@@ -76,6 +79,115 @@ pub fn encode_file_with_config(
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TestEncoder {
     config: EncoderConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TestDecoder {
+    config: DecodeConfig,
+}
+
+impl TestDecoder {
+    pub fn new(config: DecodeConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn config(&self) -> DecodeConfig {
+        self.config
+    }
+
+    pub fn decode_bytes(&self, input: &[u8]) -> flacx::Result<Vec<u8>> {
+        let reader = read_flac_reader_with_options(
+            Cursor::new(input),
+            FlacReaderOptions {
+                strict_seektable_validation: self.config.strict_seektable_validation,
+                strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
+            },
+        )?;
+        let metadata = reader.metadata().clone();
+        let stream = reader.into_pcm_stream();
+        let mut decoder = self.config.into_decoder(Cursor::new(Vec::new()));
+        decoder.set_metadata(metadata);
+        decoder.decode(stream)?;
+        Ok(decoder.into_inner().into_inner())
+    }
+
+    pub fn decode_file<P, Q>(&self, input_path: P, output_path: Q) -> flacx::Result<DecodeSummary>
+    where
+        P: AsRef<std::path::Path>,
+        Q: AsRef<std::path::Path>,
+    {
+        let input_path = input_path.as_ref();
+        let output_path = output_path.as_ref();
+        let output_container = match output_path.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("rf64") => PcmContainer::Rf64,
+            Some(ext) if ext.eq_ignore_ascii_case("w64") => PcmContainer::Wave64,
+            Some(ext) if ext.eq_ignore_ascii_case("aif") || ext.eq_ignore_ascii_case("aiff") => {
+                PcmContainer::Aiff
+            }
+            Some(ext) if ext.eq_ignore_ascii_case("aifc") => PcmContainer::Aifc,
+            Some(ext) if ext.eq_ignore_ascii_case("caf") => PcmContainer::Caf,
+            Some(ext) if ext.eq_ignore_ascii_case("wav") => PcmContainer::Wave,
+            Some(ext) => {
+                return Err(flacx::Error::Decode(format!(
+                    "unsupported decode output extension '.{ext}'"
+                )));
+            }
+            None => self.config.output_container,
+        };
+        let temp_path = output_path.with_extension(format!(
+            "{}.tmp",
+            output_path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("out")
+        ));
+        let result = (|| {
+            let reader = read_flac_reader_with_options(
+                fs::File::open(input_path)?,
+                FlacReaderOptions {
+                    strict_seektable_validation: self.config.strict_seektable_validation,
+                    strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
+                },
+            )?;
+            let metadata = reader.metadata().clone();
+            let stream = reader.into_pcm_stream();
+            let mut decoder = self
+                .config
+                .with_output_container(output_container)
+                .into_decoder(fs::File::create(&temp_path)?);
+            decoder.set_metadata(metadata);
+            decoder.decode(stream)
+        })();
+        match result {
+            Ok(summary) => {
+                std::fs::rename(&temp_path, output_path)?;
+                Ok(summary)
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_path);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn decode<R, W>(&self, input: R, output: W) -> flacx::Result<DecodeSummary>
+    where
+        R: Read + Seek,
+        W: Write + Seek,
+    {
+        let reader = read_flac_reader_with_options(
+            input,
+            FlacReaderOptions {
+                strict_seektable_validation: self.config.strict_seektable_validation,
+                strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
+            },
+        )?;
+        let metadata = reader.metadata().clone();
+        let stream = reader.into_pcm_stream();
+        let mut decoder = self.config.into_decoder(output);
+        decoder.set_metadata(metadata);
+        decoder.decode(stream)
+    }
 }
 
 impl TestEncoder {

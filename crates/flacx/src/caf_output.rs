@@ -90,6 +90,77 @@ pub(crate) fn write_caf<W: Write>(
     Ok(streaminfo_md5)
 }
 
+pub(crate) struct CafStreamWriter<W: Write> {
+    writer: W,
+    envelope: PcmEnvelope,
+}
+
+impl<W: Write> CafStreamWriter<W> {
+    pub(crate) fn new(mut writer: W, spec: WavSpec, metadata: &WavMetadata) -> Result<Self> {
+        if !(1..=8).contains(&spec.channels) {
+            return Err(Error::UnsupportedWav(format!(
+                "only the ordinary 1..8 channel envelope is supported, found {} channels",
+                spec.channels
+            )));
+        }
+        if !matches!(spec.bits_per_sample, 4..=32) {
+            return Err(Error::UnsupportedWav(format!(
+                "only FLAC-native 4..32 valid bits/sample are supported, found {}",
+                spec.bits_per_sample
+            )));
+        }
+
+        let container_bits_per_sample =
+            container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
+        if spec.bytes_per_sample * 8 != container_bits_per_sample {
+            return Err(Error::UnsupportedWav(format!(
+                "bytes/sample does not match the chosen container width for {} valid bits/sample",
+                spec.bits_per_sample
+            )));
+        }
+
+        let envelope = PcmEnvelope {
+            channels: u16::from(spec.channels),
+            valid_bits_per_sample: u16::from(spec.bits_per_sample),
+            container_bits_per_sample,
+            channel_mask: spec.channel_mask,
+        };
+        let data_bytes = spec
+            .total_samples
+            .checked_mul(u64::from(spec.channels))
+            .and_then(|count| count.checked_mul(u64::from(container_bits_per_sample / 8)))
+            .ok_or_else(|| Error::UnsupportedWav("CAF data chunk overflows".into()))?;
+        let channel_layout_chunk = caf_channel_layout_chunk(spec)?;
+        let info_chunk = caf_info_chunk_payload(metadata)?;
+        let mark_chunk = caf_mark_chunk_payload(metadata)?;
+
+        write_header(&mut writer)?;
+        write_desc_chunk(&mut writer, spec, container_bits_per_sample)?;
+        if let Some(payload) = channel_layout_chunk {
+            write_chunk(&mut writer, CAF_CHAN_CHUNK_ID, &payload)?;
+        }
+        if let Some(payload) = info_chunk {
+            write_chunk(&mut writer, CAF_INFO_CHUNK_ID, &payload)?;
+        }
+        if let Some(payload) = mark_chunk {
+            write_chunk(&mut writer, CAF_MARK_CHUNK_ID, &payload)?;
+        }
+        write_data_chunk_header(&mut writer, data_bytes)?;
+        write_all_zero_edit_count(&mut writer)?;
+
+        Ok(Self { writer, envelope })
+    }
+
+    pub(crate) fn write_samples(&mut self, samples: &[i32]) -> Result<()> {
+        write_sample_bytes(&mut self.writer, samples, self.envelope)
+    }
+
+    pub(crate) fn finish(mut self) -> Result<W> {
+        self.writer.flush()?;
+        Ok(self.writer)
+    }
+}
+
 fn write_header<W: Write>(writer: &mut W) -> Result<()> {
     writer.write_all(&CAF_MAGIC)?;
     writer.write_all(&CAF_VERSION.to_be_bytes())?;

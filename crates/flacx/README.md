@@ -50,7 +50,7 @@ flacx
 │  ├─ DecodeConfig / DecodeBuilder
 │  ├─ RecompressConfig / RecompressBuilder
 │  ├─ Encoder / EncodeSummary
-│  ├─ Decoder / DecodeSummary
+│  ├─ FlacReader / DecodePcmStream / Decoder / DecodeSummary
 │  ├─ Recompressor / RecompressMode / RecompressPhase / RecompressProgress
 │  ├─ PcmReader / AnyPcmStream / PcmStream / PcmStreamSpec / PcmContainer
 │  ├─ read_pcm_reader / write_pcm_stream
@@ -107,7 +107,7 @@ crate root
 
 | Layer | Public API surface | Ownership |
 | --- | --- | --- |
-| Explicit core | `flacx::core`, config/builders, codec façades, typed PCM helpers | The source of truth for codec configuration, typed PCM handoff, explicit encode/decode/recompress operations, and summary reporting. |
+| Explicit core | `flacx::core`, config/builders, codec façades, reader/session helpers, typed PCM helpers | The source of truth for codec configuration, reader-driven handoff, explicit encode/decode/recompress operations, and summary reporting. |
 | Builtin/orchestration | `flacx::builtin` | One-shot file and byte workflows, extension inference, and lightweight routing into the core. |
 | Support surfaces | `level`, raw PCM helpers, inspectors, progress types | Supporting concepts that remain public without becoming the main architecture story. |
 

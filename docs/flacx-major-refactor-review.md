@@ -20,8 +20,8 @@ testing, and docs work can converge on the same vocabulary.
 ### 1. The public surface is still described from the convenience edge inward
 
 Repo evidence:
-- `crates/flacx/src/lib.rs` presents `encode_file`, `encode_bytes`,
-  `decode_file`, and `decode_bytes` as the small public API story.
+- `crates/flacx/src/lib.rs` presents builtin one-shot encode/decode helpers as
+  the small public API story.
 - `crates/flacx/README.md` centers the file helpers and byte helpers before any
   explicit reader/writer or adapter boundary.
 - `crates/flacx/src/encoder.rs` and `crates/flacx/src/decode.rs` each mix
@@ -150,8 +150,8 @@ module names too early.
 
 ### Public-story migration
 
-- **Current story:** `Encoder` / `Decoder` plus `encode_file`, `encode_bytes`,
-  `decode_file`, and `decode_bytes` read as the primary API.
+- **Current story:** `Encoder` / `Decoder` plus builtin one-shot
+  encode/decode helpers read as the primary API.
 - **Target story:** explicit encoder/decoder configuration and typed container
   adapters become the primary architecture; path and byte helpers are presented
   as convenience orchestration.

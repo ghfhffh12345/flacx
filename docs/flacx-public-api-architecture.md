@@ -51,7 +51,7 @@ flacx
 │  └─ RecompressConfig / RecompressBuilder
 ├─ codec façades
 │  ├─ Encoder / EncodeSummary
-│  ├─ Decoder / DecodeSummary
+│  ├─ FlacReader / DecodePcmStream / Decoder / DecodeSummary
 │  └─ Recompressor / RecompressMode / RecompressPhase / RecompressProgress
 ├─ typed boundary
 │  ├─ PcmStream / PcmStreamSpec / PcmContainer
@@ -72,7 +72,7 @@ flacx
 
 | Layer | Public entry points | What it owns | What it should not become |
 | --- | --- | --- | --- |
-| Explicit core | `core`, configs/builders, `Encoder`, `Decoder`, `Recompressor`, reader/session helpers | configuration, reader-driven handoff, explicit encode/decode/recompress operations, summaries | a path-oriented builtin story |
+| Explicit core | `core`, configs/builders, `Encoder`, `FlacReader`, `Decoder`, `Recompressor`, reader/session helpers | configuration, reader-driven handoff, explicit encode/decode/recompress operations, summaries | a path-oriented builtin story |
 | Builtin/orchestration | `builtin`, namespaced `*_file` / `*_bytes` helpers | one-shot path/byte routing and extension-driven ergonomics | a duplicate policy engine |
 | Container adaptation | public typed boundary plus family-specific behavior behind the scenes | container parsing/writing and family-specific translation | the place where top-level architecture is explained first |
 | Support surfaces | `level`, inspector helpers, raw PCM helpers, progress types | supporting concepts adjacent to the core | the primary conceptual center |

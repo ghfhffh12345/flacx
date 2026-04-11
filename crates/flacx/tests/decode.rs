@@ -1,9 +1,10 @@
 use std::{fs, io::Cursor, thread::available_parallelism};
 
 use flacx::builtin::{decode_bytes, decode_file};
-use flacx::{DecodeConfig, Decoder, EncoderConfig, PcmContainer, level::Level};
+use flacx::{DecodeConfig, EncoderConfig, PcmContainer, level::Level};
 
 mod support;
+use support::TestDecoder as DecodeHarness;
 use support::TestEncoder as Encoder;
 
 #[cfg(feature = "caf")]
@@ -26,8 +27,8 @@ fn decode_thread_variants() -> [usize; 2] {
     [1, DecodeConfig::default().threads.max(2)]
 }
 
-fn decoder_for_threads(threads: usize) -> Decoder {
-    Decoder::new(DecodeConfig::default().with_threads(threads))
+fn decoder_for_threads(threads: usize) -> DecodeHarness {
+    DecodeHarness::new(DecodeConfig::default().with_threads(threads))
 }
 
 fn decode_bytes_with_threads(flac: &[u8], threads: usize) -> Vec<u8> {
@@ -244,9 +245,10 @@ fn decode_bytes_can_emit_rf64_when_requested() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Rf64))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Rf64))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert!(decoded.starts_with(b"RF64"));
     let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
@@ -260,9 +262,10 @@ fn decode_bytes_can_emit_wave64_when_requested() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Wave64))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Wave64))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert!(is_w64_bytes(&decoded));
     let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
@@ -279,7 +282,7 @@ fn decode_file_infers_wave64_from_output_extension() {
     let output_path = unique_temp_path("w64");
     fs::write(&input_path, flac).unwrap();
 
-    Decoder::default()
+    DecodeHarness::default()
         .decode_file(&input_path, &output_path)
         .unwrap();
 
@@ -302,7 +305,7 @@ fn decode_file_infers_rf64_from_output_extension() {
     let output_path = unique_temp_path("rf64");
     fs::write(&input_path, flac).unwrap();
 
-    Decoder::default()
+    DecodeHarness::default()
         .decode_file(&input_path, &output_path)
         .unwrap();
 
@@ -322,9 +325,10 @@ fn decode_bytes_can_emit_aiff_when_requested() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Aiff))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Aiff))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert!(is_aiff_bytes(&decoded));
     let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
@@ -345,9 +349,10 @@ fn decode_bytes_can_emit_aiff_for_ordinary_multichannel_layouts() {
     );
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Aiff))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Aiff))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert!(is_aiff_bytes(&decoded));
     let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
@@ -361,9 +366,10 @@ fn decode_bytes_can_emit_aifc_when_requested() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Aifc))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Aifc))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert!(is_aifc_bytes(&decoded));
     let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
@@ -384,9 +390,10 @@ fn decode_bytes_can_emit_caf_when_requested() {
     );
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Caf))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Caf))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert!(is_caf_bytes(&decoded));
     let reencoded = Encoder::default().encode_bytes(&decoded).unwrap();
@@ -414,7 +421,7 @@ fn decode_file_infers_aiff_family_and_caf_from_output_extension() {
 
     for &(ext, detector) in cases {
         let output_path = unique_temp_path(ext);
-        Decoder::default()
+        DecodeHarness::default()
             .decode_file(&input_path, &output_path)
             .unwrap();
 
@@ -437,7 +444,7 @@ fn decode_file_rejects_unsupported_output_extension() {
     let output_path = unique_temp_path("raw");
     fs::write(&input_path, flac).unwrap();
 
-    let error = Decoder::default()
+    let error = DecodeHarness::default()
         .decode_file(&input_path, &output_path)
         .unwrap_err();
 
@@ -470,9 +477,10 @@ fn decode_aiff_output_projects_text_and_marker_metadata_without_fxmd() {
     );
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Aiff))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Aiff))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert!(is_aiff_bytes(&decoded));
     assert!(decoded.windows(4).any(|window| window == b"NAME"));
@@ -497,9 +505,10 @@ fn decode_caf_output_projects_info_and_marker_metadata_without_fxmd() {
     );
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let decoded = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Caf))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Caf))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert!(is_caf_bytes(&decoded));
     assert!(decoded.windows(4).any(|window| window == b"info"));
@@ -632,7 +641,7 @@ fn decode_uses_seekable_io() {
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let mut output = Cursor::new(Vec::new());
 
-    let summary = Decoder::default()
+    let summary = DecodeHarness::default()
         .decode(Cursor::new(flac), &mut output)
         .unwrap();
 
@@ -898,9 +907,10 @@ fn decode_accepts_valid_seektable_block() {
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let flac = replace_flac_optional_metadata(&flac, &[seektable_block(&[(0, 0, 2_048)])]);
 
-    let decoded = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_strict_seektable_validation(true))
+            .decode_bytes(&flac)
+            .unwrap();
 
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
@@ -922,7 +932,7 @@ fn decode_rejects_invalid_length_seektable_when_strict() {
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let flac = replace_flac_optional_metadata(&flac, &[raw_seektable_block(&[0u8; 17])]);
 
-    let error = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+    let error = DecodeHarness::new(DecodeConfig::default().with_strict_seektable_validation(true))
         .decode_bytes(&flac)
         .unwrap_err();
 
@@ -1020,7 +1030,7 @@ fn decode_rejects_non_ascending_seektable_when_strict() {
         &[seektable_block(&[(1_024, 128, 1_024), (0, 0, 1_024)])],
     );
 
-    let error = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+    let error = DecodeHarness::new(DecodeConfig::default().with_strict_seektable_validation(true))
         .decode_bytes(&flac)
         .unwrap_err();
 
@@ -1038,7 +1048,7 @@ fn decode_rejects_duplicate_seektable_sample_numbers_when_strict() {
     let flac =
         replace_flac_optional_metadata(&flac, &[seektable_block(&[(0, 0, 1_024), (0, 64, 1_024)])]);
 
-    let error = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+    let error = DecodeHarness::new(DecodeConfig::default().with_strict_seektable_validation(true))
         .decode_bytes(&flac)
         .unwrap_err();
 
@@ -1058,7 +1068,7 @@ fn decode_rejects_seektable_placeholders_not_at_end_when_strict() {
         &[seektable_block(&[(u64::MAX, 0, 0), (0, 0, 2_048)])],
     );
 
-    let error = Decoder::new(DecodeConfig::default().with_strict_seektable_validation(true))
+    let error = DecodeHarness::new(DecodeConfig::default().with_strict_seektable_validation(true))
         .decode_bytes(&flac)
         .unwrap_err();
 
@@ -1196,9 +1206,10 @@ fn rejects_invalid_waveformatextensible_channel_mask_comment() {
 fn strict_channel_mask_provenance_accepts_flacx_marked_non_ordinary_files() {
     let wav = extensible_pcm_wav_bytes(16, 16, 4, 48_000, 0x0001_2104, &sample_fixture(4, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
-    let decoded = Decoder::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
+            .decode_bytes(&flac)
+            .unwrap();
     let format = parse_wav_format(&decoded);
 
     assert_eq!(format.format_tag, 0xFFFE);
@@ -1217,9 +1228,10 @@ fn strict_channel_mask_provenance_keeps_ordinary_multichannel_fallbacks_compatib
         &sample_fixture(4, 2_048),
     );
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
-    let decoded = Decoder::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
-        .decode_bytes(&flac)
-        .unwrap();
+    let decoded =
+        DecodeHarness::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
+            .decode_bytes(&flac)
+            .unwrap();
     assert_eq!(
         parse_wav_format(&decoded).channel_mask,
         ordinary_channel_mask(4)
@@ -1245,9 +1257,10 @@ fn strict_channel_mask_provenance_rejects_unmarked_non_ordinary_masks() {
         )])],
     );
 
-    let error = Decoder::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
-        .decode_bytes(&flac)
-        .unwrap_err();
+    let error =
+        DecodeHarness::new(DecodeConfig::default().with_strict_channel_mask_provenance(true))
+            .decode_bytes(&flac)
+            .unwrap_err();
 
     assert!(
         error

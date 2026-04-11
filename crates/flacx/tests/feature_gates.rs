@@ -1,7 +1,9 @@
 #[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
-use flacx::{DecodeConfig, Decoder, PcmContainer};
+use flacx::{DecodeConfig, PcmContainer};
 
 mod support;
+#[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
+use support::TestDecoder as DecodeHarness;
 #[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
 use support::TestEncoder as Encoder;
 
@@ -39,7 +41,7 @@ fn decode_rejects_aiff_family_outputs_when_feature_is_disabled() {
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
     for container in [PcmContainer::Aiff, PcmContainer::Aifc] {
-        let error = Decoder::new(DecodeConfig::default().with_output_container(container))
+        let error = DecodeHarness::new(DecodeConfig::default().with_output_container(container))
             .decode_bytes(&flac)
             .unwrap_err();
         assert!(error.to_string().contains("`aiff` cargo feature"));
@@ -52,9 +54,10 @@ fn decode_rejects_caf_output_when_feature_is_disabled() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 256));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
 
-    let error = Decoder::new(DecodeConfig::default().with_output_container(PcmContainer::Caf))
-        .decode_bytes(&flac)
-        .unwrap_err();
+    let error =
+        DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Caf))
+            .decode_bytes(&flac)
+            .unwrap_err();
     assert!(error.to_string().contains("`caf` cargo feature"));
 }
 
@@ -68,7 +71,7 @@ fn decode_file_rejects_aiff_extensions_when_feature_is_disabled() {
 
     for ext in ["aiff", "aifc"] {
         let output_path = unique_temp_path(ext);
-        let error = Decoder::default()
+        let error = DecodeHarness::default()
             .decode_file(&input_path, &output_path)
             .unwrap_err();
         assert!(error.to_string().contains("`aiff` cargo feature"));
@@ -86,7 +89,7 @@ fn decode_file_rejects_caf_extension_when_feature_is_disabled() {
     let output_path = unique_temp_path("caf");
     std::fs::write(&input_path, flac).unwrap();
 
-    let error = Decoder::default()
+    let error = DecodeHarness::default()
         .decode_file(&input_path, &output_path)
         .unwrap_err();
     assert!(error.to_string().contains("`caf` cargo feature"));
