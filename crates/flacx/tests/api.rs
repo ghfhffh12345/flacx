@@ -132,12 +132,48 @@ fn builtin_encode_file_accepts_aiff_inputs() {
     let _ = fs::remove_file(output_path);
 }
 
+#[cfg(feature = "aiff")]
+#[test]
+fn explicit_reader_session_flow_accepts_aiff_inputs() {
+    let aiff = aiff_pcm_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
+    let via_builtin = builtin::encode_bytes(&aiff).unwrap();
+
+    let reader = read_pcm_reader(Cursor::new(&aiff)).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    let summary = encoder.encode(stream).unwrap();
+    let via_session = encoder.into_inner().into_inner();
+
+    assert_eq!(summary.total_samples, 1_024);
+    assert_eq!(via_builtin, via_session);
+}
+
 #[cfg(feature = "caf")]
 #[test]
 fn builtin_encode_bytes_accepts_caf_inputs() {
     let caf = caf_lpcm_bytes(16, 16, 2, 44_100, true, &sample_fixture(2, 1_024));
     let flac = builtin::encode_bytes(&caf).unwrap();
     assert!(flac.starts_with(b"fLaC"));
+}
+
+#[cfg(feature = "caf")]
+#[test]
+fn explicit_reader_session_flow_accepts_caf_inputs() {
+    let caf = caf_lpcm_bytes(16, 16, 2, 44_100, true, &sample_fixture(2, 1_024));
+    let via_builtin = builtin::encode_bytes(&caf).unwrap();
+
+    let reader = read_pcm_reader(Cursor::new(&caf)).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    let summary = encoder.encode(stream).unwrap();
+    let via_session = encoder.into_inner().into_inner();
+
+    assert_eq!(summary.total_samples, 1_024);
+    assert_eq!(via_builtin, via_session);
 }
 
 #[test]
