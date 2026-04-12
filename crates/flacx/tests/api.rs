@@ -14,11 +14,13 @@ use flacx::{
 
 mod support;
 
+#[cfg(all(feature = "aiff", feature = "caf"))]
+use flacx::{PcmContainer, PcmReader};
 use support::TestDecoder;
 #[cfg(feature = "aiff")]
-use support::aiff_pcm_bytes;
+use support::{aiff_pcm_bytes, is_aifc_bytes, is_aiff_bytes};
 #[cfg(feature = "caf")]
-use support::caf_lpcm_bytes;
+use support::{caf_lpcm_bytes, is_caf_bytes};
 use support::{
     parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
     wav_data_bytes,
@@ -388,6 +390,60 @@ fn raw_api_rejects_missing_multichannel_channel_mask() {
     };
     let error = inspect_raw_pcm_total_samples(Cursor::new(vec![0u8; 16]), descriptor).unwrap_err();
     assert!(error.to_string().contains("channel mask"));
+}
+
+#[cfg(all(feature = "aiff", feature = "caf"))]
+#[test]
+fn read_pcm_reader_dispatches_family_peers_without_wav_bias() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 64));
+    let aiff = aiff_pcm_bytes(16, 1, 44_100, &sample_fixture(1, 64));
+    let caf = caf_lpcm_bytes(16, 16, 1, 44_100, true, &sample_fixture(1, 64));
+
+    let wav_reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
+    let aiff_reader = read_pcm_reader(Cursor::new(&aiff)).unwrap();
+    let caf_reader = read_pcm_reader(Cursor::new(&caf)).unwrap();
+
+    assert!(matches!(wav_reader, PcmReader::Wav(_)));
+    assert!(matches!(aiff_reader, PcmReader::Aiff(_)));
+    assert!(matches!(caf_reader, PcmReader::Caf(_)));
+}
+
+#[cfg(all(feature = "aiff", feature = "caf"))]
+#[test]
+fn explicit_decode_sessions_can_emit_peer_family_outputs() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+    let cases: &[(PcmContainer, fn(&[u8]) -> bool, &str)] = &[
+        (PcmContainer::Aiff, is_aiff_bytes, "aiff"),
+        (PcmContainer::Aifc, is_aifc_bytes, "aifc"),
+        (PcmContainer::Caf, is_caf_bytes, "caf"),
+    ];
+
+    for &(container, detector, label) in cases {
+        let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+        let metadata = reader.metadata().clone();
+        let stream = reader.into_pcm_stream();
+        let mut decoder = flacx::DecodeConfig::default()
+            .with_output_container(container)
+            .into_decoder(Cursor::new(Vec::new()));
+        decoder.set_metadata(metadata);
+        let summary = decoder.decode(stream).unwrap();
+        let decoded = decoder.into_inner().into_inner();
+
+        assert_eq!(
+            summary.total_samples, 1_024,
+            "unexpected summary for {label}"
+        );
+        assert!(detector(&decoded), "unexpected output family for {label}");
+
+        let reencoded = builtin::encode_bytes(&decoded).unwrap();
+        let round_tripped = builtin::decode_bytes(&reencoded).unwrap();
+        assert_eq!(
+            wav_data_bytes(&round_tripped),
+            wav_data_bytes(&wav),
+            "explicit decode session changed audio bytes for {label}"
+        );
+    }
 }
 
 #[derive(Clone)]
