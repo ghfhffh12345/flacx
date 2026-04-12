@@ -174,6 +174,10 @@ required secret setup, and manual recovery notes.
 - [`docs/flacx-public-api-architecture.md`](docs/flacx-public-api-architecture.md) —
   expanded maintainer-oriented guide to the current public surface and source
   structure
+- [`docs/flacx-ground-up-ownership-map.md`](docs/flacx-ground-up-ownership-map.md) —
+  same-crate ownership map for the encode/decode spine and family boundaries
+- [`docs/flacx-family-parity.md`](docs/flacx-family-parity.md) —
+  review audit for WAV/AIFF/CAF parity and remaining naming caveats
 - [`docs/flacx-major-refactor-review.md`](docs/flacx-major-refactor-review.md) —
   maintainer guide for the explicit-core / convenience-layer refactor
 - [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) — CLI user guide

@@ -156,22 +156,25 @@ which files anchor the public story instead of documenting every helper module.
 ## Interface map: outside-in view
 
 ```text
-supported PCM container / raw PCM / FLAC
+supported PCM container family / raw PCM / FLAC
                 │
                 ▼
-      public config + builders
+   family readers / FLAC reader
+                │
+                ▼
+     spec + metadata handoff
+                │
+                ▼
+        typed PCM boundary
                 │
                 ▼
   Encoder / Decoder / Recompressor
       │             │            │
       │             │            └─ FLAC reader -> recompress source -> writer-owning session
       │             │
-      │             └─ decode output + container writers
+      │             └─ decode output + family writers
       │
       └─ PCM ingest dispatch + encode pipeline
-                │
-                ▼
-        typed PCM boundary
                 │
                 ▼
  builtin helpers (`builtin::*`) route into the same core
@@ -245,5 +248,7 @@ If one of those changes, the other two should be checked for drift.
 
 - [`crates/flacx/src/lib.rs`](src/lib.rs) — crate rustdoc source
 - [`docs/flacx-public-api-architecture.md`](../../docs/flacx-public-api-architecture.md) — expanded architecture guide
+- [`docs/flacx-ground-up-ownership-map.md`](../../docs/flacx-ground-up-ownership-map.md) — same-crate ownership map and review cues
+- [`docs/flacx-family-parity.md`](../../docs/flacx-family-parity.md) — WAV/AIFF/CAF parity audit
 - [`../../README.md`](../../README.md) — workspace overview
 - [`../../docs/flacx-major-refactor-review.md`](../../docs/flacx-major-refactor-review.md) — refactor review and maintainer checklist
