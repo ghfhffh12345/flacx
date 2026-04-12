@@ -139,8 +139,12 @@ where
             config.flac_reader_options(),
         )?;
         let temp_writer = BufWriter::with_capacity(FILE_WRITE_BUFFER_CAPACITY, temp_file);
-        let (mut temp_writer, summary) =
-            recompress_reader_session_with_config_and_progress(config, reader, temp_writer, progress)?;
+        let (mut temp_writer, summary) = recompress_reader_session_with_config_and_progress(
+            config,
+            reader,
+            temp_writer,
+            progress,
+        )?;
         temp_writer.flush()?;
         Ok(summary)
     })();

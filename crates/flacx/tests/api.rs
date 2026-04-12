@@ -115,8 +115,16 @@ fn builtin_convenience_no_longer_uses_legacy_helpers() {
     assert!(!source.contains("decode_flac_to_pcm_with_config"));
     assert!(!source.contains("can_use_wav_family_encode_fastpath"));
     assert!(source.contains("fn recompress_reader_session_with_config_and_progress"));
-    assert_eq!(source.matches("FlacRecompressSource::from_reader").count(), 1);
-    assert_eq!(source.matches("recompress_with_sink(source, progress)").count(), 1);
+    assert_eq!(
+        source.matches("FlacRecompressSource::from_reader").count(),
+        1
+    );
+    assert_eq!(
+        source
+            .matches("recompress_with_sink(source, progress)")
+            .count(),
+        1
+    );
 }
 
 #[cfg(feature = "aiff")]
