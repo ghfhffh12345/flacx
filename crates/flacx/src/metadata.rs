@@ -122,8 +122,13 @@ impl EncodeMetadata {
     }
 }
 
+/// Decode-side metadata recovered from FLAC and staged for container writers.
+///
+/// The shared decode substrate uses this family-neutral model to preserve the
+/// `Reader -> spec/metadata -> PCM stream -> writer` handoff without making a
+/// specific container family the conceptual center.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct WavMetadata {
+pub struct DecodeMetadata {
     preserved: PreservedMetadataBundle,
     vorbis_comment: Option<VorbisCommentBlock>,
     cuesheet: Option<CueSheetBlock>,
@@ -133,7 +138,7 @@ pub struct WavMetadata {
     channel_layout_provenance: bool,
 }
 
-impl WavMetadata {
+impl DecodeMetadata {
     pub(crate) fn is_empty(&self) -> bool {
         self.preserved.is_empty()
             && self.vorbis_comment.is_none()
@@ -265,6 +270,13 @@ impl WavMetadata {
         self.cue_points = cue_points_from_cuesheet_payload(payload, total_samples);
     }
 }
+
+/// Backward-compatible alias for the historical decode metadata name.
+///
+/// The shared architecture now centers the neutral [`DecodeMetadata`] name, but
+/// this alias remains available so container-family modules and downstream code
+/// can migrate incrementally.
+pub type WavMetadata = DecodeMetadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SeekPoint {

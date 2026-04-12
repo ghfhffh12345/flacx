@@ -10,7 +10,7 @@ use crate::{
     config::{DecodeBuilder, DecodeConfig},
     decode_output::decode_stream_to_container,
     error::Result,
-    metadata::WavMetadata,
+    metadata::DecodeMetadata,
     progress::{NoProgress, ProgressSink},
     read::DecodePcmStream,
 };
@@ -50,7 +50,7 @@ pub struct DecodeSummary {
 pub struct Decoder<W> {
     config: DecodeConfig,
     writer: W,
-    metadata: WavMetadata,
+    metadata: DecodeMetadata,
 }
 
 impl DecodeConfig {
@@ -89,7 +89,7 @@ where
         Self {
             config,
             writer,
-            metadata: WavMetadata::default(),
+            metadata: DecodeMetadata::default(),
         }
     }
 
@@ -101,18 +101,18 @@ where
 
     /// Return the metadata currently staged onto the decode session.
     #[must_use]
-    pub fn metadata(&self) -> &WavMetadata {
+    pub fn metadata(&self) -> &DecodeMetadata {
         &self.metadata
     }
 
     /// Replace the staged decode metadata.
-    pub fn set_metadata(&mut self, metadata: WavMetadata) {
+    pub fn set_metadata(&mut self, metadata: DecodeMetadata) {
         self.metadata = metadata;
     }
 
     /// Return a new session with different staged metadata.
     #[must_use]
-    pub fn with_metadata(mut self, metadata: WavMetadata) -> Self {
+    pub fn with_metadata(mut self, metadata: DecodeMetadata) -> Self {
         self.metadata = metadata;
         self
     }

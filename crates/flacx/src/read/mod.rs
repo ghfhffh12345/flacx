@@ -11,7 +11,7 @@ use crate::{
     config::DecodeConfig,
     error::{Error, Result},
     input::{EncodePcmStream, WavSpec},
-    metadata::WavMetadata,
+    metadata::DecodeMetadata,
     model::ChannelAssignment,
     progress::NoProgress,
     stream_info::StreamInfo,
@@ -101,7 +101,7 @@ pub struct FlacReader<R> {
     reader: R,
     frame_offset: u64,
     stream_info: StreamInfo,
-    metadata: WavMetadata,
+    metadata: DecodeMetadata,
     spec: WavSpec,
 }
 
@@ -116,7 +116,7 @@ impl<R: Read + Seek> FlacReader<R> {
     }
 
     #[must_use]
-    pub fn metadata(&self) -> &WavMetadata {
+    pub fn metadata(&self) -> &DecodeMetadata {
         &self.metadata
     }
 
@@ -397,7 +397,7 @@ fn validate_stream_info(stream_info: StreamInfo) -> Result<()> {
 
 fn spec_from_stream_info(
     stream_info: StreamInfo,
-    metadata: &WavMetadata,
+    metadata: &DecodeMetadata,
     strict_channel_mask_provenance: bool,
 ) -> Result<WavSpec> {
     let channel_mask = resolve_channel_mask(
