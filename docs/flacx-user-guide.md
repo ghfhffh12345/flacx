@@ -53,6 +53,7 @@ A practical rule of thumb:
 
 - use `builtin::*` for quick one-shot conversions
 - use reader -> spec/metadata -> stream -> session when you need explicit control
+- for recompress specifically, prefer `read_flac_reader(...) -> FlacRecompressSource::from_reader(...) -> RecompressConfig::into_recompressor(...)`
 - use `DecodeConfig::into_decoder(...)` or `RecompressConfig::into_recompressor(...)` when you need reusable decode/recompress sessions
 
 ## Encode PCM containers to FLAC
@@ -378,7 +379,9 @@ recompressor.recompress_with_progress(source, |progress: RecompressProgress| {
 ## Recompress existing FLAC files
 
 Use recompression when the input is already FLAC and you want a new FLAC output
-with different settings.
+with different settings. The builtin helpers remain thin wrappers, but the
+explicit recompress story is intentionally the inspect-first reader/session
+path.
 
 ```rust
 use flacx::{
