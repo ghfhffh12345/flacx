@@ -160,9 +160,41 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text)
 
 
+def extract_test_names(api_test: Path) -> list[str]:
+    names: list[str] = []
+    for line in api_test.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("fn ") and stripped.endswith("() {"):
+            names.append(stripped[3:-4])
+    return names
+
+
 def export_api_report(repo_root: Path, out_path: Path) -> None:
     lib_rs = repo_root / "crates" / "flacx" / "src" / "lib.rs"
     api_test = repo_root / "crates" / "flacx" / "tests" / "api.rs"
+    lib_lines = lib_rs.read_text().splitlines()
+    test_names = extract_test_names(api_test)
+    architecture_sentinels = [
+        name
+        for name in test_names
+        if any(
+            marker in name
+            for marker in (
+                "reader_session_flow",
+                "decode_api_accepts",
+                "recompress",
+                "aiff",
+                "caf",
+                "builtin_convenience_no_longer_uses_legacy_helpers",
+            )
+        )
+    ]
+    family_exports = [
+        stripped
+        for line in lib_lines
+        if (stripped := line.strip()).startswith("pub use ")
+        and any(token in stripped for token in ("WavReader", "AiffReader", "CafReader"))
+    ]
     lines = [
         "# Public API Export Audit",
         "",
@@ -172,10 +204,29 @@ def export_api_report(repo_root: Path, out_path: Path) -> None:
         "## Public re-exports in lib.rs",
         "",
     ]
-    for line in lib_rs.read_text().splitlines():
+    for line in lib_lines:
         stripped = line.strip()
         if stripped.startswith("pub use ") or stripped.startswith("pub mod "):
             lines.append(f"- `{stripped}`")
+    lines.extend([
+        "",
+        "## Architecture invariants tied to the v0.8.2 compare",
+        "",
+        "- Encode/decode stay primary when the public root still exposes the explicit reader/session flow (`read_pcm_reader`, `FlacReader`, `Encoder`, `Decoder`).",
+        "- Builtin remains subordinate when it stays isolated behind `pub mod builtin` rather than replacing the explicit core exports.",
+        "- Recompress remains an adapter lane when it is reported beside, not above, the encode/decode façade exports.",
+        "- WAV, AIFF, and CAF stay peer container families when their family readers remain exported side-by-side:",
+        "",
+    ])
+    for export in family_exports:
+        lines.append(f"  - `{export}`")
+    lines.extend([
+        "",
+        "## API sentinel coverage for the architecture contract",
+        "",
+    ])
+    for name in architecture_sentinels:
+        lines.append(f"- `{name}`")
     lines.extend([
         "",
         "## API sentinel coverage hints",

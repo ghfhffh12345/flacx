@@ -27,7 +27,7 @@
 //! │  │  ├─ read_pcm_reader / write_pcm_stream
 //! │  │  └─ inspect_pcm_total_samples / inspect_raw_pcm_total_samples
 //! │  └─ support surfaces
-//! │     ├─ EncodeMetadata / RawPcmDescriptor / RawPcmByteOrder
+//! │     ├─ EncodeMetadata / DecodeMetadata / RawPcmDescriptor / RawPcmByteOrder
 //! │     └─ level
 //! ├─ inspectors
 //! │  ├─ inspect_wav_total_samples
@@ -167,8 +167,7 @@ pub use input::{
     PcmStream, inspect_wav_total_samples as inspect_pcm_total_samples, read_pcm_reader,
     read_pcm_reader_with_options,
 };
-pub use metadata::EncodeMetadata;
-pub use metadata::WavMetadata as DecodeMetadata;
+pub use metadata::{DecodeMetadata, EncodeMetadata, WavMetadata};
 pub use pcm::PcmContainer;
 pub use raw::{
     RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream, inspect_raw_pcm_total_samples,
