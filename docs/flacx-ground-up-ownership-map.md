@@ -98,6 +98,26 @@ Use these cues when reviewing follow-up changes:
 3. Does a family-specific behavior stay in a family module instead of leaking into shared substrate code?
 4. Does recompress consume the spine, or is it trying to define new shared abstractions for itself?
 
+## Recompress follow-up audit companion
+
+When a recompress-specific refactor is in flight, pair this document with the
+generated audit artifacts:
+
+```bash
+python3 scripts/recompress_evidence.py \
+  --baseline-worktree .omx/worktrees/v0.8.2 \
+  --out-dir .omx/reports
+```
+
+That command refreshes:
+
+- `.omx/reports/architecture/recompress-ownership-map.md`
+- `.omx/reports/recompress-benchmark-compare/recompress-logic-refactor.md`
+- `.omx/reports/recompress-corpus-diff/recompress-logic-refactor.json`
+
+Use those artifacts to keep the recompress ownership split, byte-level
+recompression diff, and v0.8.2 authority prep visible during review.
+
 ## Open review notes
 
 - Public naming still carries one legacy WAV-first seam:

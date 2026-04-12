@@ -7,7 +7,8 @@ use std::{
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use flacx::{
-    DecodeConfig, EncoderConfig, FlacReaderOptions, PcmReaderOptions,
+    DecodeConfig, EncoderConfig, FlacReaderOptions, FlacRecompressSource, PcmReaderOptions,
+    RecompressConfig, RecompressMode,
     read_flac_reader_with_options, read_pcm_reader_with_options,
 };
 
@@ -62,7 +63,26 @@ fn decode_corpus_throughput(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, encode_corpus_throughput, decode_corpus_throughput);
+fn recompress_corpus_throughput(c: &mut Criterion) {
+    let corpus = BenchmarkCorpus::generate().expect("benchmark corpus");
+    let total_bytes = corpus.total_input_bytes();
+    let threads = shared_thread_count();
+
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(total_bytes));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("recompress_corpus_throughput", |b| {
+        b.iter(|| run_recompress_corpus(&corpus, threads).expect("recompress corpus"))
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    encode_corpus_throughput,
+    decode_corpus_throughput,
+    recompress_corpus_throughput
+);
 criterion_main!(benches);
 
 struct CorpusFixture {
@@ -174,6 +194,28 @@ fn run_decode_corpus(
     })
 }
 
+fn run_recompress_corpus(
+    corpus: &BenchmarkCorpus,
+    threads: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = RecompressConfig::default().with_threads(threads);
+    with_temp_dir("flacx-library-bench-recompress", |output_root| {
+        for input in &corpus.flac_inputs {
+            let output = output_root
+                .join(input.file_stem().expect("fixture file stem"))
+                .with_extension("flac");
+            let reader = read_flac_reader_with_options(
+                File::open(input)?,
+                recompress_reader_options(config),
+            )?;
+            let source = FlacRecompressSource::from_reader(reader);
+            let mut recompressor = config.into_recompressor(File::create(&output)?);
+            recompressor.recompress(source)?;
+        }
+        Ok(())
+    })
+}
+
 fn with_temp_dir<T>(
     label: &str,
     f: impl FnOnce(&Path) -> Result<T, Box<dyn std::error::Error>>,
@@ -213,12 +255,30 @@ fn encode_fixture_file(
     Ok(())
 }
 
+fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {
+    match config.mode() {
+        RecompressMode::Loose | RecompressMode::Default => FlacReaderOptions {
+            strict_seektable_validation: false,
+            strict_channel_mask_provenance: false,
+        },
+        RecompressMode::Strict => FlacReaderOptions {
+            strict_seektable_validation: true,
+            strict_channel_mask_provenance: true,
+        },
+    }
+}
+
 fn shared_thread_count() -> usize {
     let encode_threads = EncoderConfig::default().threads.max(1);
     let decode_threads = DecodeConfig::default().threads.max(1);
+    let recompress_threads = RecompressConfig::default().threads().max(1);
     assert_eq!(
         encode_threads, decode_threads,
         "default encode/decode thread counts diverged"
+    );
+    assert_eq!(
+        encode_threads, recompress_threads,
+        "default encode/recompress thread counts diverged"
     );
     encode_threads
 }

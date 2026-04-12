@@ -212,6 +212,10 @@ Useful checks when updating these docs:
 cargo check -p flacx
 cargo test -p flacx --test api --test decode
 cargo test --workspace
+cargo bench -p flacx --bench throughput -- --noplot
+python3 scripts/recompress_evidence.py \
+  --baseline-worktree .omx/worktrees/v0.8.2 \
+  --out-dir .omx/reports
 find crates/flacx/src -maxdepth 2 -type f | sort
 rg -n "core|convenience|architecture|flacx-public-api-architecture" \
   crates/flacx/src/lib.rs crates/flacx/README.md README.md docs/flacx-public-api-architecture.md
