@@ -1,8 +1,10 @@
 use std::{
+    env,
     fs::{self, File, OpenOptions},
     io::{Seek, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
 };
 
 use crate::{
@@ -13,7 +15,10 @@ use crate::{
     progress::{ProgressSink, ProgressSnapshot},
     read::DecodePcmStream,
     stream_info::StreamInfo,
-    wav_output::{StreamingPcmWriter, WavMetadataWriteOptions, ensure_output_container_enabled},
+    wav_output::{
+        StreamingPcmWriter, WavMetadataWriteOptions, ensure_output_container_enabled,
+        write_wav_with_metadata_and_md5_with_options,
+    },
 };
 
 static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -32,8 +37,40 @@ where
 {
     ensure_output_container_enabled(config.output_container)?;
     let spec = stream.spec();
-    let total_frames = stream.total_input_frames();
     let source_info = stream.stream_info();
+    let profile_path = env::var_os("FLACX_DECODE_PROFILE").map(PathBuf::from);
+    if let Some((samples, frame_count)) = stream.take_decoded_samples()? {
+        let write_start = Instant::now();
+        let streaminfo_md5 = write_wav_with_metadata_and_md5_with_options(
+            output,
+            spec,
+            &samples,
+            &metadata,
+            WavMetadataWriteOptions {
+                emit_fxmd: config.emit_fxmd,
+                container: config.output_container,
+            },
+        )?;
+        if let Some(path) = profile_path {
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(
+                    file,
+                    "event=decode_phase\tphase=write_wav\telapsed_seconds={:.9}",
+                    write_start.elapsed().as_secs_f64()
+                );
+            }
+        }
+        progress.on_frame(ProgressSnapshot {
+            processed_samples: spec.total_samples,
+            total_samples: spec.total_samples,
+            completed_frames: frame_count,
+            total_frames: frame_count,
+        })?;
+        verify_streaminfo_digest(streaminfo_md5, source_info.md5)?;
+        return Ok(summary_from_stream_info(source_info, frame_count));
+    }
+
+    let total_frames = stream.total_input_frames();
     let mut streaminfo_md5 = StreaminfoMd5::new(spec);
     let mut writer = StreamingPcmWriter::new(
         output,
@@ -47,7 +84,10 @@ where
 
     let mut processed_samples = 0u64;
     let mut chunk = Vec::new();
-    let chunk_frames = spec.total_samples.min(131_072) as usize;
+    let chunk_frames = usize::try_from(spec.total_samples)
+        .ok()
+        .filter(|frames| *frames > 0)
+        .unwrap_or(usize::from(source_info.max_block_size.max(1)).saturating_mul(256));
     loop {
         chunk.clear();
         let frames = stream.read_chunk(chunk_frames, &mut chunk)?;
