@@ -1,0 +1,78 @@
+use std::io::{Read, Seek};
+
+use crate::{
+    EncodeMetadata,
+    error::Result,
+    input::{EncodePcmStream, WavSpec},
+    read::FlacReader,
+};
+
+use super::verify::VerifyingPcmStream;
+
+/// Reader-to-session handoff for explicit FLAC recompression.
+pub struct FlacRecompressSource<R> {
+    metadata: EncodeMetadata,
+    total_samples: u64,
+    stream: VerifyingPcmStream<R>,
+}
+
+impl<R: Read + Seek> FlacRecompressSource<R> {
+    /// Convert an inspected [`FlacReader`] into the single-pass recompress source.
+    #[must_use]
+    pub fn from_reader(reader: FlacReader<R>) -> Self {
+        let metadata = reader.metadata().clone().into_encode_metadata();
+        let total_samples = reader.spec().total_samples;
+        let stream_info = reader.stream_info();
+        let stream = VerifyingPcmStream::new(reader.into_pcm_stream(), stream_info.md5);
+        Self {
+            metadata,
+            total_samples,
+            stream,
+        }
+    }
+
+    /// Return the PCM spec that will be fed into the recompress session.
+    #[must_use]
+    pub fn spec(&self) -> WavSpec {
+        self.stream.spec()
+    }
+
+    /// Return the staged encode metadata that will be preserved on recompress.
+    #[must_use]
+    pub fn metadata(&self) -> &EncodeMetadata {
+        &self.metadata
+    }
+
+    /// Replace the staged metadata before recompression begins.
+    pub fn set_metadata(&mut self, metadata: EncodeMetadata) {
+        self.metadata = metadata;
+    }
+
+    /// Return a new source with different staged metadata.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: EncodeMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Return the total sample count recorded on the input FLAC stream.
+    #[must_use]
+    pub fn total_samples(&self) -> u64 {
+        self.total_samples
+    }
+
+    /// Set the worker-thread count used by the decode-side FLAC reader stream.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.stream.set_threads(threads);
+    }
+}
+
+impl<R: Read + Seek> EncodePcmStream for FlacRecompressSource<R> {
+    fn spec(&self) -> WavSpec {
+        self.stream.spec()
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        self.stream.read_chunk(max_frames, output)
+    }
+}
