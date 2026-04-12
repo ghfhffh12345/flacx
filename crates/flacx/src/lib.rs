@@ -63,7 +63,13 @@
 //! ├─ convenience.rs         # implementation backing the public `builtin` module
 //! ├─ encoder.rs             # encode façade
 //! ├─ decode.rs              # decode façade
-//! ├─ recompress.rs          # explicit FLAC→FLAC reader/session primitives
+//! ├─ recompress/
+//! │  ├─ mod.rs              # public recompress surface + exports
+//! │  ├─ config.rs           # recompress policy + builder
+//! │  ├─ source.rs           # reader-to-session handoff
+//! │  ├─ session.rs          # writer-owning recompress execution
+//! │  ├─ progress.rs         # recompress progress types/adapters
+//! │  └─ verify.rs           # recompress MD5 verification glue
 //! ├─ pcm.rs                 # typed PCM values shared with decode/write-side APIs
 //! ├─ input.rs               # encode-side reader/stream contracts + dispatch
 //! ├─ wav_input.rs           # WAV/RF64/Wave64 reader family
