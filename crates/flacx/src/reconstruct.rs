@@ -185,6 +185,17 @@ fn interleave_independent(expected_channels: usize, channels: &[Vec<i32>]) -> Re
         ));
     }
 
+    if expected_channels == 2 {
+        let left = &channels[0];
+        let right = &channels[1];
+        let mut interleaved = Vec::with_capacity(first.len() * 2);
+        for (&left_sample, &right_sample) in left.iter().zip(right) {
+            interleaved.push(left_sample);
+            interleaved.push(right_sample);
+        }
+        return Ok(interleaved);
+    }
+
     let mut interleaved = Vec::with_capacity(first.len() * expected_channels);
     for frame_index in 0..first.len() {
         for channel in channels {

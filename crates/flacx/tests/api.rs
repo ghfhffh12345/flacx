@@ -15,6 +15,10 @@ use flacx::{
 mod support;
 
 use support::TestDecoder;
+#[cfg(feature = "aiff")]
+use support::aiff_pcm_bytes;
+#[cfg(feature = "caf")]
+use support::caf_lpcm_bytes;
 use support::{
     parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
     wav_data_bytes,
@@ -99,6 +103,39 @@ fn builtin_encode_file_matches_explicit_reader_session_output() {
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn builtin_convenience_no_longer_uses_legacy_helpers() {
+    let source = include_str!("../src/convenience.rs");
+    assert!(!source.contains("read_wav_for_encode_with_config"));
+    assert!(!source.contains("encode_buffered_input_with_sink"));
+    assert!(!source.contains("decode_flac_to_pcm_with_config"));
+    assert!(!source.contains("can_use_wav_family_encode_fastpath"));
+}
+
+#[cfg(feature = "aiff")]
+#[test]
+fn builtin_encode_file_accepts_aiff_inputs() {
+    let aiff = aiff_pcm_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
+    let input_path = unique_temp_path("aiff");
+    let output_path = unique_temp_path("flac");
+    fs::write(&input_path, &aiff).unwrap();
+
+    let summary = builtin::encode_file(&input_path, &output_path).unwrap();
+    assert_eq!(summary.total_samples, 1_024);
+    assert!(output_path.exists());
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[cfg(feature = "caf")]
+#[test]
+fn builtin_encode_bytes_accepts_caf_inputs() {
+    let caf = caf_lpcm_bytes(16, 16, 2, 44_100, true, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&caf).unwrap();
+    assert!(flac.starts_with(b"fLaC"));
 }
 
 #[test]
@@ -192,6 +229,33 @@ fn explicit_recompress_reader_session_flow_preserves_audio() {
     assert_eq!(summary.block_size, 576);
     assert_eq!(summary.total_samples, 1_536);
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+}
+
+#[test]
+fn builtin_recompress_file_matches_explicit_reader_session_output() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_536));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+    let input_path = unique_temp_path("flac");
+    let output_path = unique_temp_path("flac");
+    fs::write(&input_path, &flac).unwrap();
+
+    let builtin_summary = builtin::recompress_file(&input_path, &output_path).unwrap();
+    let builtin_bytes = fs::read(&output_path).unwrap();
+
+    let config = RecompressConfig::default();
+    let reader =
+        read_flac_reader_with_options(Cursor::new(flac), recompress_reader_options(config))
+            .unwrap();
+    let source = FlacRecompressSource::from_reader(reader);
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+    let explicit_summary = recompressor.recompress(source).unwrap();
+    let explicit_bytes = recompressor.into_inner().into_inner();
+
+    assert_eq!(builtin_summary, explicit_summary);
+    assert_eq!(builtin_bytes, explicit_bytes);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
 }
 
 #[test]

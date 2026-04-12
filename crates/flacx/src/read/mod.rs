@@ -1,10 +1,19 @@
-use std::io::{Read, Seek};
+use std::{
+    env,
+    fs::OpenOptions,
+    io::Write as _,
+    io::{Read, Seek},
+    sync::Arc,
+    time::Instant,
+};
 
 use crate::{
+    config::DecodeConfig,
     error::{Error, Result},
     input::{EncodePcmStream, WavSpec},
     metadata::WavMetadata,
     model::ChannelAssignment,
+    progress::NoProgress,
     stream_info::StreamInfo,
 };
 
@@ -12,7 +21,8 @@ const FLAC_MAGIC: &[u8; 4] = b"fLaC";
 const STREAMINFO_BLOCK_TYPE: u8 = 0;
 const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 #[allow(dead_code)]
-const FRAME_CHUNK_SIZE: usize = 32;
+const FRAME_CHUNK_SIZE: usize = 128;
+const FLAC_READ_CHUNK_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameHeaderNumberKind {
@@ -31,14 +41,17 @@ struct FrameHeaderNumber {
 struct FrameIndex {
     header_number: FrameHeaderNumber,
     offset: usize,
+    header_bytes_consumed: usize,
     bytes_consumed: usize,
     block_size: u16,
+    bits_per_sample: u8,
+    assignment: ChannelAssignment,
 }
 
 #[allow(dead_code)]
-struct FrameResult {
-    frame_index: usize,
-    result: Result<Vec<i32>>,
+struct FrameChunkResult {
+    start_index: usize,
+    decoded_frames: Vec<Result<Vec<i32>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +60,7 @@ struct ParsedFrame {
     block_size: u16,
     bits_per_sample: u8,
     assignment: ChannelAssignment,
+    header_bytes_consumed: usize,
     bytes_consumed: usize,
 }
 
@@ -77,6 +91,9 @@ pub trait DecodePcmStream: EncodePcmStream {
     fn completed_input_frames(&self) -> usize;
     fn stream_info(&self) -> StreamInfo;
     fn set_threads(&mut self, _threads: usize) {}
+    fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug)]
@@ -149,7 +166,7 @@ impl<R> FlacPcmStream<R> {
 }
 
 impl<R: Read + Seek> FlacPcmStream<R> {
-    fn read_next_frame_bytes(&mut self) -> Result<Option<(FrameHeaderNumber, u16, Vec<u8>)>> {
+    fn read_next_frame_bytes(&mut self) -> Result<Option<(ParsedFrame, Vec<u8>)>> {
         loop {
             match frame::scan_frame(
                 &self.pending_bytes,
@@ -162,7 +179,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
                         .pending_bytes
                         .drain(..parsed.bytes_consumed)
                         .collect::<Vec<_>>();
-                    return Ok(Some((parsed.header_number, parsed.block_size, bytes)));
+                    return Ok(Some((parsed, bytes)));
                 }
                 Err(Error::InvalidFlac("unexpected EOF while reading frames")) if !self.eof => {}
                 Err(Error::Io(error))
@@ -170,7 +187,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
                 Err(error) => return Err(error),
             }
 
-            let mut chunk = [0u8; 8192];
+            let mut chunk = [0u8; FLAC_READ_CHUNK_SIZE];
             let read = self.reader.read(&mut chunk)?;
             if read == 0 {
                 self.eof = true;
@@ -195,22 +212,47 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
         }
 
         let mut total_pcm_frames = 0usize;
+        let mut batch_bytes = Vec::new();
+        let mut frames = Vec::new();
         while total_pcm_frames < max_frames && self.next_sample_number < self.spec.total_samples {
-            let Some((header_number, block_size, frame_bytes)) = self.read_next_frame_bytes()?
-            else {
+            let Some((parsed, frame_bytes)) = self.read_next_frame_bytes()? else {
                 break;
             };
+            let block_size = parsed.block_size;
             if total_pcm_frames > 0 && total_pcm_frames + usize::from(block_size) > max_frames {
                 self.pending_bytes.splice(0..0, frame_bytes);
                 break;
             }
-            let decoded =
-                frame::decode_frame_samples(&frame_bytes, self.stream_info, header_number)?;
-            output.extend(decoded);
+
+            let offset = batch_bytes.len();
+            batch_bytes.extend_from_slice(&frame_bytes);
+            frames.push(FrameIndex {
+                header_number: parsed.header_number,
+                offset,
+                header_bytes_consumed: parsed.header_bytes_consumed,
+                bytes_consumed: frame_bytes.len(),
+                block_size,
+                bits_per_sample: parsed.bits_per_sample,
+                assignment: parsed.assignment,
+            });
             total_pcm_frames += usize::from(block_size);
             self.next_frame_index += 1;
             self.next_sample_number += u64::from(block_size);
         }
+
+        if frames.is_empty() {
+            return Ok(0);
+        }
+
+        let mut progress = NoProgress;
+        frame::decode_frames_parallel(
+            Arc::from(batch_bytes),
+            Arc::from(frames),
+            self.stream_info,
+            DecodeConfig::default().with_threads(self.threads),
+            &mut progress,
+            output,
+        )?;
         Ok(total_pcm_frames)
     }
 }
@@ -230,6 +272,79 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
 
     fn set_threads(&mut self, threads: usize) {
         self.threads = threads.max(1);
+    }
+
+    fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
+        if self.next_frame_index != 0 || !self.pending_bytes.is_empty() {
+            return Ok(None);
+        }
+
+        let profile_path = env::var_os("FLACX_DECODE_PROFILE").map(std::path::PathBuf::from);
+        let profile_start = Instant::now();
+        let mut bytes = Vec::new();
+        let read_start = Instant::now();
+        self.reader.read_to_end(&mut bytes)?;
+        let read_elapsed = read_start.elapsed();
+        self.eof = true;
+        if bytes.is_empty() {
+            if let Some(path) = profile_path {
+                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = writeln!(
+                        file,
+                        "event=decode_phase\tphase=read_to_end\telapsed_seconds={:.9}",
+                        read_elapsed.as_secs_f64()
+                    );
+                }
+            }
+            return Ok(Some((Vec::new(), 0)));
+        }
+
+        let index_start = Instant::now();
+        let frames = frame::index_frames(&bytes, 0, self.stream_info)?;
+        let index_elapsed = index_start.elapsed();
+        let frame_count = frames.len();
+        let total_output_samples = usize::try_from(self.spec.total_samples)
+            .unwrap_or(0)
+            .saturating_mul(usize::from(self.spec.channels));
+        let mut samples = Vec::with_capacity(total_output_samples);
+        let mut progress = NoProgress;
+        let decode_start = Instant::now();
+        frame::decode_frames_parallel(
+            Arc::from(bytes),
+            Arc::from(frames),
+            self.stream_info,
+            DecodeConfig::default().with_threads(self.threads),
+            &mut progress,
+            &mut samples,
+        )?;
+        let decode_elapsed = decode_start.elapsed();
+        if let Some(path) = profile_path {
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(
+                    file,
+                    "event=decode_phase\tphase=read_to_end\telapsed_seconds={:.9}",
+                    read_elapsed.as_secs_f64()
+                );
+                let _ = writeln!(
+                    file,
+                    "event=decode_phase\tphase=index_frames\telapsed_seconds={:.9}",
+                    index_elapsed.as_secs_f64()
+                );
+                let _ = writeln!(
+                    file,
+                    "event=decode_phase\tphase=decode_frames_parallel\telapsed_seconds={:.9}",
+                    decode_elapsed.as_secs_f64()
+                );
+                let _ = writeln!(
+                    file,
+                    "event=decode_phase\tphase=total_take_decoded_samples\telapsed_seconds={:.9}",
+                    profile_start.elapsed().as_secs_f64()
+                );
+            }
+        }
+        self.next_frame_index = frame_count;
+        self.next_sample_number = self.spec.total_samples;
+        Ok(Some((samples, frame_count)))
     }
 }
 

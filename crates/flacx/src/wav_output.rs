@@ -29,6 +29,7 @@ const W64_RIFF_GUID: [u8; 16] = [
 const W64_CHUNK_GUID_SUFFIX: [u8; 12] = [
     0xF3, 0xAC, 0xD3, 0x11, 0x8C, 0xD1, 0x00, 0xC0, 0x4F, 0x8E, 0xDB, 0x8A,
 ];
+const RIFF_STREAM_BUFFER_CAPACITY: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WavMetadataWriteOptions {
@@ -212,7 +213,7 @@ impl<W: Write> StreamingPcmWriter<W> {
             writer,
             envelope,
             w64_padding,
-            buffer: Vec::with_capacity(64 * 1024),
+            buffer: Vec::with_capacity(RIFF_STREAM_BUFFER_CAPACITY),
         }))
     }
 
@@ -253,15 +254,16 @@ impl<W: Write> RiffStreamWriter<W> {
         samples: &[i32],
         md5: &mut crate::md5::StreaminfoMd5,
     ) -> Result<()> {
-        for &sample in samples {
-            append_encoded_sample(&mut self.buffer, sample, self.envelope)?;
-            if self.buffer.len() >= 64 * 1024 {
-                self.writer.write_all(&self.buffer)?;
-                md5.update_bytes(&self.buffer);
-                self.buffer.clear();
-            }
+        match self.envelope.container_bits_per_sample {
+            8 => self.write_8_bit_samples(samples, md5),
+            16 => self.write_16_bit_samples(samples, md5),
+            24 => self.write_24_bit_samples(samples, md5),
+            32 => self.write_32_bit_samples(samples, md5),
+            _ => Err(Error::UnsupportedWav(format!(
+                "unsupported container bits/sample for encoder: {}",
+                self.envelope.container_bits_per_sample
+            ))),
         }
-        Ok(())
     }
 
     fn finish(mut self, md5: Option<&mut crate::md5::StreaminfoMd5>) -> Result<W> {
@@ -277,6 +279,142 @@ impl<W: Write> RiffStreamWriter<W> {
         self.writer.flush()?;
         Ok(self.writer)
     }
+
+    fn write_8_bit_samples(
+        &mut self,
+        samples: &[i32],
+        md5: &mut crate::md5::StreaminfoMd5,
+    ) -> Result<()> {
+        let shift = sample_shift_bits(self.envelope)?;
+        let bias = 1i32 << (self.envelope.valid_bits_per_sample - 1);
+        for chunk in samples.chunks(RIFF_STREAM_BUFFER_CAPACITY) {
+            self.buffer.clear();
+            self.buffer.resize(chunk.len(), 0);
+            for (sample, slot) in chunk.iter().zip(self.buffer.iter_mut()) {
+                let shifted = sample
+                    .checked_shl(shift)
+                    .ok_or_else(|| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+                let value = shifted
+                    .checked_add(bias)
+                    .ok_or_else(|| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+                *slot = u8::try_from(value)
+                    .map_err(|_| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+            }
+            self.writer.write_all(&self.buffer)?;
+            md5.update_bytes(&self.buffer);
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+
+    fn write_16_bit_samples(
+        &mut self,
+        samples: &[i32],
+        md5: &mut crate::md5::StreaminfoMd5,
+    ) -> Result<()> {
+        let shift = sample_shift_bits(self.envelope)?;
+        for chunk in samples.chunks(RIFF_STREAM_BUFFER_CAPACITY / 2) {
+            self.buffer.clear();
+            self.buffer.resize(chunk.len() * 2, 0);
+            for (sample, bytes) in chunk.iter().zip(self.buffer.chunks_exact_mut(2)) {
+                let shifted = if shift == 0 {
+                    debug_assert!(
+                        (*sample >= i32::from(i16::MIN)) && (*sample <= i32::from(i16::MAX))
+                    );
+                    *sample
+                } else {
+                    sample.checked_shl(shift).ok_or_else(|| {
+                        Error::UnsupportedWav("16-bit sample is out of range".into())
+                    })?
+                };
+                let value = if shift == 0 {
+                    shifted as i16
+                } else {
+                    i16::try_from(shifted).map_err(|_| {
+                        Error::UnsupportedWav("16-bit sample is out of range".into())
+                    })?
+                };
+                bytes.copy_from_slice(&value.to_le_bytes());
+            }
+            self.writer.write_all(&self.buffer)?;
+            md5.update_bytes(&self.buffer);
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+
+    fn write_24_bit_samples(
+        &mut self,
+        samples: &[i32],
+        md5: &mut crate::md5::StreaminfoMd5,
+    ) -> Result<()> {
+        let shift = sample_shift_bits(self.envelope)?;
+        for chunk in samples.chunks(RIFF_STREAM_BUFFER_CAPACITY / 3) {
+            self.buffer.clear();
+            self.buffer.resize(chunk.len() * 3, 0);
+            for (sample, bytes) in chunk.iter().zip(self.buffer.chunks_exact_mut(3)) {
+                let shifted = if shift == 0 {
+                    debug_assert!((-8_388_608..=8_388_607).contains(sample));
+                    *sample
+                } else {
+                    sample.checked_shl(shift).ok_or_else(|| {
+                        Error::UnsupportedWav("24-bit sample is out of range".into())
+                    })?
+                };
+                if shift != 0 && !(-8_388_608..=8_388_607).contains(&shifted) {
+                    return Err(Error::UnsupportedWav(
+                        "24-bit sample is out of range".into(),
+                    ));
+                }
+                let value = shifted as u32;
+                bytes[0] = value as u8;
+                bytes[1] = (value >> 8) as u8;
+                bytes[2] = (value >> 16) as u8;
+            }
+            self.writer.write_all(&self.buffer)?;
+            md5.update_bytes(&self.buffer);
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+
+    fn write_32_bit_samples(
+        &mut self,
+        samples: &[i32],
+        md5: &mut crate::md5::StreaminfoMd5,
+    ) -> Result<()> {
+        let shift = sample_shift_bits(self.envelope)?;
+        for chunk in samples.chunks(RIFF_STREAM_BUFFER_CAPACITY / 4) {
+            self.buffer.clear();
+            self.buffer.resize(chunk.len() * 4, 0);
+            for (sample, bytes) in chunk.iter().zip(self.buffer.chunks_exact_mut(4)) {
+                let shifted = if shift == 0 {
+                    *sample
+                } else {
+                    sample.checked_shl(shift).ok_or_else(|| {
+                        Error::UnsupportedWav(
+                            "unsupported valid bits/container bits combination".into(),
+                        )
+                    })?
+                };
+                bytes.copy_from_slice(&shifted.to_le_bytes());
+            }
+            self.writer.write_all(&self.buffer)?;
+            md5.update_bytes(&self.buffer);
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+}
+
+fn sample_shift_bits(envelope: PcmEnvelope) -> Result<u32> {
+    envelope
+        .container_bits_per_sample
+        .checked_sub(envelope.valid_bits_per_sample)
+        .map(u32::from)
+        .ok_or(Error::InvalidWav(
+            "valid bits cannot exceed container bits for encoding",
+        ))
 }
 
 impl Default for WavMetadataWriteOptions {
@@ -808,6 +946,8 @@ fn write_sample_bytes<W: Write>(
     envelope: PcmEnvelope,
 ) -> Result<[u8; 16]> {
     const CHUNK_CAPACITY: usize = 64 * 1024;
+    const PARALLEL_PACK_MIN_SAMPLES: usize = 1 << 18;
+    const MAX_PARALLEL_PACK_THREADS: usize = 8;
     let (hash_sender, hash_receiver) = mpsc::sync_channel::<Vec<u8>>(2);
     let hash_worker = thread::spawn(move || {
         let mut md5 = Md5::new();
@@ -816,6 +956,50 @@ fn write_sample_bytes<W: Write>(
         }
         md5.finalize()
     });
+
+    if envelope.container_bits_per_sample == 24
+        && envelope.valid_bits_per_sample == 24
+        && samples.len() >= PARALLEL_PACK_MIN_SAMPLES
+    {
+        let worker_count = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(MAX_PARALLEL_PACK_THREADS)
+            .max(1);
+        let shard_len = samples.len().div_ceil(worker_count);
+        let packed_chunks = thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for shard in samples.chunks(shard_len) {
+                handles.push(scope.spawn(move || {
+                    let mut bytes = vec![0u8; shard.len() * 3];
+                    for (sample, chunk) in shard.iter().zip(bytes.chunks_exact_mut(3)) {
+                        debug_assert!((-8_388_608..=8_388_607).contains(sample));
+                        let value = *sample as u32;
+                        chunk[0] = value as u8;
+                        chunk[1] = (value >> 8) as u8;
+                        chunk[2] = (value >> 16) as u8;
+                    }
+                    bytes
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("24-bit pack worker panicked"))
+                .collect::<Vec<_>>()
+        });
+
+        for chunk in packed_chunks {
+            writer.write_all(&chunk)?;
+            hash_sender
+                .send(chunk)
+                .map_err(|_| Error::Thread("streaminfo md5 worker stopped".into()))?;
+        }
+        drop(hash_sender);
+        return hash_worker
+            .join()
+            .map_err(|_| Error::Thread("streaminfo md5 worker panicked".into()));
+    }
+
     let mut buffer = Vec::with_capacity(CHUNK_CAPACITY);
 
     for &sample in samples {

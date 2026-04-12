@@ -132,7 +132,7 @@ impl RecompressConfig {
         }
     }
 
-    fn decode_config(self) -> crate::DecodeConfig {
+    pub(crate) fn decode_config(self) -> crate::DecodeConfig {
         let base = crate::DecodeConfig::default().with_threads(self.threads);
         match self.mode {
             RecompressMode::Loose => base
@@ -150,7 +150,7 @@ impl RecompressConfig {
         }
     }
 
-    fn encode_config(self) -> EncoderConfig {
+    pub(crate) fn encode_config(self) -> EncoderConfig {
         let mut base = EncoderConfig::default()
             .with_level(self.level)
             .with_threads(self.threads);
@@ -345,6 +345,11 @@ impl<R: Read + Seek> FlacRecompressSource<R> {
     pub fn total_samples(&self) -> u64 {
         self.total_samples
     }
+
+    /// Set the worker-thread count used by the decode-side FLAC reader stream.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.stream.inner.set_threads(threads);
+    }
 }
 
 impl<R: Read + Seek> EncodePcmStream for FlacRecompressSource<R> {
@@ -449,13 +454,14 @@ where
 
     pub(crate) fn recompress_with_sink<R, P>(
         &mut self,
-        source: FlacRecompressSource<R>,
+        mut source: FlacRecompressSource<R>,
         progress: &mut P,
     ) -> Result<RecompressSummary>
     where
         R: Read + Seek,
         P: RecompressProgressSink,
     {
+        source.set_threads(self.config.threads());
         let total_samples = source.total_samples();
         progress.on_progress(RecompressProgress {
             phase: RecompressPhase::Decode,
@@ -539,8 +545,8 @@ impl<R: Read + Seek> EncodePcmStream for VerifyingPcmStream<R> {
     }
 
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
-        let mut chunk = Vec::new();
-        let frames = self.inner.read_chunk(max_frames, &mut chunk)?;
+        let output_start = output.len();
+        let frames = self.inner.read_chunk(max_frames, output)?;
         if frames == 0 {
             if !self.verified {
                 verify_streaminfo_digest(
@@ -554,15 +560,14 @@ impl<R: Read + Seek> EncodePcmStream for VerifyingPcmStream<R> {
         self.md5
             .as_mut()
             .expect("md5 state present")
-            .update_samples(&chunk)?;
-        output.extend(chunk);
+            .update_samples(&output[output_start..])?;
         Ok(frames)
     }
 }
 
-struct EncodePhaseProgress<'a, P> {
-    sink: &'a mut P,
-    total_samples: u64,
+pub(crate) struct EncodePhaseProgress<'a, P> {
+    pub(crate) sink: &'a mut P,
+    pub(crate) total_samples: u64,
 }
 
 impl<P> ProgressSink for EncodePhaseProgress<'_, P>

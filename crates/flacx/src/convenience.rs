@@ -1,4 +1,8 @@
-use std::{fs::File, io::Cursor, path::Path};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Cursor, Write},
+    path::Path,
+};
 
 use crate::{
     DecodeConfig, EncoderConfig, RecompressConfig, Result,
@@ -6,7 +10,7 @@ use crate::{
     decode_output::{commit_temp_output, open_temp_output},
     encoder::EncodeSummary,
     error::Error,
-    input::read_pcm_reader_with_config,
+    input::PcmReaderOptions,
     pcm::PcmContainer,
     read::{FlacReaderOptions, read_flac_reader_with_options},
     recompress::{FlacRecompressSource, RecompressSummary},
@@ -16,6 +20,9 @@ pub use crate::{
     inspect_flac_total_samples, inspect_pcm_total_samples, inspect_raw_pcm_total_samples,
     inspect_wav_total_samples,
 };
+
+const FILE_READ_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
+const FILE_WRITE_BUFFER_CAPACITY: usize = 10 * 1024 * 1024;
 
 pub fn encode_file<P, Q>(input_path: P, output_path: Q) -> Result<EncodeSummary>
 where
@@ -50,16 +57,32 @@ where
     P: AsRef<Path>,
     Q: AsRef<Path>,
 {
-    let reader = read_pcm_reader_with_config(File::open(input_path)?, config)?;
+    let input_path = input_path.as_ref();
+    let output_path = output_path.as_ref();
+    let reader = crate::read_pcm_reader_with_options(
+        open_buffered_reader(input_path)?,
+        PcmReaderOptions {
+            capture_fxmd: config.capture_fxmd,
+            strict_fxmd_validation: config.strict_fxmd_validation,
+        },
+    )?;
     let metadata = reader.metadata().clone();
     let stream = reader.into_pcm_stream();
-    let mut encoder = config.clone().into_encoder(File::create(output_path)?);
+    let mut encoder = config
+        .clone()
+        .into_encoder(create_buffered_writer(output_path)?);
     encoder.set_metadata(metadata);
     encoder.encode(stream)
 }
 
 pub(crate) fn encode_bytes_with_config(config: &EncoderConfig, input: &[u8]) -> Result<Vec<u8>> {
-    let reader = read_pcm_reader_with_config(Cursor::new(input), config)?;
+    let reader = crate::read_pcm_reader_with_options(
+        Cursor::new(input),
+        PcmReaderOptions {
+            capture_fxmd: config.capture_fxmd,
+            strict_fxmd_validation: config.strict_fxmd_validation,
+        },
+    )?;
     let metadata = reader.metadata().clone();
     let stream = reader.into_pcm_stream();
     let mut encoder = config.clone().into_encoder(Cursor::new(Vec::new()));
@@ -108,11 +131,16 @@ where
     let (temp_path, temp_file) = open_temp_output(output_path)?;
 
     let result = (|| {
-        let reader =
-            read_flac_reader_with_options(File::open(input_path)?, config.flac_reader_options())?;
+        let reader = read_flac_reader_with_options(
+            open_buffered_reader(input_path)?,
+            config.flac_reader_options(),
+        )?;
         let source = FlacRecompressSource::from_reader(reader);
-        let mut recompressor = config.clone().into_recompressor(temp_file);
-        recompressor.recompress_with_sink(source, progress)
+        let mut temp_writer = BufWriter::with_capacity(FILE_WRITE_BUFFER_CAPACITY, temp_file);
+        let mut recompressor = config.into_recompressor(&mut temp_writer);
+        let summary = recompressor.recompress_with_sink(source, progress)?;
+        temp_writer.flush()?;
+        Ok(summary)
     })();
     match result {
         Ok(summary) => {
@@ -187,23 +215,25 @@ where
     let output_container =
         inferred_output_container_from_path(output_path)?.unwrap_or(config.output_container);
 
-    let result = (|| {
-        let reader = read_flac_reader_with_options(
-            File::open(input_path)?,
-            FlacReaderOptions {
-                strict_seektable_validation: config.strict_seektable_validation,
-                strict_channel_mask_provenance: config.strict_channel_mask_provenance,
-            },
-        )?;
-        let metadata = reader.metadata().clone();
-        let stream = reader.into_pcm_stream();
-        let mut decoder = config
-            .clone()
-            .with_output_container(output_container)
-            .into_decoder(temp_file);
-        decoder.set_metadata(metadata);
-        decoder.decode_with_sink(stream, progress)
-    })();
+    let result =
+        (|| {
+            let reader = read_flac_reader_with_options(
+                open_buffered_reader(input_path)?,
+                FlacReaderOptions {
+                    strict_seektable_validation: config.strict_seektable_validation,
+                    strict_channel_mask_provenance: config.strict_channel_mask_provenance,
+                },
+            )?;
+            let metadata = reader.metadata().clone();
+            let stream = reader.into_pcm_stream();
+            let mut decoder = config.with_output_container(output_container).into_decoder(
+                BufWriter::with_capacity(FILE_WRITE_BUFFER_CAPACITY, temp_file),
+            );
+            decoder.set_metadata(metadata);
+            let summary = decoder.decode_with_sink(stream, progress)?;
+            decoder.into_inner().flush()?;
+            Ok(summary)
+        })();
     match result {
         Ok(summary) => {
             if let Err(error) = commit_temp_output(&temp_path, output_path) {
@@ -217,6 +247,20 @@ where
             Err(error)
         }
     }
+}
+
+fn open_buffered_reader(path: &Path) -> Result<BufReader<File>> {
+    Ok(BufReader::with_capacity(
+        FILE_READ_BUFFER_CAPACITY,
+        File::open(path)?,
+    ))
+}
+
+fn create_buffered_writer(path: &Path) -> Result<BufWriter<File>> {
+    Ok(BufWriter::with_capacity(
+        FILE_WRITE_BUFFER_CAPACITY,
+        File::create(path)?,
+    ))
 }
 
 fn inferred_output_container_from_path(path: &Path) -> Result<Option<PcmContainer>> {

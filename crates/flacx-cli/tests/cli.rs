@@ -112,6 +112,24 @@ fn recompress_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -
 }
 
 #[test]
+fn cli_dispatch_does_not_depend_on_builtin_shortcut_routing() {
+    let source = include_str!("../src/lib.rs");
+    assert!(!source.contains("builtin::"));
+    assert!(!source.contains("can_use_default_encode_fastpath"));
+    assert!(!source.contains("can_use_default_decode_fastpath"));
+    assert!(!source.contains("can_use_default_recompress_fastpath"));
+}
+
+#[test]
+fn cli_dispatch_uses_buffered_file_boundaries() {
+    let source = include_str!("../src/lib.rs");
+    assert!(source.contains("BufReader::with_capacity"));
+    assert!(source.contains("BufWriter::with_capacity"));
+    assert!(source.contains("CLI_READ_BUFFER_CAPACITY"));
+    assert!(source.contains("CLI_WRITE_BUFFER_CAPACITY"));
+}
+
+#[test]
 fn help_lists_encode_and_decode_commands() {
     let output = Command::new(flacx_bin()).arg("--help").output().unwrap();
     assert!(output.status.success());
@@ -521,6 +539,104 @@ fn recompress_directory_in_place_rewrites_existing_sources() {
 }
 
 #[test]
+fn recompress_directory_without_output_writes_sibling_flacs_at_default_depth() {
+    let input_dir = unique_temp_dir();
+    let top_flac = input_dir.join("top.flac");
+    let nested_flac = input_dir.join("nested").join("deep.flac");
+    write_flac_file(&top_flac, 1, 2_048);
+    write_flac_file(&nested_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args(["recompress", input_dir.to_str().unwrap(), "--threads", "1"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(input_dir.join("top.recompressed.flac").exists());
+    assert!(
+        !input_dir
+            .join("nested")
+            .join("deep.recompressed.flac")
+            .exists()
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_directory_depth_zero_includes_nested_descendants() {
+    let input_dir = unique_temp_dir();
+    let top_flac = input_dir.join("top.flac");
+    let nested_flac = input_dir.join("nested").join("deep.flac");
+    write_flac_file(&top_flac, 1, 2_048);
+    write_flac_file(&nested_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "recompress",
+            input_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+            "--depth",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(input_dir.join("top.recompressed.flac").exists());
+    assert!(
+        input_dir
+            .join("nested")
+            .join("deep.recompressed.flac")
+            .exists()
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_directory_depth_two_includes_one_nested_level_only() {
+    let input_dir = unique_temp_dir();
+    let top_flac = input_dir.join("top.flac");
+    let nested_flac = input_dir.join("nested").join("deep.flac");
+    let deeper_flac = input_dir.join("nested").join("deeper").join("skip.flac");
+    write_flac_file(&top_flac, 1, 2_048);
+    write_flac_file(&nested_flac, 1, 2_048);
+    write_flac_file(&deeper_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "recompress",
+            input_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+            "--depth",
+            "2",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(input_dir.join("top.recompressed.flac").exists());
+    assert!(
+        input_dir
+            .join("nested")
+            .join("deep.recompressed.flac")
+            .exists()
+    );
+    assert!(
+        !input_dir
+            .join("nested")
+            .join("deeper")
+            .join("skip.recompressed.flac")
+            .exists()
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
 fn encode_command_renders_filename_elapsed_and_progress_when_interactive() {
     let samples = sample_fixture(1, 2_048);
     let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
@@ -915,6 +1031,66 @@ fn encode_directory_accepts_caf_inputs() {
     );
     assert!(input_dir.join("keep-caf.flac").exists());
     let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn encode_default_single_file_accepts_aiff_without_wav_fastpath() {
+    let input_path = unique_temp_path("aiff");
+    let output_path = unique_temp_path("flac");
+    write_bytes_file(
+        &input_path,
+        &aiff_pcm_bytes(16, 1, 44_100, &sample_fixture(1, 1_024)),
+    );
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "encode",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists());
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn encode_default_single_file_accepts_caf_without_wav_fastpath() {
+    let input_path = unique_temp_path("caf");
+    let output_path = unique_temp_path("flac");
+    write_bytes_file(
+        &input_path,
+        &caf_lpcm_bytes(16, 16, 2, 44_100, true, &sample_fixture(2, 1_024)),
+    );
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "encode",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists());
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
 }
 
 #[test]

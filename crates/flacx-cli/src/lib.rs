@@ -37,7 +37,7 @@
 use std::{
     env,
     fs::{self, File},
-    io::Write,
+    io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -56,6 +56,8 @@ const BATCH_PROGRESS_BAR_WIDTH: usize = 10;
 const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
 const SINGLE_RENDER_INTERVAL: Duration = Duration::from_millis(125);
 const BATCH_RENDER_INTERVAL: Duration = Duration::from_millis(250);
+const CLI_READ_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
+const CLI_WRITE_BUFFER_CAPACITY: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeCommand {
@@ -269,19 +271,21 @@ pub fn encode_command(
             item.overall_total_samples,
         );
         let result = if let Some(raw_descriptor) = command.raw_descriptor {
-            let reader = RawPcmReader::new(File::open(&item.input)?, raw_descriptor)?;
+            let reader = RawPcmReader::new(open_buffered_reader(&item.input)?, raw_descriptor)?;
             let stream = reader.into_pcm_stream()?;
             let mut encoder = command
                 .config
                 .clone()
-                .into_encoder(File::create(&item.output)?);
-            encoder.encode_with_progress(stream, |update| {
-                progress.observe(update)?;
-                Ok(())
-            })
+                .into_encoder(create_buffered_writer(&item.output)?);
+            encoder
+                .encode_with_progress(stream, |update| {
+                    progress.observe(update)?;
+                    Ok(())
+                })
+                .map(|_| ())
         } else {
             let reader = read_pcm_reader_with_options(
-                File::open(&item.input)?,
+                open_buffered_reader(&item.input)?,
                 PcmReaderOptions {
                     capture_fxmd: command.config.capture_fxmd,
                     strict_fxmd_validation: command.config.strict_fxmd_validation,
@@ -292,12 +296,14 @@ pub fn encode_command(
             let mut encoder = command
                 .config
                 .clone()
-                .into_encoder(File::create(&item.output)?);
+                .into_encoder(create_buffered_writer(&item.output)?);
             encoder.set_metadata(metadata);
-            encoder.encode_with_progress(stream, |update| {
-                progress.observe(update)?;
-                Ok(())
-            })
+            encoder
+                .encode_with_progress(stream, |update| {
+                    progress.observe(update)?;
+                    Ok(())
+                })
+                .map(|_| ())
         };
 
         match result {
@@ -340,26 +346,26 @@ pub fn decode_command(
         );
         let output_container = decode_output_container_from_path(&item.output)?
             .unwrap_or(command.config.output_container);
-        let result = {
-            let reader = read_flac_reader_with_options(
-                File::open(&item.input)?,
-                FlacReaderOptions {
-                    strict_seektable_validation: command.config.strict_seektable_validation,
-                    strict_channel_mask_provenance: command.config.strict_channel_mask_provenance,
-                },
-            )?;
-            let metadata = reader.metadata().clone();
-            let stream = reader.into_pcm_stream();
-            let mut decoder = command
-                .config
-                .with_output_container(output_container)
-                .into_decoder(File::create(&item.output)?);
-            decoder.set_metadata(metadata);
-            decoder.decode_with_progress(stream, |update| {
+        let reader = read_flac_reader_with_options(
+            open_buffered_reader(&item.input)?,
+            FlacReaderOptions {
+                strict_seektable_validation: command.config.strict_seektable_validation,
+                strict_channel_mask_provenance: command.config.strict_channel_mask_provenance,
+            },
+        )?;
+        let metadata = reader.metadata().clone();
+        let stream = reader.into_pcm_stream();
+        let mut decoder = command
+            .config
+            .with_output_container(output_container)
+            .into_decoder(create_buffered_writer(&item.output)?);
+        decoder.set_metadata(metadata);
+        let result = decoder
+            .decode_with_progress(stream, |update| {
                 progress.observe(update)?;
                 Ok(())
             })
-        };
+            .map(|_| ());
 
         match result {
             Ok(_) => progress.finish_current_file()?,
@@ -439,20 +445,20 @@ pub fn recompress_command(
             item.overall_total_samples,
         );
         let temp_output = recompress_temp_output_path(&item.output);
-        let result = {
-            let reader = read_flac_reader_with_options(
-                File::open(&item.input)?,
-                recompress_reader_options(command.config),
-            )?;
-            let source = FlacRecompressSource::from_reader(reader);
-            let mut recompressor = command
-                .config
-                .into_recompressor(File::create(&temp_output)?);
-            recompressor.recompress_with_progress(source, |update: RecompressProgress| {
+        let reader = read_flac_reader_with_options(
+            open_buffered_reader(&item.input)?,
+            recompress_reader_options(command.config),
+        )?;
+        let source = FlacRecompressSource::from_reader(reader);
+        let mut recompressor = command
+            .config
+            .into_recompressor(create_buffered_writer(&temp_output)?);
+        let result = recompressor
+            .recompress_with_progress(source, |update: RecompressProgress| {
                 progress.observe_recompress(update)?;
                 Ok(())
             })
-        };
+            .map(|_| ());
 
         match result {
             Ok(_) => {
@@ -493,7 +499,8 @@ fn plan_raw_encode_worklist(
             .planning_error("raw PCM encode does not support directory input in Stage 3"));
     }
 
-    let total_samples = inspect_raw_pcm_total_samples(File::open(&command.input)?, raw_descriptor)?;
+    let total_samples =
+        inspect_raw_pcm_total_samples(open_buffered_reader(&command.input)?, raw_descriptor)?;
     let output = match command.output.as_deref() {
         Some(output) => {
             if output.is_dir() {
@@ -916,11 +923,25 @@ fn plan_recompress_directory_worklist(command: &RecompressCommand) -> Result<Pla
 }
 
 fn inspect_pcm_file_total_samples(path: &Path) -> Result<u64> {
-    inspect_wav_total_samples(File::open(path)?)
+    inspect_wav_total_samples(open_buffered_reader(path)?)
 }
 
 fn inspect_flac_file_total_samples(path: &Path) -> Result<u64> {
-    inspect_flac_total_samples(File::open(path)?)
+    inspect_flac_total_samples(open_buffered_reader(path)?)
+}
+
+fn open_buffered_reader(path: &Path) -> Result<BufReader<File>> {
+    Ok(BufReader::with_capacity(
+        CLI_READ_BUFFER_CAPACITY,
+        File::open(path)?,
+    ))
+}
+
+fn create_buffered_writer(path: &Path) -> Result<BufWriter<File>> {
+    Ok(BufWriter::with_capacity(
+        CLI_WRITE_BUFFER_CAPACITY,
+        File::create(path)?,
+    ))
 }
 
 fn input_file_size(path: &Path) -> Result<u64> {

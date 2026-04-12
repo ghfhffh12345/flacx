@@ -1,6 +1,6 @@
 use super::{
-    ChannelAssignment, Error, FLAC_SYNC_CODE, FRAME_CHUNK_SIZE, FrameHeaderNumber,
-    FrameHeaderNumberKind, FrameIndex, FrameResult, ParsedFrame, Result, StreamInfo,
+    ChannelAssignment, Error, FLAC_SYNC_CODE, FRAME_CHUNK_SIZE, FrameChunkResult,
+    FrameHeaderNumber, FrameHeaderNumberKind, FrameIndex, ParsedFrame, Result, StreamInfo,
     SubframeHeader,
 };
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
 };
 use bitstream_io::{BigEndian, BitRead, BitReader};
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     io::{Cursor, Read},
     sync::{
         Arc,
@@ -42,8 +42,11 @@ pub(super) fn index_frames(
         frames.push(FrameIndex {
             header_number: frame.header_number,
             offset: cursor,
+            header_bytes_consumed: frame.header_bytes_consumed,
             bytes_consumed: frame.bytes_consumed,
             block_size: frame.block_size,
+            bits_per_sample: frame.bits_per_sample,
+            assignment: frame.assignment,
         });
         cursor += frame.bytes_consumed;
         processed_samples += usize::from(frame.block_size);
@@ -80,7 +83,7 @@ where
     let next_chunk = Arc::new(AtomicUsize::new(0));
 
     thread::scope(|scope| -> Result<()> {
-        let (sender, receiver) = mpsc::channel::<FrameResult>();
+        let (sender, receiver) = mpsc::channel::<FrameChunkResult>();
 
         for _ in 0..worker_count {
             let sender = sender.clone();
@@ -96,21 +99,21 @@ where
                     }
                     let chunk_end = (chunk_start + FRAME_CHUNK_SIZE).min(frames.len());
 
+                    let mut decoded_frames = Vec::with_capacity(chunk_end - chunk_start);
                     for frame_index in chunk_start..chunk_end {
                         let frame = &frames[frame_index];
                         let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
-                        let result = decode_frame(frame_bytes, stream_info, frame.header_number)
-                            .map(|frame| frame.samples);
+                        decoded_frames.push(decode_frame_samples_indexed(frame_bytes, frame));
+                    }
 
-                        if sender
-                            .send(FrameResult {
-                                frame_index,
-                                result,
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
+                    if sender
+                        .send(FrameChunkResult {
+                            start_index: chunk_start,
+                            decoded_frames,
+                        })
+                        .is_err()
+                    {
+                        return;
                     }
                 }
             });
@@ -120,45 +123,43 @@ where
 
         let mut next_expected = 0usize;
         let mut processed_samples = 0u64;
-        let mut pending: BTreeMap<usize, Result<Vec<i32>>> = BTreeMap::new();
+        let mut pending: HashMap<usize, Vec<Result<Vec<i32>>>> = HashMap::new();
 
         while next_expected < frames.len() {
-            if let Some(result) = pending.remove(&next_expected) {
-                processed_samples = process_frame_result(
+            if let Some(chunk_results) = pending.remove(&next_expected) {
+                let chunk_len = chunk_results.len();
+                processed_samples = process_frame_chunk_results(
                     samples,
-                    result,
-                    frames[next_expected].block_size,
-                    ProgressSnapshot {
-                        processed_samples,
-                        total_samples: stream_info.total_samples,
-                        completed_frames: next_expected + 1,
-                        total_frames: frames.len(),
-                    },
+                    chunk_results,
+                    &frames[next_expected..next_expected + chunk_len],
+                    processed_samples,
+                    stream_info,
                     progress,
+                    next_expected,
+                    frames.len(),
                 )?;
-                next_expected += 1;
+                next_expected += chunk_len;
                 continue;
             }
 
-            let frame_result = receiver.recv().map_err(|_| {
+            let frame_chunk = receiver.recv().map_err(|_| {
                 Error::Thread("frame worker channel closed before all frames were decoded".into())
             })?;
-            pending.insert(frame_result.frame_index, frame_result.result);
+            pending.insert(frame_chunk.start_index, frame_chunk.decoded_frames);
 
-            while let Some(result) = pending.remove(&next_expected) {
-                processed_samples = process_frame_result(
+            while let Some(chunk_results) = pending.remove(&next_expected) {
+                let chunk_len = chunk_results.len();
+                processed_samples = process_frame_chunk_results(
                     samples,
-                    result,
-                    frames[next_expected].block_size,
-                    ProgressSnapshot {
-                        processed_samples,
-                        total_samples: stream_info.total_samples,
-                        completed_frames: next_expected + 1,
-                        total_frames: frames.len(),
-                    },
+                    chunk_results,
+                    &frames[next_expected..next_expected + chunk_len],
+                    processed_samples,
+                    stream_info,
                     progress,
+                    next_expected,
+                    frames.len(),
                 )?;
-                next_expected += 1;
+                next_expected += chunk_len;
             }
         }
 
@@ -166,24 +167,30 @@ where
     })
 }
 
-#[allow(dead_code)]
-fn process_frame_result<P>(
+fn process_frame_chunk_results<P>(
     samples: &mut Vec<i32>,
-    result: Result<Vec<i32>>,
-    block_size: u16,
-    progress_snapshot: ProgressSnapshot,
+    results: Vec<Result<Vec<i32>>>,
+    frames: &[FrameIndex],
+    mut processed_samples: u64,
+    stream_info: StreamInfo,
     progress: &mut P,
+    start_index: usize,
+    total_frames: usize,
 ) -> Result<u64>
 where
     P: ProgressSink,
 {
-    let frame_samples = result?;
-    samples.extend(frame_samples);
-    let processed_samples = progress_snapshot.processed_samples + u64::from(block_size);
-    progress.on_frame(ProgressSnapshot {
-        processed_samples,
-        ..progress_snapshot
-    })?;
+    for (frame_offset, result) in results.into_iter().enumerate() {
+        let frame_samples = result?;
+        samples.extend(frame_samples);
+        processed_samples += u64::from(frames[frame_offset].block_size);
+        progress.on_frame(ProgressSnapshot {
+            processed_samples,
+            total_samples: stream_info.total_samples,
+            completed_frames: start_index + frame_offset + 1,
+            total_frames,
+        })?;
+    }
     Ok(processed_samples)
 }
 
@@ -221,6 +228,7 @@ pub(super) fn scan_frame(
     }
 
     Ok(ParsedFrame {
+        header_bytes_consumed: parsed.header_bytes_consumed,
         bytes_consumed: footer_start + 2,
         ..parsed
     })
@@ -322,69 +330,29 @@ fn parse_frame(
         block_size,
         bits_per_sample,
         assignment,
+        header_bytes_consumed: header_end + 1,
         bytes_consumed: header_end + 1,
     })
 }
 
-struct DecodedFrame {
-    samples: Vec<i32>,
-}
-
-fn decode_frame(
-    bytes: &[u8],
-    stream_info: StreamInfo,
-    expected_header_number: FrameHeaderNumber,
-) -> Result<DecodedFrame> {
-    let parsed = parse_frame(
-        bytes,
-        stream_info,
-        match expected_header_number.kind {
-            FrameHeaderNumberKind::FrameNumber => expected_header_number.value,
-            FrameHeaderNumberKind::SampleNumber => 0,
-        },
-        match expected_header_number.kind {
-            FrameHeaderNumberKind::FrameNumber => 0,
-            FrameHeaderNumberKind::SampleNumber => expected_header_number.value,
-        },
-        Some(expected_header_number.kind),
-    )?;
-    let mut reader = BitReader::endian(Cursor::new(&bytes[parsed.bytes_consumed..]), BigEndian);
-
-    let subframe_bps = channel_bits_per_sample(parsed.assignment, parsed.bits_per_sample);
-    let mut channels = Vec::with_capacity(parsed.assignment.channel_count());
+fn decode_frame_samples_indexed(bytes: &[u8], frame: &FrameIndex) -> Result<Vec<i32>> {
+    let mut reader = BitReader::endian(
+        Cursor::new(&bytes[frame.header_bytes_consumed..]),
+        BigEndian,
+    );
+    let subframe_bps = channel_bits_per_sample(frame.assignment, frame.bits_per_sample);
+    let mut channels = Vec::with_capacity(frame.assignment.channel_count());
     for bits_per_channel in subframe_bps
         .into_iter()
-        .take(parsed.assignment.channel_count())
+        .take(frame.assignment.channel_count())
     {
         channels.push(decode_subframe(
             &mut reader,
             bits_per_channel,
-            parsed.block_size,
+            frame.block_size,
         )?);
     }
-
-    reader.byte_align();
-    let footer_pos = reader.aligned_reader().position() as usize;
-    let footer_start = parsed.bytes_consumed + footer_pos;
-    let expected_crc = u16::from_be_bytes([
-        read_exact_byte(reader.aligned_reader())?,
-        read_exact_byte(reader.aligned_reader())?,
-    ]);
-    if crc16(&bytes[..footer_start]) != expected_crc {
-        return Err(Error::InvalidFlac("frame footer CRC16 mismatch"));
-    }
-
-    Ok(DecodedFrame {
-        samples: interleave_channels(parsed.assignment, &channels)?,
-    })
-}
-
-pub(super) fn decode_frame_samples(
-    bytes: &[u8],
-    stream_info: StreamInfo,
-    expected_header_number: FrameHeaderNumber,
-) -> Result<Vec<i32>> {
-    decode_frame(bytes, stream_info, expected_header_number).map(|frame| frame.samples)
+    Ok(interleave_channels(frame.assignment, &channels)?)
 }
 
 impl FrameHeaderNumberKind {

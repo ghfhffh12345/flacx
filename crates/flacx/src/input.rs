@@ -1,6 +1,5 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::config::EncoderConfig;
 use crate::error::{Error, Result};
 use crate::metadata::EncodeMetadata;
 
@@ -10,14 +9,6 @@ pub(crate) use crate::pcm::{
 };
 pub use crate::pcm::{PcmSpec, PcmStream};
 pub type PcmReaderOptions = crate::wav_input::WavReaderOptions;
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BufferedEncodeInput {
-    pub(crate) wav: WavData,
-    pub(crate) metadata: EncodeMetadata,
-    pub(crate) streaminfo_md5: [u8; 16],
-}
 
 /// Single-pass PCM sample source consumed by the encode session.
 pub trait EncodePcmStream {
@@ -187,19 +178,6 @@ pub fn read_pcm_reader_with_options<R: Read + Seek>(
             ))
         }
     }
-}
-
-pub(crate) fn read_pcm_reader_with_config<R: Read + Seek>(
-    reader: R,
-    config: &EncoderConfig,
-) -> Result<PcmReader<R>> {
-    read_pcm_reader_with_options(
-        reader,
-        PcmReaderOptions {
-            capture_fxmd: config.capture_fxmd,
-            strict_fxmd_validation: config.strict_fxmd_validation,
-        },
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

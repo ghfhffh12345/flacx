@@ -24,7 +24,7 @@ use crate::{
 
 const FRAME_CHUNK_SIZE: usize = 32;
 
-struct EncodedChunk {
+pub(crate) struct EncodedChunk {
     start_frame: usize,
     frames: Vec<EncodedFrame>,
 }
@@ -62,42 +62,39 @@ where
     }
 
     let channels = usize::from(spec.channels);
-    let mut processed_samples = 0u64;
+    let processed_samples = 0u64;
     let mut chunk_samples = Vec::new();
-
-    for chunk_start in (0..plan.total_frames).step_by(FRAME_CHUNK_SIZE) {
-        let chunk_end = (chunk_start + FRAME_CHUNK_SIZE).min(plan.total_frames);
-        let expected_frames = expected_frames_for_chunk(&plan, chunk_start, chunk_end);
-        chunk_samples.clear();
-        let read_frames = stream.read_chunk(expected_frames, &mut chunk_samples)?;
-        if read_frames != expected_frames {
-            return Err(Error::Encode(format!(
-                "PCM stream ended early: expected {expected_frames} frames, read {read_frames}"
-            )));
-        }
-        let expected_samples = expected_frames
-            .checked_mul(channels)
-            .ok_or_else(|| Error::Encode("PCM chunk sample count overflows".into()))?;
-        if chunk_samples.len() != expected_samples {
-            return Err(Error::Encode(format!(
-                "PCM stream yielded {} samples for {expected_frames} frames across {channels} channels",
-                chunk_samples.len()
-            )));
-        }
-        stream.update_streaminfo_md5(&mut md5, &chunk_samples)?;
-        let encoded = encode_chunk(config, &plan, chunk_start, chunk_end, chunk_samples.clone())?;
-        processed_samples = write_encoded_chunk(
-            &mut writer,
-            encoded,
-            processed_samples,
-            spec.total_samples,
-            chunk_start,
-            plan.total_frames,
-            progress,
-        )?;
+    let chunk_start = 0usize;
+    let chunk_end = plan.total_frames;
+    let expected_frames = expected_frames_for_chunk(&plan, chunk_start, chunk_end);
+    let read_frames = stream.read_chunk(expected_frames, &mut chunk_samples)?;
+    if read_frames != expected_frames {
+        return Err(Error::Encode(format!(
+            "PCM stream ended early: expected {expected_frames} frames, read {read_frames}"
+        )));
     }
+    let expected_samples = expected_frames
+        .checked_mul(channels)
+        .ok_or_else(|| Error::Encode("PCM chunk sample count overflows".into()))?;
+    if chunk_samples.len() != expected_samples {
+        return Err(Error::Encode(format!(
+            "PCM stream yielded {} samples for {expected_frames} frames across {channels} channels",
+            chunk_samples.len()
+        )));
+    }
+    stream.update_streaminfo_md5(&mut md5, &chunk_samples)?;
+    let encoded = encode_chunk(config, &plan, chunk_start, chunk_end, chunk_samples)?;
+    write_encoded_chunk(
+        &mut writer,
+        encoded,
+        processed_samples,
+        spec.total_samples,
+        chunk_start,
+        plan.total_frames,
+        progress,
+    )?;
 
-    let extra_frames = stream.read_chunk(1, &mut chunk_samples)?;
+    let extra_frames = stream.read_chunk(1, &mut Vec::new())?;
     if extra_frames != 0 {
         return Err(Error::Encode(
             "PCM stream produced more frames than declared in the spec".into(),
@@ -115,7 +112,7 @@ fn expected_frames_for_chunk(plan: &EncodePlan, chunk_start: usize, chunk_end: u
         .sum()
 }
 
-fn encode_chunk(
+pub(crate) fn encode_chunk(
     config: &EncoderConfig,
     plan: &EncodePlan,
     chunk_start: usize,
@@ -229,7 +226,7 @@ fn drain_chunk(
     next_expected
 }
 
-fn write_encoded_chunk<W, P>(
+pub(crate) fn write_encoded_chunk<W, P>(
     writer: &mut FlacWriter<W>,
     chunk: EncodedChunk,
     mut processed_samples: u64,
