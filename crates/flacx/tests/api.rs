@@ -114,6 +114,27 @@ fn builtin_convenience_no_longer_uses_legacy_helpers() {
     assert!(!source.contains("encode_buffered_input_with_sink"));
     assert!(!source.contains("decode_flac_to_pcm_with_config"));
     assert!(!source.contains("can_use_wav_family_encode_fastpath"));
+    assert!(source.contains("fn recompress_reader_session_with_config_and_progress"));
+    assert_eq!(
+        source.matches("FlacRecompressSource::from_reader").count(),
+        1
+    );
+    assert_eq!(
+        source
+            .matches("recompress_with_sink(source, progress)")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn recompress_public_exports_remain_stable() {
+    let source = include_str!("../src/lib.rs");
+    assert!(source.contains("pub mod builtin {"));
+    assert!(source.contains("recompress_bytes, recompress_file,"));
+    assert!(source.contains("pub use recompress::{"));
+    assert!(source.contains("FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,"));
+    assert!(source.contains("RecompressProgress, RecompressSummary, Recompressor,"));
 }
 
 #[cfg(feature = "aiff")]

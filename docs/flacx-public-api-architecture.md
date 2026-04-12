@@ -96,7 +96,13 @@ crates/flacx/src/
 ├─ convenience.rs         # implementation backing the public `builtin` module
 ├─ encoder.rs
 ├─ decode.rs
-├─ recompress.rs
+├─ recompress/
+│  ├─ mod.rs
+│  ├─ config.rs
+│  ├─ source.rs
+│  ├─ session.rs
+│  ├─ progress.rs
+│  └─ verify.rs
 ├─ pcm.rs
 ├─ input.rs
 ├─ wav_input.rs
@@ -122,7 +128,7 @@ crates/flacx/src/
 
 ### Reading the tree
 - `lib.rs` is the public contract surface.
-- `config.rs`, `encoder.rs`, `decode.rs`, `recompress.rs`, and `pcm.rs` are
+- `config.rs`, `encoder.rs`, `decode.rs`, `recompress/`, and `pcm.rs` are
   the fastest way to orient yourself around the exported architecture.
 - `input.rs`, `wav_input.rs`, `aiff.rs`, `caf.rs`, `wav_output.rs`,
   `aiff_output.rs`, `caf_output.rs`, `read/`, and `write/` show how the
@@ -139,7 +145,7 @@ crate contract                      lib.rs
 config/builders                     config.rs
 explicit encode façade              encoder.rs + encode_pipeline.rs
 explicit decode façade              decode.rs + decode_output.rs
-explicit recompress session         recompress.rs
+explicit recompress session         recompress/
 typed PCM boundary                  pcm.rs + input.rs
 WAV-family ingest/output            wav_input.rs + wav_output.rs
 AIFF-family ingest/output           aiff.rs + aiff_output.rs
@@ -206,6 +212,10 @@ Useful checks when updating these docs:
 cargo check -p flacx
 cargo test -p flacx --test api --test decode
 cargo test --workspace
+cargo bench -p flacx --bench throughput -- --noplot
+python3 scripts/recompress_evidence.py \
+  --baseline-worktree .omx/worktrees/v0.8.2 \
+  --out-dir .omx/reports
 find crates/flacx/src -maxdepth 2 -type f | sort
 rg -n "core|convenience|architecture|flacx-public-api-architecture" \
   crates/flacx/src/lib.rs crates/flacx/README.md README.md docs/flacx-public-api-architecture.md

@@ -42,7 +42,7 @@ giving it a parallel architecture.
 | Shared typed substrate | `crates/flacx/src/input.rs`, `crates/flacx/src/pcm.rs`, `crates/flacx/src/metadata.rs` | Reader/session handoff, typed PCM seam, and metadata handoff. |
 | Encode spine | `crates/flacx/src/encoder.rs`, `crates/flacx/src/encode_pipeline.rs`, `crates/flacx/src/write/*` | Explicit encode sessions, planning, and FLAC write orchestration. |
 | Decode spine | `crates/flacx/src/decode.rs`, `crates/flacx/src/read/*`, `crates/flacx/src/decode_output.rs` | Explicit decode sessions, FLAC read orchestration, and output commit flow. |
-| Recompress adapter | `crates/flacx/src/recompress.rs` | FLAC-reader-driven recompression that reuses the shared PCM/encode substrate. |
+| Recompress adapter | `crates/flacx/src/recompress/*` | FLAC-reader-driven recompression that reuses the shared PCM/encode substrate while keeping config, source, session, progress, and verification ownership explicit. |
 | WAV-family peers | `crates/flacx/src/wav_input.rs`, `crates/flacx/src/wav_output.rs` | RIFF/WAVE, RF64, and Wave64 ingest/output behavior. |
 | AIFF-family peers | `crates/flacx/src/aiff.rs`, `crates/flacx/src/aiff_output.rs` | AIFF/AIFC ingest/output behavior behind the `aiff` feature. |
 | CAF-family peers | `crates/flacx/src/caf.rs`, `crates/flacx/src/caf_output.rs` | CAF ingest/output behavior behind the `caf` feature. |
@@ -60,7 +60,6 @@ Current file-size hotspots still show where ownership is most fragile:
 - `crates/flacx/src/aiff_output.rs` — 756 LOC
 - `crates/flacx/src/caf_output.rs` — 733 LOC
 - `crates/flacx/src/aiff.rs` — 679 LOC
-- `crates/flacx/src/recompress.rs` — 594 LOC
 - `crates/flacx/src/write/mod.rs` — 532 LOC
 - `crates/flacx/src/caf.rs` — 500 LOC
 - `crates/flacx/src/read/mod.rs` — 483 LOC
@@ -74,9 +73,9 @@ accumulates it.
 
 ### 1. Encode and decode are the architectural center
 
-`encoder.rs`, `decode.rs`, and `recompress.rs` are the most legible explicit
+`encoder.rs`, `decode.rs`, and `recompress/` are the most legible explicit
 session façades in the crate. The public story should keep routing readers
-toward those files before `convenience.rs`.
+toward those modules before `convenience.rs`.
 
 ### 2. Container families are present as peers
 
@@ -98,6 +97,26 @@ Use these cues when reviewing follow-up changes:
 2. Does the change keep encode/decode clearer than builtin/path helpers?
 3. Does a family-specific behavior stay in a family module instead of leaking into shared substrate code?
 4. Does recompress consume the spine, or is it trying to define new shared abstractions for itself?
+
+## Recompress follow-up audit companion
+
+When a recompress-specific refactor is in flight, pair this document with the
+generated audit artifacts:
+
+```bash
+python3 scripts/recompress_evidence.py \
+  --baseline-worktree .omx/worktrees/v0.8.2 \
+  --out-dir .omx/reports
+```
+
+That command refreshes:
+
+- `.omx/reports/architecture/recompress-ownership-map.md`
+- `.omx/reports/recompress-benchmark-compare/recompress-logic-refactor.md`
+- `.omx/reports/recompress-corpus-diff/recompress-logic-refactor.json`
+
+Use those artifacts to keep the recompress ownership split, byte-level
+recompression diff, and v0.8.2 authority prep visible during review.
 
 ## Open review notes
 

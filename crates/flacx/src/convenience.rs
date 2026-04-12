@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufReader, BufWriter, Cursor, Write},
+    io::{BufReader, BufWriter, Cursor, Read, Seek, Write},
     path::Path,
 };
 
@@ -12,8 +12,8 @@ use crate::{
     error::Error,
     input::PcmReaderOptions,
     pcm::PcmContainer,
-    read::{FlacReaderOptions, read_flac_reader_with_options},
-    recompress::{FlacRecompressSource, RecompressSummary},
+    read::{FlacReader, FlacReaderOptions, read_flac_reader_with_options},
+    recompress::{FlacRecompressSource, RecompressProgressSink, RecompressSummary},
 };
 
 pub use crate::{
@@ -96,10 +96,13 @@ pub(crate) fn recompress_bytes_with_config(
     input: &[u8],
 ) -> Result<Vec<u8>> {
     let reader = read_flac_reader_with_options(Cursor::new(input), config.flac_reader_options())?;
-    let source = FlacRecompressSource::from_reader(reader);
-    let mut recompressor = config.clone().into_recompressor(Cursor::new(Vec::new()));
-    recompressor.recompress(source)?;
-    Ok(recompressor.into_inner().into_inner())
+    let (writer, _) = recompress_reader_session_with_config_and_progress(
+        config,
+        reader,
+        Cursor::new(Vec::new()),
+        &mut crate::progress::NoProgress,
+    )?;
+    Ok(writer.into_inner())
 }
 
 pub(crate) fn recompress_file_with_config<P, Q>(
@@ -135,10 +138,13 @@ where
             open_buffered_reader(input_path)?,
             config.flac_reader_options(),
         )?;
-        let source = FlacRecompressSource::from_reader(reader);
-        let mut temp_writer = BufWriter::with_capacity(FILE_WRITE_BUFFER_CAPACITY, temp_file);
-        let mut recompressor = config.into_recompressor(&mut temp_writer);
-        let summary = recompressor.recompress_with_sink(source, progress)?;
+        let temp_writer = BufWriter::with_capacity(FILE_WRITE_BUFFER_CAPACITY, temp_file);
+        let (mut temp_writer, summary) = recompress_reader_session_with_config_and_progress(
+            config,
+            reader,
+            temp_writer,
+            progress,
+        )?;
         temp_writer.flush()?;
         Ok(summary)
     })();
@@ -247,6 +253,23 @@ where
             Err(error)
         }
     }
+}
+
+fn recompress_reader_session_with_config_and_progress<R, W, P>(
+    config: &RecompressConfig,
+    reader: FlacReader<R>,
+    writer: W,
+    progress: &mut P,
+) -> Result<(W, RecompressSummary)>
+where
+    R: Read + Seek,
+    W: Write + Seek,
+    P: RecompressProgressSink,
+{
+    let source = FlacRecompressSource::from_reader(reader);
+    let mut recompressor = config.clone().into_recompressor(writer);
+    let summary = recompressor.recompress_with_sink(source, progress)?;
+    Ok((recompressor.into_inner(), summary))
 }
 
 fn open_buffered_reader(path: &Path) -> Result<BufReader<File>> {
