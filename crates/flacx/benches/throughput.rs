@@ -8,8 +8,7 @@ use std::{
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use flacx::{
     DecodeConfig, EncoderConfig, FlacReaderOptions, FlacRecompressSource, PcmReaderOptions,
-    RecompressConfig, RecompressMode,
-    read_flac_reader_with_options, read_pcm_reader_with_options,
+    RecompressConfig, RecompressMode, read_flac_reader_with_options, read_pcm_reader_with_options,
 };
 
 #[path = "../tests/support/mod.rs"]
