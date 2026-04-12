@@ -77,6 +77,15 @@ def run_command(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str
     return proc
 
 
+def locate_binding_corpus(repo_root: Path) -> Path:
+    candidates = [repo_root / "test-wavs"]
+    candidates.extend(parent / "test-wavs" for parent in repo_root.parents)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return repo_root / "test-wavs"
+
+
 def sample_value(frame_index: int, channel_index: int) -> int:
     raw = ((frame_index * (channel_index + 3) * 97) % 65_536) - 32_768
     return max(-32_768, min(32_767, raw))
@@ -242,7 +251,7 @@ def write_ownership_map(repo_root: Path, out_path: Path) -> None:
 def write_benchmark_scaffold(repo_root: Path, baseline_worktree: Path, out_path: Path) -> None:
     head_binary = repo_root / "target" / "release" / "flacx"
     baseline_binary = baseline_worktree / "target" / "release" / "flacx"
-    corpus_root = repo_root / "test-wavs"
+    corpus_root = locate_binding_corpus(repo_root)
     lines = [
         "# Recompress Logic Refactor Benchmark Scaffold",
         "",
@@ -258,7 +267,7 @@ def write_benchmark_scaffold(repo_root: Path, baseline_worktree: Path, out_path:
         "",
         "```bash",
         "cargo bench -p flacx --bench throughput -- --noplot",
-        f"python3 scripts/cli_perf_compare.py --baseline-worktree {baseline_worktree} --corpus ./test-wavs --out-dir .omx/reports/cli-perf/recompress-logic-refactor",
+        f"python3 scripts/cli_perf_compare.py --baseline-worktree {baseline_worktree} --corpus {corpus_root} --out-dir .omx/reports/cli-perf/recompress-logic-refactor",
         f"python3 scripts/recompress_evidence.py --baseline-worktree {baseline_worktree} --out-dir .omx/reports",
         "```",
         "",
