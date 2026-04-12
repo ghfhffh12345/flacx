@@ -77,6 +77,15 @@ def run_command(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str
     return proc
 
 
+def load_authority_compare(compare_json_path: Path) -> dict[str, object] | None:
+    if not compare_json_path.exists():
+        return None
+    try:
+        return json.loads(compare_json_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise EvidenceError(f"invalid authority compare json at {compare_json_path}: {exc}") from exc
+
+
 def locate_binding_corpus(repo_root: Path) -> Path:
     candidates = [repo_root / "test-wavs"]
     candidates.extend(parent / "test-wavs" for parent in repo_root.parents)
@@ -248,10 +257,42 @@ def write_ownership_map(repo_root: Path, out_path: Path) -> None:
     write_text(out_path, "\n".join(lines) + "\n")
 
 
-def write_benchmark_scaffold(repo_root: Path, baseline_worktree: Path, out_path: Path) -> None:
+def write_benchmark_scaffold(
+    repo_root: Path,
+    baseline_worktree: Path,
+    out_path: Path,
+    compare_json_path: Path,
+) -> None:
     head_binary = repo_root / "target" / "release" / "flacx"
     baseline_binary = baseline_worktree / "target" / "release" / "flacx"
     corpus_root = locate_binding_corpus(repo_root)
+    compare = load_authority_compare(compare_json_path)
+    authority_status = "PENDING"
+    authority_details = [
+        f"- Authority compare json present: {'yes' if compare is not None else 'no'} (`{compare_json_path}`)",
+    ]
+    if compare is not None:
+        pass_per_workload = bool(compare.get("pass_per_workload"))
+        pass_aggregate = bool(compare.get("pass_aggregate"))
+        geometric_mean_ratio = compare.get("geometric_mean_ratio")
+        per_workload_gate = compare.get("per_workload_gate", 1.05)
+        aggregate_gate = compare.get("aggregate_gate", 1.03)
+        authority_status = "PASS" if pass_per_workload and pass_aggregate else "FAIL"
+        authority_details.extend(
+            [
+                f"- Current authority status: {authority_status}",
+                f"- Per-workload gate <= {per_workload_gate:.2f}x baseline: {'PASS' if pass_per_workload else 'FAIL'}",
+                f"- Aggregate geomean gate <= {aggregate_gate:.2f}x baseline: {'PASS' if pass_aggregate else 'FAIL'}",
+                f"- Aggregate geomean ratio: {geometric_mean_ratio:.4f}" if isinstance(geometric_mean_ratio, (int, float)) else "- Aggregate geomean ratio: unavailable",
+            ]
+        )
+    else:
+        authority_details.extend(
+            [
+                "- Current authority status: PENDING",
+                "- Run `python3 scripts/cli_perf_compare.py ...` to populate the v0.8.2 authority result.",
+            ]
+        )
     lines = [
         "# Recompress Logic Refactor Benchmark Scaffold",
         "",
@@ -262,6 +303,10 @@ def write_benchmark_scaffold(repo_root: Path, baseline_worktree: Path, out_path:
         f"- HEAD release binary present: {'yes' if head_binary.exists() else 'no'} (`{head_binary}`)",
         f"- v0.8.2 release binary present: {'yes' if baseline_binary.exists() else 'no'} (`{baseline_binary}`)",
         f"- Binding corpus present: {'yes' if corpus_root.exists() else 'no'} (`{corpus_root}`)",
+        "",
+        "## Authority status",
+        "",
+        *authority_details,
         "",
         "## Commands",
         "",
@@ -282,6 +327,7 @@ def write_benchmark_scaffold(repo_root: Path, baseline_worktree: Path, out_path:
         "- `.omx/reports/recompress-benchmark-compare/recompress-logic-refactor.md`",
         "- `.omx/reports/recompress-corpus-diff/recompress-logic-refactor.json`",
         "- `.omx/reports/architecture/recompress-ownership-map.md`",
+        "- `.omx/reports/cli-perf/recompress-logic-refactor/v0.8.2-vs-head.json`",
         "- `.omx/reports/cli-perf/recompress-logic-refactor/v0.8.2-vs-head.md`",
         "",
         "## Binding gate reminder",
@@ -352,6 +398,7 @@ def main() -> int:
     repo_root = Path.cwd().resolve()
     baseline_worktree = Path(args.baseline_worktree).resolve()
     out_root = Path(args.out_dir).resolve()
+    compare_json_path = out_root / "cli-perf" / "recompress-logic-refactor" / "v0.8.2-vs-head.json"
 
     if not baseline_worktree.exists():
         raise EvidenceError(f"baseline worktree missing: {baseline_worktree}")
@@ -364,6 +411,7 @@ def main() -> int:
         repo_root,
         baseline_worktree,
         out_root / "recompress-benchmark-compare" / "recompress-logic-refactor.md",
+        compare_json_path,
     )
     write_corpus_diff(
         repo_root,
