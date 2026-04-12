@@ -26,6 +26,7 @@ RECOMPRESS_ARGS = {
     "level": 0,
     "block_size": 576,
 }
+DEFAULT_ARTIFACT_STEM = "recompress-internal-performance-optimization"
 RESPONSIBILITIES = (
     ("config / policy", ("RecompressMode", "RecompressConfig", "RecompressBuilder")),
     ("source handoff", ("FlacRecompressSource",)),
@@ -262,6 +263,7 @@ def write_benchmark_scaffold(
     baseline_worktree: Path,
     out_path: Path,
     compare_json_path: Path,
+    artifact_stem: str,
 ) -> None:
     head_binary = repo_root / "target" / "release" / "flacx"
     baseline_binary = baseline_worktree / "target" / "release" / "flacx"
@@ -294,7 +296,7 @@ def write_benchmark_scaffold(
             ]
         )
     lines = [
-        "# Recompress Logic Refactor Benchmark Scaffold",
+        f"# {artifact_stem.replace('-', ' ').title()} Benchmark Scaffold",
         "",
         "This scaffold keeps the recompress-specific verification lane explicit even while the implementation is moving.",
         "",
@@ -312,8 +314,8 @@ def write_benchmark_scaffold(
         "",
         "```bash",
         "cargo bench -p flacx --bench throughput -- --noplot",
-        f"python3 scripts/cli_perf_compare.py --baseline-worktree {baseline_worktree} --corpus {corpus_root} --out-dir .omx/reports/cli-perf/recompress-logic-refactor",
-        f"python3 scripts/recompress_evidence.py --baseline-worktree {baseline_worktree} --out-dir .omx/reports",
+        f"python3 scripts/cli_perf_compare.py --baseline-worktree {baseline_worktree} --corpus {corpus_root} --out-dir .omx/reports/cli-perf/{artifact_stem}",
+        f"python3 scripts/recompress_evidence.py --baseline-worktree {baseline_worktree} --out-dir .omx/reports --artifact-stem {artifact_stem}",
         "```",
         "",
         "## Expected benchmark ids",
@@ -324,11 +326,11 @@ def write_benchmark_scaffold(
         "",
         "## Artifact targets",
         "",
-        "- `.omx/reports/recompress-benchmark-compare/recompress-logic-refactor.md`",
-        "- `.omx/reports/recompress-corpus-diff/recompress-logic-refactor.json`",
+        f"- `.omx/reports/recompress-benchmark-compare/{artifact_stem}.md`",
+        f"- `.omx/reports/recompress-corpus-diff/{artifact_stem}.json`",
         "- `.omx/reports/architecture/recompress-ownership-map.md`",
-        "- `.omx/reports/cli-perf/recompress-logic-refactor/v0.8.2-vs-head.json`",
-        "- `.omx/reports/cli-perf/recompress-logic-refactor/v0.8.2-vs-head.md`",
+        f"- `.omx/reports/cli-perf/{artifact_stem}/v0.8.2-vs-head.json`",
+        f"- `.omx/reports/cli-perf/{artifact_stem}/v0.8.2-vs-head.md`",
         "",
         "## Binding gate reminder",
         "",
@@ -390,6 +392,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--baseline-worktree", required=True)
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--artifact-stem", default=DEFAULT_ARTIFACT_STEM)
     return parser.parse_args()
 
 
@@ -398,7 +401,8 @@ def main() -> int:
     repo_root = Path.cwd().resolve()
     baseline_worktree = Path(args.baseline_worktree).resolve()
     out_root = Path(args.out_dir).resolve()
-    compare_json_path = out_root / "cli-perf" / "recompress-logic-refactor" / "v0.8.2-vs-head.json"
+    artifact_stem = args.artifact_stem
+    compare_json_path = out_root / "cli-perf" / artifact_stem / "v0.8.2-vs-head.json"
 
     if not baseline_worktree.exists():
         raise EvidenceError(f"baseline worktree missing: {baseline_worktree}")
@@ -410,18 +414,19 @@ def main() -> int:
     write_benchmark_scaffold(
         repo_root,
         baseline_worktree,
-        out_root / "recompress-benchmark-compare" / "recompress-logic-refactor.md",
+        out_root / "recompress-benchmark-compare" / f"{artifact_stem}.md",
         compare_json_path,
+        artifact_stem,
     )
     write_corpus_diff(
         repo_root,
         baseline_worktree,
-        out_root / "recompress-corpus-diff" / "recompress-logic-refactor.json",
+        out_root / "recompress-corpus-diff" / f"{artifact_stem}.json",
     )
 
     print(out_root / "architecture" / "recompress-ownership-map.md")
-    print(out_root / "recompress-benchmark-compare" / "recompress-logic-refactor.md")
-    print(out_root / "recompress-corpus-diff" / "recompress-logic-refactor.json")
+    print(out_root / "recompress-benchmark-compare" / f"{artifact_stem}.md")
+    print(out_root / "recompress-corpus-diff" / f"{artifact_stem}.json")
     return 0
 
 
