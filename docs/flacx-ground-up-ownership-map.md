@@ -101,7 +101,9 @@ Use these cues when reviewing follow-up changes:
 ## Recompress follow-up audit companion
 
 When a recompress-specific refactor is in flight, pair this document with the
-generated audit artifacts:
+maintainer note in
+[`docs/flacx-recompress-performance-recovery.md`](./flacx-recompress-performance-recovery.md)
+and the generated audit artifacts:
 
 ```bash
 python3 scripts/recompress_evidence.py \
@@ -117,6 +119,11 @@ That command refreshes:
 
 Use those artifacts to keep the recompress ownership split, byte-level
 recompression diff, and v0.8.2 authority prep visible during review.
+
+The recovery note exists specifically for the open April 13, 2026
+encode-side hotspot lane; use it to keep the current checkpoint state,
+review findings, and next measurement targets attached to the same ownership
+map vocabulary.
 
 ## Open review notes
 
