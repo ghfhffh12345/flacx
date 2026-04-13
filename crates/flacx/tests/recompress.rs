@@ -117,6 +117,31 @@ fn recompress_is_deterministic_for_repeat_runs() {
 }
 
 #[test]
+fn recompress_produces_identical_output_across_thread_counts() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let single_threaded = recompress_with_config(
+        RecompressConfig::default()
+            .with_threads(1)
+            .with_level(flacx::level::Level::Level0)
+            .with_block_size(576),
+        &flac,
+    )
+    .unwrap();
+    let multi_threaded = recompress_with_config(
+        RecompressConfig::default()
+            .with_threads(4)
+            .with_level(flacx::level::Level::Level0)
+            .with_block_size(576),
+        &flac,
+    )
+    .unwrap();
+
+    assert_eq!(single_threaded.1, multi_threaded.1);
+    assert_eq!(single_threaded.0, multi_threaded.0);
+}
+
+#[test]
 fn recompress_preserves_optional_metadata_blocks() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
@@ -196,6 +221,14 @@ fn recompress_builder_matches_fluent_config() {
 fn recompress_verifier_keeps_the_full_decode_fast_path_available() {
     let source = include_str!("../src/recompress/verify.rs");
     assert!(source.contains("take_decoded_samples"));
+}
+
+#[test]
+fn recompress_session_keeps_the_buffered_encode_fast_path() {
+    let source = include_str!("../src/recompress/session.rs");
+    assert!(source.contains("into_verified_pcm_stream()?"));
+    assert!(source.contains("encode_buffered_pcm_with_sink"));
+    assert!(!source.contains("encoder.encode(pcm_stream)"));
 }
 
 #[cfg(feature = "progress")]

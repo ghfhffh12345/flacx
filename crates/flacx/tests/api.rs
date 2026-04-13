@@ -137,6 +137,18 @@ fn recompress_public_exports_remain_stable() {
     assert!(source.contains("RecompressProgress, RecompressSummary, Recompressor,"));
 }
 
+#[test]
+fn recompress_verification_lane_keeps_the_v082_authority_gate_bound() {
+    let evidence = include_str!("../../../scripts/recompress_evidence.py");
+    let throughput_bench = include_str!("../benches/throughput.rs");
+
+    assert!(evidence.contains("v0.8.2-vs-head.json"));
+    assert!(evidence.contains("scripts/cli_perf_compare.py"));
+    assert!(evidence.contains("recompress_corpus_throughput"));
+    assert!(evidence.contains("Performance authority remains the historical v0.8.2 compare"));
+    assert!(throughput_bench.contains("\"recompress_corpus_throughput\""));
+}
+
 #[cfg(feature = "aiff")]
 #[test]
 fn builtin_encode_file_accepts_aiff_inputs() {
