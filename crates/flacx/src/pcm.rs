@@ -106,41 +106,48 @@ pub(crate) fn append_encoded_sample(
         .ok_or(Error::InvalidWav(
             "valid bits cannot exceed container bits for encoding",
         ))? as u32;
-    let sample = sample
-        .checked_shl(shift)
-        .ok_or(Error::UnsupportedWav(format!(
-            "unsupported valid bits/container bits combination: {}/{}",
-            envelope.valid_bits_per_sample, envelope.container_bits_per_sample
-        )))?;
 
     match envelope.container_bits_per_sample {
         8 => {
             let bias = 1i32 << (envelope.valid_bits_per_sample - 1);
-            let value = sample
-                .checked_add(bias)
+            let stored = (i64::from(sample) + i64::from(bias))
+                .checked_shl(shift)
                 .ok_or_else(|| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
-            let value = u8::try_from(value)
+            let stored = u8::try_from(stored)
                 .map_err(|_| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
-            buffer.push(value);
+            buffer.push(stored);
             Ok(())
         }
         16 => {
-            let value = i16::try_from(sample)
+            let stored =
+                i16::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                    Error::UnsupportedWav("16-bit sample is out of range".into())
+                })?)
                 .map_err(|_| Error::UnsupportedWav("16-bit sample is out of range".into()))?;
-            buffer.extend_from_slice(&value.to_le_bytes());
+            buffer.extend_from_slice(&stored.to_le_bytes());
             Ok(())
         }
         24 => {
-            if !(-8_388_608..=8_388_607).contains(&sample) {
-                return Err(Error::UnsupportedWav(
-                    "24-bit sample is out of range".into(),
-                ));
-            }
-            buffer.extend_from_slice(&(sample as u32).to_le_bytes()[..3]);
+            let stored =
+                i32::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                    Error::UnsupportedWav("24-bit sample is out of range".into())
+                })?)
+                .map_err(|_| Error::UnsupportedWav("24-bit sample is out of range".into()))?;
+            let value = stored as u32;
+            buffer.extend_from_slice(&[
+                (value & 0xff) as u8,
+                ((value >> 8) & 0xff) as u8,
+                ((value >> 16) & 0xff) as u8,
+            ]);
             Ok(())
         }
         32 => {
-            buffer.extend_from_slice(&sample.to_le_bytes());
+            let stored =
+                i32::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                    Error::UnsupportedWav("32-bit sample is out of range".into())
+                })?)
+                .map_err(|_| Error::UnsupportedWav("32-bit sample is out of range".into()))?;
+            buffer.extend_from_slice(&stored.to_le_bytes());
             Ok(())
         }
         _ => Err(Error::UnsupportedWav(format!(
