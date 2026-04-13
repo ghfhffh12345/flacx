@@ -25,8 +25,8 @@ use crate::{
 const FRAME_CHUNK_SIZE: usize = 32;
 
 pub(crate) struct EncodedChunk {
-    start_frame: usize,
-    frames: Vec<EncodedFrame>,
+    pub(crate) start_frame: usize,
+    pub(crate) frames: Vec<EncodedFrame>,
 }
 
 pub(crate) fn encode_stream<W, S, P>(

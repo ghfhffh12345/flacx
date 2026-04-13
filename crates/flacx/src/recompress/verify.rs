@@ -1,10 +1,11 @@
 use std::io::{Read, Seek};
 
 use crate::{
+    error::Error,
     error::Result,
-    input::{EncodePcmStream, WavSpec},
+    input::{EncodePcmStream, PcmStream, WavSpec},
     md5::{StreaminfoMd5, verify_streaminfo_digest},
-    read::FlacPcmStream,
+    read::{DecodePcmStream, FlacPcmStream},
 };
 
 pub(super) struct VerifyingPcmStream<R> {
@@ -33,6 +34,24 @@ impl<R> VerifyingPcmStream<R> {
     }
 }
 
+impl<R: Read + Seek> VerifyingPcmStream<R> {
+    pub(super) fn into_verified_pcm_stream(mut self) -> Result<(PcmStream, [u8; 16])> {
+        let spec = self.spec();
+        let (samples, _frame_count) = self
+            .inner
+            .take_decoded_samples()?
+            .ok_or(Error::InvalidFlac("recompress source already consumed"))?;
+        self.md5
+            .as_mut()
+            .expect("md5 state present")
+            .update_samples(&samples)?;
+        let actual_md5 = self.md5.take().expect("md5 state present").finalize()?;
+        verify_streaminfo_digest(actual_md5, self.expected_md5)?;
+        self.verified = true;
+        Ok((PcmStream { spec, samples }, self.expected_md5))
+    }
+}
+
 impl<R: Read + Seek> EncodePcmStream for VerifyingPcmStream<R> {
     fn spec(&self) -> WavSpec {
         self.spec()
@@ -40,6 +59,32 @@ impl<R: Read + Seek> EncodePcmStream for VerifyingPcmStream<R> {
 
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
         let output_start = output.len();
+        let total_samples = usize::try_from(self.spec().total_samples).unwrap_or(usize::MAX);
+        if !self.verified && max_frames >= total_samples {
+            if let Some((samples, _frame_count)) = self.inner.take_decoded_samples()? {
+                let frames = samples.len() / usize::from(self.spec().channels);
+                if frames == 0 {
+                    verify_streaminfo_digest(
+                        self.md5.take().expect("md5 state present").finalize()?,
+                        self.expected_md5,
+                    )?;
+                    self.verified = true;
+                    return Ok(0);
+                }
+                self.md5
+                    .as_mut()
+                    .expect("md5 state present")
+                    .update_samples(&samples)?;
+                verify_streaminfo_digest(
+                    self.md5.take().expect("md5 state present").finalize()?,
+                    self.expected_md5,
+                )?;
+                self.verified = true;
+                output.extend_from_slice(&samples);
+                return Ok(frames);
+            }
+        }
+
         let frames = self.inner.read_chunk(max_frames, output)?;
         if frames == 0 {
             if !self.verified {

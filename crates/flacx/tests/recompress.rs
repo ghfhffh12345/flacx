@@ -101,6 +101,22 @@ fn builtin_recompress_file_matches_explicit_reader_session_output() {
 }
 
 #[test]
+fn recompress_is_deterministic_for_repeat_runs() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let config = RecompressConfig::default()
+        .with_threads(1)
+        .with_level(flacx::level::Level::Level0)
+        .with_block_size(576);
+
+    let first = recompress_with_config(config, &flac).unwrap();
+    let second = recompress_with_config(config, &flac).unwrap();
+
+    assert_eq!(first.1, second.1);
+    assert_eq!(first.0, second.0);
+}
+
+#[test]
 fn recompress_preserves_optional_metadata_blocks() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
@@ -174,6 +190,12 @@ fn recompress_builder_matches_fluent_config() {
     assert_eq!(builder.level(), flacx::level::Level::Level0);
     assert_eq!(builder.threads(), 4);
     assert_eq!(builder.block_size(), Some(576));
+}
+
+#[test]
+fn recompress_verifier_keeps_the_full_decode_fast_path_available() {
+    let source = include_str!("../src/recompress/verify.rs");
+    assert!(source.contains("take_decoded_samples"));
 }
 
 #[cfg(feature = "progress")]

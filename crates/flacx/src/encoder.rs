@@ -4,15 +4,27 @@
 //! spec/metadata, bind an output writer through [`EncoderConfig::into_encoder`],
 //! then feed the resulting single-pass PCM stream into [`Encoder::encode`].
 
-use std::io::{Seek, Write};
+use std::{
+    collections::BTreeMap,
+    io::{Seek, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    thread,
+};
 
 use crate::{
     config::{EncoderBuilder, EncoderConfig},
-    encode_pipeline::encode_stream,
-    error::Result,
-    input::EncodePcmStream,
+    encode_pipeline::{EncodedChunk, encode_stream, write_encoded_chunk},
+    error::{Error, Result},
+    input::{EncodePcmStream, PcmStream},
     metadata::EncodeMetadata,
+    model::encode_frame,
+    plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
     progress::{NoProgress, ProgressSink},
+    write::{FlacWriter, FrameHeaderNumber},
 };
 
 #[cfg(feature = "progress")]
@@ -183,4 +195,160 @@ where
             progress,
         )
     }
+
+    pub(crate) fn encode_buffered_pcm_with_sink<P>(
+        &mut self,
+        pcm: PcmStream,
+        streaminfo_md5: [u8; 16],
+        progress: &mut P,
+    ) -> Result<EncodeSummary>
+    where
+        P: ProgressSink,
+    {
+        let PcmStream { spec, samples } = pcm;
+        let plan = EncodePlan::new(spec, self.config.clone())?;
+        let mut stream_info = plan.stream_info();
+        stream_info.md5 = streaminfo_md5;
+        let has_preserved_bundle = self.metadata.has_preserved_bundle();
+        let metadata_blocks = self.metadata.flac_blocks();
+        let mut writer = FlacWriter::new(
+            &mut self.writer,
+            stream_info,
+            &metadata_blocks,
+            plan.total_frames,
+            !has_preserved_bundle,
+        )?;
+
+        if plan.total_frames == 0 {
+            let (_, stream_info) = writer.finalize()?;
+            return Ok(summary_from_stream_info(stream_info, 0));
+        }
+
+        let total_frames = plan.total_frames;
+        encode_buffered_frames(&self.config, plan, samples, &mut writer, progress)?;
+
+        let (_, stream_info) = writer.finalize()?;
+        Ok(summary_from_stream_info(stream_info, total_frames))
+    }
+}
+
+fn encode_buffered_frames<W, P>(
+    config: &EncoderConfig,
+    plan: EncodePlan,
+    samples: Vec<i32>,
+    writer: &mut FlacWriter<&mut W>,
+    progress: &mut P,
+) -> Result<()>
+where
+    W: Write + Seek,
+    P: ProgressSink,
+{
+    const FRAME_CHUNK_SIZE: usize = 32;
+
+    let worker_count = config.threads.max(1).min(plan.total_frames.max(1));
+    let next_frame = Arc::new(AtomicUsize::new(0));
+    let samples: Arc<[i32]> = Arc::from(samples);
+    let channels = usize::from(plan.spec.channels);
+
+    thread::scope(|scope| -> Result<()> {
+        let (sender, receiver) = mpsc::channel();
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next_frame = Arc::clone(&next_frame);
+            let samples = Arc::clone(&samples);
+            let plan = plan.clone();
+
+            scope.spawn(move || {
+                loop {
+                    let chunk_start = next_frame.fetch_add(FRAME_CHUNK_SIZE, Ordering::Relaxed);
+                    if chunk_start >= plan.total_frames {
+                        break;
+                    }
+                    let chunk_end = (chunk_start + FRAME_CHUNK_SIZE).min(plan.total_frames);
+                    let mut encoded_frames = Vec::with_capacity(chunk_end - chunk_start);
+
+                    for frame_index in chunk_start..chunk_end {
+                        let frame_plan = plan.frame(frame_index);
+                        let frame_samples = usize::from(frame_plan.block_size);
+                        let sample_start = usize::try_from(frame_plan.sample_offset)
+                            .expect("sample offset fits usize")
+                            * channels;
+                        let sample_end = sample_start + frame_samples * channels;
+                        let frame = encode_frame(
+                            &samples[sample_start..sample_end],
+                            plan.spec.channels,
+                            plan.spec.bits_per_sample,
+                            plan.spec.sample_rate,
+                            match frame_plan.coded_number_kind {
+                                FrameCodedNumberKind::FrameNumber => {
+                                    FrameHeaderNumber::Frame(frame_plan.coded_number)
+                                }
+                                FrameCodedNumberKind::SampleNumber => {
+                                    FrameHeaderNumber::Sample(frame_plan.coded_number)
+                                }
+                            },
+                            plan.profile,
+                        );
+                        match frame {
+                            Ok(frame) => encoded_frames.push(frame),
+                            Err(error) => {
+                                let _ = sender.send(Err(error));
+                                return;
+                            }
+                        }
+                    }
+
+                    if sender
+                        .send(Ok(EncodedChunk {
+                            start_frame: chunk_start,
+                            frames: encoded_frames,
+                        }))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+
+        drop(sender);
+        let mut next_expected = 0usize;
+        let mut processed_samples = 0u64;
+        let mut pending: BTreeMap<usize, EncodedChunk> = BTreeMap::new();
+        while next_expected < plan.total_frames {
+            let encoded_chunk = receiver.recv().map_err(|_| {
+                Error::Thread("frame worker channel closed before all frames were encoded".into())
+            })??;
+            if encoded_chunk.start_frame == next_expected {
+                let chunk_start = encoded_chunk.start_frame;
+                next_expected = chunk_start + encoded_chunk.frames.len();
+                processed_samples = write_encoded_chunk(
+                    writer,
+                    encoded_chunk,
+                    processed_samples,
+                    plan.spec.total_samples,
+                    chunk_start,
+                    plan.total_frames,
+                    progress,
+                )?;
+                while let Some(chunk) = pending.remove(&next_expected) {
+                    let chunk_start = chunk.start_frame;
+                    next_expected = chunk_start + chunk.frames.len();
+                    processed_samples = write_encoded_chunk(
+                        writer,
+                        chunk,
+                        processed_samples,
+                        plan.spec.total_samples,
+                        chunk_start,
+                        plan.total_frames,
+                        progress,
+                    )?;
+                }
+            } else {
+                pending.insert(encoded_chunk.start_frame, encoded_chunk);
+            }
+        }
+
+        Ok(())
+    })
 }

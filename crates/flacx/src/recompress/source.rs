@@ -3,7 +3,7 @@ use std::io::{Read, Seek};
 use crate::{
     EncodeMetadata,
     error::Result,
-    input::{EncodePcmStream, WavSpec},
+    input::{EncodePcmStream, PcmStream, WavSpec},
     read::FlacReader,
 };
 
@@ -64,6 +64,11 @@ impl<R: Read + Seek> FlacRecompressSource<R> {
     /// Set the worker-thread count used by the decode-side FLAC reader stream.
     pub fn set_threads(&mut self, threads: usize) {
         self.stream.set_threads(threads);
+    }
+
+    pub(super) fn into_verified_pcm_stream(self) -> Result<(EncodeMetadata, PcmStream, [u8; 16])> {
+        let (pcm_stream, streaminfo_md5) = self.stream.into_verified_pcm_stream()?;
+        Ok((self.metadata, pcm_stream, streaminfo_md5))
     }
 }
 

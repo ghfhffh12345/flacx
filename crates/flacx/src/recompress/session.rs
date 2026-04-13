@@ -160,8 +160,9 @@ where
             total_frames: 0,
         })?;
 
+        let (metadata, pcm_stream, streaminfo_md5) = source.into_verified_pcm_stream()?;
         let encode_config = self.config.encode_config();
-        let encode_plan = EncodePlan::new(source.spec(), encode_config.clone())?;
+        let encode_plan = EncodePlan::new(pcm_stream.spec, encode_config.clone())?;
         progress.on_progress(RecompressProgress {
             phase: RecompressPhase::Encode,
             phase_processed_samples: 0,
@@ -172,14 +173,17 @@ where
             total_frames: encode_plan.total_frames,
         })?;
 
-        let metadata = source.metadata().clone();
         let mut encode_progress = EncodePhaseProgress {
             sink: progress,
             total_samples,
         };
         let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
         encoder.set_metadata(metadata);
-        let summary = encoder.encode_with_sink(source, &mut encode_progress)?;
+        let summary = encoder.encode_buffered_pcm_with_sink(
+            pcm_stream,
+            streaminfo_md5,
+            &mut encode_progress,
+        )?;
         Ok(summary.into())
     }
 }
