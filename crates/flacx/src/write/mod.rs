@@ -1,4 +1,4 @@
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 
 use crate::{
     metadata::{FlacMetadataBlock, SEEKTABLE_BLOCK_TYPE, SEEKTABLE_POINT_LEN, SeekPoint},
@@ -17,9 +17,11 @@ pub(crate) use frame::{
 const MAX_METADATA_PAYLOAD_LEN: usize = 0x00ff_ffff;
 const MAX_SEEKTABLE_POINTS: usize = MAX_METADATA_PAYLOAD_LEN / SEEKTABLE_POINT_LEN;
 const STREAMINFO_LENGTH: u32 = 34;
+const FLAC_STREAM_BUFFER_CAPACITY: usize = 1024 * 1024;
 
 pub(crate) struct FlacWriter<W: Seek + Write> {
-    writer: W,
+    writer: BufWriter<W>,
+    position: u64,
     stream_info: StreamInfo,
     streaminfo_offset: u64,
     seektable: Option<SeekTableReservation>,
@@ -33,6 +35,13 @@ impl<W: Seek + Write> FlacWriter<W> {
         total_frames: usize,
         allow_implicit_seektable: bool,
     ) -> io::Result<Self> {
+        let mut position = writer.stream_position()?;
+        let mut writer = BufWriter::with_capacity(FLAC_STREAM_BUFFER_CAPACITY, writer);
+        let write_counted = |writer: &mut BufWriter<W>, position: &mut u64, bytes: &[u8]| {
+            writer.write_all(bytes)?;
+            *position = position.saturating_add(bytes.len() as u64);
+            Ok::<(), io::Error>(())
+        };
         let has_explicit_seektable = metadata_blocks
             .iter()
             .any(|block| matches!(block, FlacMetadataBlock::SeekTable(_)));
@@ -41,38 +50,55 @@ impl<W: Seek + Write> FlacWriter<W> {
         } else {
             SeekTableSelection::for_total_frames(total_frames)
         };
-        writer.write_all(b"fLaC")?;
-        writer.write_all(&metadata_block_header(
-            0,
-            metadata_blocks.is_empty() && seektable_selection.is_none(),
-            STREAMINFO_LENGTH,
-        )?)?;
-        let streaminfo_offset = writer.stream_position()?;
-        writer.write_all(&stream_info.to_bytes())?;
+        write_counted(&mut writer, &mut position, b"fLaC")?;
+        write_counted(
+            &mut writer,
+            &mut position,
+            &metadata_block_header(
+                0,
+                metadata_blocks.is_empty() && seektable_selection.is_none(),
+                STREAMINFO_LENGTH,
+            )?,
+        )?;
+        let streaminfo_offset = position;
+        write_counted(&mut writer, &mut position, &stream_info.to_bytes())?;
         let mut seektable_payload_offset = None;
         if let Some(selection) = &seektable_selection {
-            writer.write_all(&metadata_block_header(
-                SEEKTABLE_BLOCK_TYPE,
-                metadata_blocks.is_empty(),
-                selection.payload_len,
-            )?)?;
-            let payload_offset = writer.stream_position()?;
-            writer.write_all(&vec![0u8; selection.payload_len as usize])?;
+            write_counted(
+                &mut writer,
+                &mut position,
+                &metadata_block_header(
+                    SEEKTABLE_BLOCK_TYPE,
+                    metadata_blocks.is_empty(),
+                    selection.payload_len,
+                )?,
+            )?;
+            let payload_offset = position;
+            write_counted(
+                &mut writer,
+                &mut position,
+                &vec![0u8; selection.payload_len as usize],
+            )?;
             seektable_payload_offset = Some(payload_offset);
         }
         for (index, block) in metadata_blocks.iter().enumerate() {
             let payload = block.payload();
-            writer.write_all(&metadata_block_header(
-                block.block_type(),
-                index + 1 == metadata_blocks.len(),
-                payload.len() as u32,
-            )?)?;
-            writer.write_all(&payload)?;
+            write_counted(
+                &mut writer,
+                &mut position,
+                &metadata_block_header(
+                    block.block_type(),
+                    index + 1 == metadata_blocks.len(),
+                    payload.len() as u32,
+                )?,
+            )?;
+            write_counted(&mut writer, &mut position, &payload)?;
         }
-        let first_frame_header_offset = writer.stream_position()?;
+        let first_frame_header_offset = position;
 
         Ok(Self {
             writer,
+            position,
             stream_info,
             streaminfo_offset,
             seektable: seektable_selection.map(|selection| {
@@ -93,11 +119,10 @@ impl<W: Seek + Write> FlacWriter<W> {
         frame: &[u8],
     ) -> io::Result<()> {
         if let Some(seektable) = &mut self.seektable {
-            let frame_offset = self.writer.stream_position()?;
-            seektable.record_frame(frame_index, sample_offset, frame_offset, sample_count);
+            seektable.record_frame(frame_index, sample_offset, self.position, sample_count);
         }
         self.stream_info.update_frame_size(frame.len() as u32);
-        self.writer.write_all(frame)
+        self.write_all_counted(frame)
     }
 
     pub(crate) fn set_streaminfo_md5(&mut self, md5: [u8; 16]) {
@@ -105,18 +130,33 @@ impl<W: Seek + Write> FlacWriter<W> {
     }
 
     pub(crate) fn finalize(mut self) -> io::Result<(W, StreamInfo)> {
-        let end_position = self.writer.stream_position()?;
+        let end_position = self.position;
         if let Some(seektable) = &self.seektable {
-            self.writer
-                .seek(SeekFrom::Start(seektable.payload_offset))?;
-            self.writer.write_all(&seektable.payload()?)?;
-            self.writer.seek(SeekFrom::Start(end_position))?;
+            let payload = seektable.payload()?;
+            self.seek_counted(SeekFrom::Start(seektable.payload_offset))?;
+            self.write_all_counted(&payload)?;
+            self.seek_counted(SeekFrom::Start(end_position))?;
         }
-        self.writer.seek(SeekFrom::Start(self.streaminfo_offset))?;
-        self.writer.write_all(&self.stream_info.to_bytes())?;
-        self.writer.seek(SeekFrom::Start(end_position))?;
+        self.seek_counted(SeekFrom::Start(self.streaminfo_offset))?;
+        self.write_all_counted(&self.stream_info.to_bytes())?;
+        self.seek_counted(SeekFrom::Start(end_position))?;
         self.writer.flush()?;
-        Ok((self.writer, self.stream_info))
+        let writer = self
+            .writer
+            .into_inner()
+            .map_err(|error| error.into_error())?;
+        Ok((writer, self.stream_info))
+    }
+
+    fn write_all_counted(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.writer.write_all(bytes)?;
+        self.position = self.position.saturating_add(bytes.len() as u64);
+        Ok(())
+    }
+
+    fn seek_counted(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.position = self.writer.seek(position)?;
+        Ok(self.position)
     }
 }
 

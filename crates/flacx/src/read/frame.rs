@@ -80,6 +80,28 @@ where
     }
 
     let worker_count = config.threads.max(1).min(frames.len());
+    if worker_count == 1 || frames.len() <= FRAME_CHUNK_SIZE {
+        let mut processed_samples = 0u64;
+        let total_frames = frames.len();
+        let mut decoded_frames = Vec::with_capacity(total_frames);
+        for frame in frames.iter() {
+            let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
+            decoded_frames.push(decode_frame_samples_indexed(frame_bytes, frame));
+        }
+        processed_samples = process_frame_chunk_results(
+            samples,
+            decoded_frames,
+            &frames,
+            processed_samples,
+            stream_info,
+            progress,
+            0,
+            total_frames,
+        )?;
+        debug_assert_eq!(processed_samples, stream_info.total_samples);
+        return Ok(());
+    }
+
     let next_chunk = Arc::new(AtomicUsize::new(0));
 
     thread::scope(|scope| -> Result<()> {
