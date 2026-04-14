@@ -175,6 +175,7 @@ terminal.
 - interactive terminals show live encode/decode/recompress progress lines
 - redirected or non-interactive runs suppress the progress UI
 - progress data comes from the library progress hooks; the CLI only renders it
+- progress changes render immediately, while elapsed time and ETA refresh on one-second heartbeat ticks when callbacks are sparse
 - single-file runs show the current filename, percent, elapsed time, ETA, and rate
 - directory runs show overall batch progress and per-file progress on separate live lines
 - recompress progress is phase-aware and reports both decode and encode work

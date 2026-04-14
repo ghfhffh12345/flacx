@@ -39,6 +39,8 @@ use std::{
     fs::{self, File},
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -54,8 +56,7 @@ use walkdir::WalkDir;
 const SINGLE_PROGRESS_BAR_WIDTH: usize = 24;
 const BATCH_PROGRESS_BAR_WIDTH: usize = 10;
 const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
-const SINGLE_RENDER_INTERVAL: Duration = Duration::from_millis(125);
-const BATCH_RENDER_INTERVAL: Duration = Duration::from_millis(250);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const CLI_READ_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
 const CLI_WRITE_BUFFER_CAPACITY: usize = 10 * 1024 * 1024;
 
@@ -238,11 +239,27 @@ struct CurrentFileProgress {
     phase_started_at: Option<Instant>,
 }
 
+#[derive(Debug)]
+enum ProgressEvent {
+    BeginFile {
+        filename: String,
+        input_bytes: u64,
+        phase_total_samples: u64,
+        overall_total_samples: u64,
+    },
+    Progress(ProgressSnapshot),
+    RecompressProgress(RecompressProgress),
+    FinishCurrentFile,
+}
+
 struct ProgressTrace {
     file: File,
     kind: CommandKind,
     interactive: bool,
     batch_mode: bool,
+    started_at: Instant,
+    planning_started_at: Option<Instant>,
+    command_header_written: bool,
 }
 
 pub fn encode_command(
@@ -250,73 +267,74 @@ pub fn encode_command(
     interactive: bool,
     stderr: &mut impl Write,
 ) -> Result<()> {
-    let planned = plan_encode_worklist(command)?;
-    let trace = ProgressTrace::from_env(CommandKind::Encode, interactive, planned.is_directory)?;
-    let mut progress = BatchProgressCoordinator::new(
+    let (planned, trace) = plan_with_trace(CommandKind::Encode, interactive, || {
+        plan_encode_worklist(command)
+    })?;
+    let config = command.config.clone();
+    let raw_descriptor = command.raw_descriptor;
+
+    run_with_progress_events(
         stderr,
         interactive,
         trace,
         planned.total_samples,
         planned.is_directory,
-    );
+        move |sender| {
+            for item in planned.items {
+                if item.ensure_parent_dirs {
+                    ensure_output_parent_dirs(&item.output)?;
+                }
+                send_progress_event(
+                    &sender,
+                    ProgressEvent::BeginFile {
+                        filename: item.display_name.clone(),
+                        input_bytes: item.input_bytes,
+                        phase_total_samples: item.phase_total_samples,
+                        overall_total_samples: item.overall_total_samples,
+                    },
+                )?;
+                let result = if let Some(raw_descriptor) = raw_descriptor {
+                    let reader =
+                        RawPcmReader::new(open_buffered_reader(&item.input)?, raw_descriptor)?;
+                    let stream = reader.into_pcm_stream()?;
+                    let mut encoder = config
+                        .clone()
+                        .into_encoder(create_buffered_writer(&item.output)?);
+                    encoder
+                        .encode_with_progress(stream, |update| {
+                            send_progress_event(&sender, ProgressEvent::Progress(update))?;
+                            Ok(())
+                        })
+                        .map(|_| ())
+                } else {
+                    let reader = read_pcm_reader_with_options(
+                        open_buffered_reader(&item.input)?,
+                        PcmReaderOptions {
+                            capture_fxmd: config.capture_fxmd,
+                            strict_fxmd_validation: config.strict_fxmd_validation,
+                        },
+                    )?;
+                    let metadata = reader.metadata().clone();
+                    let stream = reader.into_pcm_stream();
+                    let mut encoder = config
+                        .clone()
+                        .into_encoder(create_buffered_writer(&item.output)?);
+                    encoder.set_metadata(metadata);
+                    encoder
+                        .encode_with_progress(stream, |update| {
+                            send_progress_event(&sender, ProgressEvent::Progress(update))?;
+                            Ok(())
+                        })
+                        .map(|_| ())
+                };
 
-    for item in planned.items {
-        if item.ensure_parent_dirs {
-            ensure_output_parent_dirs(&item.output)?;
-        }
-        progress.begin_file(
-            &item.display_name,
-            item.input_bytes,
-            item.phase_total_samples,
-            item.overall_total_samples,
-        );
-        let result = if let Some(raw_descriptor) = command.raw_descriptor {
-            let reader = RawPcmReader::new(open_buffered_reader(&item.input)?, raw_descriptor)?;
-            let stream = reader.into_pcm_stream()?;
-            let mut encoder = command
-                .config
-                .clone()
-                .into_encoder(create_buffered_writer(&item.output)?);
-            encoder
-                .encode_with_progress(stream, |update| {
-                    progress.observe(update)?;
-                    Ok(())
-                })
-                .map(|_| ())
-        } else {
-            let reader = read_pcm_reader_with_options(
-                open_buffered_reader(&item.input)?,
-                PcmReaderOptions {
-                    capture_fxmd: command.config.capture_fxmd,
-                    strict_fxmd_validation: command.config.strict_fxmd_validation,
-                },
-            )?;
-            let metadata = reader.metadata().clone();
-            let stream = reader.into_pcm_stream();
-            let mut encoder = command
-                .config
-                .clone()
-                .into_encoder(create_buffered_writer(&item.output)?);
-            encoder.set_metadata(metadata);
-            encoder
-                .encode_with_progress(stream, |update| {
-                    progress.observe(update)?;
-                    Ok(())
-                })
-                .map(|_| ())
-        };
-
-        match result {
-            Ok(_) => progress.finish_current_file()?,
-            Err(error) => {
-                let _ = progress.end();
-                return Err(error);
+                result?;
+                send_progress_event(&sender, ProgressEvent::FinishCurrentFile)?;
             }
-        }
-    }
 
-    progress.finish()?;
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 pub fn decode_command(
@@ -324,60 +342,56 @@ pub fn decode_command(
     interactive: bool,
     stderr: &mut impl Write,
 ) -> Result<()> {
-    let planned = plan_decode_worklist(command)?;
-    let trace = ProgressTrace::from_env(CommandKind::Decode, interactive, planned.is_directory)?;
-    let mut progress = BatchProgressCoordinator::new(
+    let (planned, trace) = plan_with_trace(CommandKind::Decode, interactive, || {
+        plan_decode_worklist(command)
+    })?;
+    let config = command.config;
+
+    run_with_progress_events(
         stderr,
         interactive,
         trace,
         planned.total_samples,
         planned.is_directory,
-    );
-
-    for item in planned.items {
-        if item.ensure_parent_dirs {
-            ensure_output_parent_dirs(&item.output)?;
-        }
-        progress.begin_file(
-            &item.display_name,
-            item.input_bytes,
-            item.phase_total_samples,
-            item.overall_total_samples,
-        );
-        let output_container = decode_output_container_from_path(&item.output)?
-            .unwrap_or(command.config.output_container);
-        let reader = read_flac_reader_with_options(
-            open_buffered_reader(&item.input)?,
-            FlacReaderOptions {
-                strict_seektable_validation: command.config.strict_seektable_validation,
-                strict_channel_mask_provenance: command.config.strict_channel_mask_provenance,
-            },
-        )?;
-        let metadata = reader.metadata().clone();
-        let stream = reader.into_pcm_stream();
-        let mut decoder = command
-            .config
-            .with_output_container(output_container)
-            .into_decoder(create_buffered_writer(&item.output)?);
-        decoder.set_metadata(metadata);
-        let result = decoder
-            .decode_with_progress(stream, |update| {
-                progress.observe(update)?;
-                Ok(())
-            })
-            .map(|_| ());
-
-        match result {
-            Ok(_) => progress.finish_current_file()?,
-            Err(error) => {
-                let _ = progress.end();
-                return Err(error);
+        move |sender| {
+            for item in planned.items {
+                if item.ensure_parent_dirs {
+                    ensure_output_parent_dirs(&item.output)?;
+                }
+                send_progress_event(
+                    &sender,
+                    ProgressEvent::BeginFile {
+                        filename: item.display_name.clone(),
+                        input_bytes: item.input_bytes,
+                        phase_total_samples: item.phase_total_samples,
+                        overall_total_samples: item.overall_total_samples,
+                    },
+                )?;
+                let output_container = decode_output_container_from_path(&item.output)?
+                    .unwrap_or(config.output_container);
+                let reader = read_flac_reader_with_options(
+                    open_buffered_reader(&item.input)?,
+                    FlacReaderOptions {
+                        strict_seektable_validation: config.strict_seektable_validation,
+                        strict_channel_mask_provenance: config.strict_channel_mask_provenance,
+                    },
+                )?;
+                let metadata = reader.metadata().clone();
+                let stream = reader.into_pcm_stream();
+                let mut decoder = config
+                    .with_output_container(output_container)
+                    .into_decoder(create_buffered_writer(&item.output)?);
+                decoder.set_metadata(metadata);
+                decoder.decode_with_progress(stream, |update| {
+                    send_progress_event(&sender, ProgressEvent::Progress(update))?;
+                    Ok(())
+                })?;
+                send_progress_event(&sender, ProgressEvent::FinishCurrentFile)?;
             }
-        }
-    }
 
-    progress.finish()?;
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 fn recompress_temp_output_path(path: &Path) -> PathBuf {
@@ -418,63 +432,84 @@ fn decode_output_container_from_path(path: &Path) -> Result<Option<flacx::PcmCon
     }
 }
 
+fn plan_with_trace(
+    kind: CommandKind,
+    interactive: bool,
+    plan: impl FnOnce() -> Result<PlannedWorklist>,
+) -> Result<(PlannedWorklist, Option<ProgressTrace>)> {
+    let mut trace = ProgressTrace::from_env(kind, interactive)?;
+    if let Some(trace) = trace.as_mut() {
+        trace.on_planning_start()?;
+    }
+    let planned = plan()?;
+    if let Some(trace) = trace.as_mut() {
+        trace.on_planning_finish(
+            planned.is_directory,
+            planned.items.len(),
+            planned.total_samples,
+        )?;
+    }
+    Ok((planned, trace))
+}
+
 pub fn recompress_command(
     command: &RecompressCommand,
     interactive: bool,
     stderr: &mut impl Write,
 ) -> Result<()> {
-    let planned = plan_recompress_worklist(command)?;
-    let trace =
-        ProgressTrace::from_env(CommandKind::Recompress, interactive, planned.is_directory)?;
-    let mut progress = BatchProgressCoordinator::new(
+    let (planned, trace) = plan_with_trace(CommandKind::Recompress, interactive, || {
+        plan_recompress_worklist(command)
+    })?;
+    let config = command.config;
+
+    run_with_progress_events(
         stderr,
         interactive,
         trace,
         planned.total_samples,
         planned.is_directory,
-    );
+        move |sender| {
+            for item in planned.items {
+                if item.ensure_parent_dirs {
+                    ensure_output_parent_dirs(&item.output)?;
+                }
+                send_progress_event(
+                    &sender,
+                    ProgressEvent::BeginFile {
+                        filename: item.display_name.clone(),
+                        input_bytes: item.input_bytes,
+                        phase_total_samples: item.phase_total_samples,
+                        overall_total_samples: item.overall_total_samples,
+                    },
+                )?;
+                let temp_output = recompress_temp_output_path(&item.output);
+                let reader = read_flac_reader_with_options(
+                    open_buffered_reader(&item.input)?,
+                    recompress_reader_options(config),
+                )?;
+                let source = FlacRecompressSource::from_reader(reader);
+                let mut recompressor =
+                    config.into_recompressor(create_buffered_writer(&temp_output)?);
+                let result = recompressor.recompress_with_progress(source, |update| {
+                    send_progress_event(&sender, ProgressEvent::RecompressProgress(update))?;
+                    Ok(())
+                });
 
-    for item in planned.items {
-        if item.ensure_parent_dirs {
-            ensure_output_parent_dirs(&item.output)?;
-        }
-        progress.begin_file(
-            &item.display_name,
-            item.input_bytes,
-            item.phase_total_samples,
-            item.overall_total_samples,
-        );
-        let temp_output = recompress_temp_output_path(&item.output);
-        let reader = read_flac_reader_with_options(
-            open_buffered_reader(&item.input)?,
-            recompress_reader_options(command.config),
-        )?;
-        let source = FlacRecompressSource::from_reader(reader);
-        let mut recompressor = command
-            .config
-            .into_recompressor(create_buffered_writer(&temp_output)?);
-        let result = recompressor
-            .recompress_with_progress(source, |update: RecompressProgress| {
-                progress.observe_recompress(update)?;
-                Ok(())
-            })
-            .map(|_| ());
-
-        match result {
-            Ok(_) => {
-                fs::rename(&temp_output, &item.output)?;
-                progress.finish_current_file()?
+                match result {
+                    Ok(_) => {
+                        fs::rename(&temp_output, &item.output)?;
+                        send_progress_event(&sender, ProgressEvent::FinishCurrentFile)?;
+                    }
+                    Err(error) => {
+                        let _ = fs::remove_file(&temp_output);
+                        return Err(error);
+                    }
+                }
             }
-            Err(error) => {
-                let _ = fs::remove_file(&temp_output);
-                let _ = progress.end();
-                return Err(error);
-            }
-        }
-    }
 
-    progress.finish()?;
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 fn plan_encode_worklist(command: &EncodeCommand) -> Result<PlannedWorklist> {
@@ -979,27 +1014,115 @@ fn relative_display_name(path: &Path) -> String {
 }
 
 impl ProgressTrace {
-    fn from_env(kind: CommandKind, interactive: bool, batch_mode: bool) -> Result<Option<Self>> {
+    fn from_env(kind: CommandKind, interactive: bool) -> Result<Option<Self>> {
         let Some(path) = env::var_os("FLACX_PROGRESS_TRACE").map(PathBuf::from) else {
             return Ok(None);
         };
-        let mut trace = Self {
+        Ok(Some(Self {
             file: File::create(path)?,
             kind,
             interactive,
-            batch_mode,
-        };
-        trace.write_command_header()?;
-        Ok(Some(trace))
+            batch_mode: false,
+            started_at: Instant::now(),
+            planning_started_at: None,
+            command_header_written: false,
+        }))
     }
 
     fn write_command_header(&mut self) -> std::io::Result<()> {
+        if self.command_header_written {
+            return Ok(());
+        }
         writeln!(
             self.file,
             "event=command\tkind={}\tinteractive={}\tbatch_mode={}",
             self.kind.as_str(),
             u8::from(self.interactive),
             u8::from(self.batch_mode)
+        )?;
+        self.command_header_written = true;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn on_planning_start(&mut self) -> std::io::Result<()> {
+        self.planning_started_at = Some(Instant::now());
+        writeln!(
+            self.file,
+            "event=planning_start\tkind={}\tinteractive={}\tcommand_elapsed_seconds={:.9}",
+            self.kind.as_str(),
+            u8::from(self.interactive),
+            self.started_at.elapsed().as_secs_f64()
+        )?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn on_planning_finish(
+        &mut self,
+        batch_mode: bool,
+        item_count: usize,
+        total_samples: u64,
+    ) -> std::io::Result<()> {
+        self.batch_mode = batch_mode;
+        self.write_command_header()?;
+        writeln!(
+            self.file,
+            "event=planning_finish\tkind={}\tinteractive={}\tbatch_mode={}\titem_count={}\ttotal_samples={}\tcommand_elapsed_seconds={:.9}\tplanning_elapsed_seconds={:.9}",
+            self.kind.as_str(),
+            u8::from(self.interactive),
+            u8::from(self.batch_mode),
+            item_count,
+            total_samples,
+            self.started_at.elapsed().as_secs_f64(),
+            self.planning_started_at
+                .map_or(0.0, |started_at| started_at.elapsed().as_secs_f64())
+        )?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn on_file_begin(
+        &mut self,
+        filename: &str,
+        input_bytes: u64,
+        phase_total_samples: u64,
+        overall_total_samples: u64,
+    ) -> std::io::Result<()> {
+        self.write_command_header()?;
+        writeln!(
+            self.file,
+            "event=file_begin\tkind={}\tinteractive={}\tbatch_mode={}\tfilename={}\tinput_bytes={}\tphase_total_samples={}\toverall_total_samples={}\tcommand_elapsed_seconds={:.9}",
+            self.kind.as_str(),
+            u8::from(self.interactive),
+            u8::from(self.batch_mode),
+            sanitize_trace_field(filename),
+            input_bytes,
+            phase_total_samples,
+            overall_total_samples,
+            self.started_at.elapsed().as_secs_f64()
+        )?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn on_first_progress(
+        &mut self,
+        filename: &str,
+        phase: Option<&str>,
+        processed_samples: u64,
+    ) -> std::io::Result<()> {
+        self.write_command_header()?;
+        writeln!(
+            self.file,
+            "event=first_progress\tkind={}\tinteractive={}\tbatch_mode={}\tfilename={}\tphase={}\tprocessed_samples={}\tcommand_elapsed_seconds={:.9}",
+            self.kind.as_str(),
+            u8::from(self.interactive),
+            u8::from(self.batch_mode),
+            sanitize_trace_field(filename),
+            phase.unwrap_or("-"),
+            processed_samples,
+            self.started_at.elapsed().as_secs_f64()
         )?;
         self.file.flush()?;
         Ok(())
@@ -1011,19 +1134,93 @@ impl ProgressTrace {
         input_bytes: u64,
         elapsed: Duration,
     ) -> std::io::Result<()> {
+        self.write_command_header()?;
         writeln!(
             self.file,
-            "event=file_finish\tkind={}\tinteractive={}\tbatch_mode={}\tfilename={}\tinput_bytes={}\telapsed_seconds={:.9}",
+            "event=file_finish\tkind={}\tinteractive={}\tbatch_mode={}\tfilename={}\tinput_bytes={}\telapsed_seconds={:.9}\tcommand_elapsed_seconds={:.9}",
             self.kind.as_str(),
             u8::from(self.interactive),
             u8::from(self.batch_mode),
             sanitize_trace_field(filename),
             input_bytes,
-            elapsed.as_secs_f64()
+            elapsed.as_secs_f64(),
+            self.started_at.elapsed().as_secs_f64()
         )?;
         self.file.flush()?;
         Ok(())
     }
+}
+
+fn run_with_progress_events<W, F>(
+    writer: &mut W,
+    interactive: bool,
+    trace: Option<ProgressTrace>,
+    total_samples: u64,
+    batch_mode: bool,
+    run: F,
+) -> Result<()>
+where
+    W: Write,
+    F: FnOnce(mpsc::Sender<ProgressEvent>) -> Result<()> + Send,
+{
+    thread::scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+        let worker = scope.spawn(move || run(sender));
+
+        let render_result = drive_progress_events(
+            writer,
+            interactive,
+            trace,
+            total_samples,
+            batch_mode,
+            receiver,
+        );
+        let worker_result = match worker.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        };
+
+        render_result?;
+        worker_result
+    })
+}
+
+fn drive_progress_events<W: Write>(
+    writer: W,
+    interactive: bool,
+    trace: Option<ProgressTrace>,
+    total_samples: u64,
+    batch_mode: bool,
+    receiver: mpsc::Receiver<ProgressEvent>,
+) -> Result<()> {
+    let mut progress =
+        BatchProgressCoordinator::new(writer, interactive, trace, total_samples, batch_mode);
+
+    loop {
+        match progress.next_heartbeat_delay() {
+            Some(timeout) => match receiver.recv_timeout(timeout) {
+                Ok(event) => progress.handle_event(event)?,
+                Err(mpsc::RecvTimeoutError::Timeout) => progress.heartbeat()?,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match receiver.recv() {
+                Ok(event) => progress.handle_event(event)?,
+                Err(_) => break,
+            },
+        }
+    }
+
+    progress.finish()?;
+    Ok(())
+}
+
+fn send_progress_event(
+    sender: &mpsc::Sender<ProgressEvent>,
+    event: ProgressEvent,
+) -> std::io::Result<()> {
+    sender
+        .send(event)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error.to_string()))
 }
 
 fn sanitize_trace_field(field: &str) -> String {
@@ -1044,6 +1241,8 @@ struct BatchProgressCoordinator<W: Write> {
     batch_started_at: Option<Instant>,
     overall_state: ProgressState,
     file_state: ProgressState,
+    current_progress: Option<ProgressSnapshot>,
+    current_recompress_progress: Option<RecompressProgress>,
 }
 
 impl<W: Write> BatchProgressCoordinator<W> {
@@ -1064,6 +1263,27 @@ impl<W: Write> BatchProgressCoordinator<W> {
             batch_started_at: None,
             overall_state: ProgressState::default(),
             file_state: ProgressState::default(),
+            current_progress: None,
+            current_recompress_progress: None,
+        }
+    }
+
+    fn handle_event(&mut self, event: ProgressEvent) -> std::io::Result<()> {
+        match event {
+            ProgressEvent::BeginFile {
+                filename,
+                input_bytes,
+                phase_total_samples,
+                overall_total_samples,
+            } => self.begin_file(
+                &filename,
+                input_bytes,
+                phase_total_samples,
+                overall_total_samples,
+            ),
+            ProgressEvent::Progress(progress) => self.observe(progress),
+            ProgressEvent::RecompressProgress(progress) => self.observe_recompress(progress),
+            ProgressEvent::FinishCurrentFile => self.finish_current_file(),
         }
     }
 
@@ -1073,7 +1293,7 @@ impl<W: Write> BatchProgressCoordinator<W> {
         input_bytes: u64,
         phase_total_samples: u64,
         overall_total_samples: u64,
-    ) {
+    ) -> std::io::Result<()> {
         self.current_file = Some(CurrentFileProgress {
             filename: filename.to_string(),
             input_bytes,
@@ -1084,7 +1304,28 @@ impl<W: Write> BatchProgressCoordinator<W> {
             started_at: Some(Instant::now()),
             phase_started_at: None,
         });
+        self.batch_started_at.get_or_insert_with(Instant::now);
         self.file_state = ProgressState::default();
+        self.current_progress = None;
+        self.current_recompress_progress = None;
+        if let Some(trace) = self.trace.as_mut() {
+            trace.on_file_begin(
+                filename,
+                input_bytes,
+                phase_total_samples,
+                overall_total_samples,
+            )?;
+        }
+        if phase_total_samples == overall_total_samples {
+            self.render_initial_file_frame(filename, phase_total_samples)?;
+        } else {
+            self.render_initial_recompress_frame(
+                filename,
+                phase_total_samples,
+                overall_total_samples,
+            )?;
+        }
+        Ok(())
     }
 
     fn observe(&mut self, progress: ProgressSnapshot) -> std::io::Result<()> {
@@ -1104,28 +1345,45 @@ impl<W: Write> BatchProgressCoordinator<W> {
         batch_elapsed: Duration,
         file_elapsed: Duration,
     ) -> std::io::Result<()> {
-        let (filename, total_samples) = {
+        let (filename, total_samples, first_progress_samples) = {
             let current = self
                 .current_file
                 .as_mut()
                 .expect("current file must be set");
+            let first_progress_samples = (!current.saw_update && progress.processed_samples > 0)
+                .then_some(progress.processed_samples.min(current.phase_total_samples));
             current.saw_update = true;
-            (current.filename.clone(), current.phase_total_samples)
+            (
+                current.filename.clone(),
+                current.phase_total_samples,
+                first_progress_samples,
+            )
         };
-        let force_render = progress.processed_samples >= total_samples
-            || self
-                .completed_samples
-                .saturating_add(progress.processed_samples)
-                >= self.total_samples;
-        let identities = progress_frame_identities(&filename, self.batch_mode, None);
-        if !self
-            .renderer
-            .should_render(force_render, &identities, self.batch_mode)
-        {
-            return Ok(());
+        self.current_progress = Some(progress);
+        self.current_recompress_progress = None;
+        if let Some(processed_samples) = first_progress_samples {
+            if let Some(trace) = self.trace.as_mut() {
+                trace.on_first_progress(&filename, None, processed_samples)?;
+            }
         }
+        self.render_snapshot(
+            &filename,
+            total_samples,
+            progress,
+            batch_elapsed,
+            file_elapsed,
+        )
+    }
 
-        let display = self.display_for_snapshot(&filename, total_samples, progress);
+    fn render_snapshot(
+        &mut self,
+        filename: &str,
+        total_samples: u64,
+        progress: ProgressSnapshot,
+        batch_elapsed: Duration,
+        file_elapsed: Duration,
+    ) -> std::io::Result<()> {
+        let display = self.display_for_snapshot(filename, total_samples, progress);
         let overall_estimate = self.overall_state.observe(
             display
                 .overall
@@ -1156,11 +1414,17 @@ impl<W: Write> BatchProgressCoordinator<W> {
         progress: RecompressProgress,
         batch_elapsed: Duration,
     ) -> std::io::Result<()> {
-        let (filename, phase_label) = {
+        let (filename, phase_label, first_progress_samples) = {
             let current = self
                 .current_file
                 .as_mut()
                 .expect("current file must be set");
+            let first_progress_samples =
+                (!current.saw_update && progress.overall_processed_samples > 0).then_some(
+                    progress
+                        .overall_processed_samples
+                        .min(current.overall_total_samples),
+                );
             current.saw_update = true;
             if current.phase != Some(progress.phase) {
                 current.phase = Some(progress.phase);
@@ -1168,23 +1432,39 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 self.file_state = ProgressState::default();
             }
             let phase_label = current.phase.expect("phase must be set").as_str();
-            (current.filename.clone(), phase_label)
+            (
+                current.filename.clone(),
+                phase_label,
+                first_progress_samples,
+            )
         };
-        let phase_elapsed = self.current_phase_elapsed();
-        let force_render = progress.overall_processed_samples >= progress.overall_total_samples
-            || self
-                .completed_samples
-                .saturating_add(progress.overall_processed_samples)
-                >= self.total_samples;
-        let identities = progress_frame_identities(&filename, self.batch_mode, Some(phase_label));
-        if !self
-            .renderer
-            .should_render(force_render, &identities, self.batch_mode)
-        {
-            return Ok(());
+        self.current_progress = None;
+        self.current_recompress_progress = Some(progress);
+        if let Some(processed_samples) = first_progress_samples {
+            if let Some(trace) = self.trace.as_mut() {
+                trace.on_first_progress(&filename, Some(phase_label), processed_samples)?;
+            }
         }
+        let phase_elapsed = self.current_phase_elapsed();
+        let file_elapsed = self.current_file_elapsed();
+        self.render_recompress_snapshot(
+            &filename,
+            progress,
+            batch_elapsed,
+            phase_elapsed,
+            file_elapsed,
+        )
+    }
 
-        let display = self.display_for_recompress_progress(&filename, progress);
+    fn render_recompress_snapshot(
+        &mut self,
+        filename: &str,
+        progress: RecompressProgress,
+        batch_elapsed: Duration,
+        phase_elapsed: Duration,
+        file_elapsed: Duration,
+    ) -> std::io::Result<()> {
+        let display = self.display_for_recompress_progress(filename, progress);
         let overall_estimate = self.overall_state.observe(
             display
                 .overall
@@ -1205,7 +1485,7 @@ impl<W: Write> BatchProgressCoordinator<W> {
             &overall_estimate,
             file_estimate.as_ref(),
             batch_elapsed,
-            phase_elapsed,
+            file_elapsed,
         );
         self.renderer.render(frame)
     }
@@ -1242,6 +1522,8 @@ impl<W: Write> BatchProgressCoordinator<W> {
                     .map_or(Duration::ZERO, |started_at| started_at.elapsed()),
             )?;
         }
+        self.current_progress = None;
+        self.current_recompress_progress = None;
         self.completed_samples = self
             .completed_samples
             .saturating_add(current.overall_total_samples);
@@ -1252,8 +1534,58 @@ impl<W: Write> BatchProgressCoordinator<W> {
         self.renderer.end()
     }
 
+    #[cfg(test)]
     fn end(&mut self) -> std::io::Result<()> {
         self.renderer.end()
+    }
+
+    fn heartbeat(&mut self) -> std::io::Result<()> {
+        let Some((filename, phase_total_samples)) = self
+            .current_file
+            .as_ref()
+            .map(|current| (current.filename.clone(), current.phase_total_samples))
+        else {
+            return Ok(());
+        };
+
+        let batch_elapsed = self.batch_elapsed();
+        let file_elapsed = self.current_file_elapsed();
+        if let Some(progress) = self.current_progress {
+            return self.render_snapshot(
+                &filename,
+                phase_total_samples,
+                progress,
+                batch_elapsed,
+                file_elapsed,
+            );
+        }
+
+        if let Some(progress) = self.current_recompress_progress {
+            let phase_elapsed = self.current_phase_elapsed();
+            return self.render_recompress_snapshot(
+                &filename,
+                progress,
+                batch_elapsed,
+                phase_elapsed,
+                file_elapsed,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn next_heartbeat_delay(&mut self) -> Option<Duration> {
+        if !self.renderer.interactive {
+            return None;
+        }
+        if self.current_progress.is_none() && self.current_recompress_progress.is_none() {
+            return None;
+        }
+        let mut next_delay = time_until_next_second(self.batch_elapsed());
+        if self.batch_mode {
+            next_delay = next_delay.min(time_until_next_second(self.current_file_elapsed()));
+        }
+        Some(next_delay)
     }
 
     fn batch_elapsed(&mut self) -> Duration {
@@ -1277,6 +1609,63 @@ impl<W: Write> BatchProgressCoordinator<W> {
             .expect("current file must be set before observing phase progress");
         let started_at = current.phase_started_at.get_or_insert_with(Instant::now);
         started_at.elapsed()
+    }
+
+    fn render_initial_file_frame(
+        &mut self,
+        filename: &str,
+        file_total_samples: u64,
+    ) -> std::io::Result<()> {
+        let batch_elapsed = self.batch_elapsed();
+        let file_elapsed = self.current_file_elapsed();
+        let progress = ProgressSnapshot {
+            processed_samples: 0,
+            total_samples: file_total_samples,
+            completed_frames: 0,
+            total_frames: 0,
+        };
+        self.current_progress = Some(progress);
+        self.current_recompress_progress = None;
+        self.render_snapshot(
+            filename,
+            file_total_samples,
+            progress,
+            batch_elapsed,
+            file_elapsed,
+        )
+    }
+
+    fn render_initial_recompress_frame(
+        &mut self,
+        filename: &str,
+        phase_total_samples: u64,
+        overall_total_samples: u64,
+    ) -> std::io::Result<()> {
+        if let Some(current) = self.current_file.as_mut() {
+            current.phase = Some(RecompressPhase::Decode);
+            current.phase_started_at.get_or_insert_with(Instant::now);
+        }
+        let batch_elapsed = self.batch_elapsed();
+        let phase_elapsed = self.current_phase_elapsed();
+        let file_elapsed = self.current_file_elapsed();
+        let progress = RecompressProgress {
+            phase: RecompressPhase::Decode,
+            phase_processed_samples: 0,
+            phase_total_samples,
+            overall_processed_samples: 0,
+            overall_total_samples,
+            completed_frames: 0,
+            total_frames: 0,
+        };
+        self.current_progress = None;
+        self.current_recompress_progress = Some(progress);
+        self.render_recompress_snapshot(
+            filename,
+            progress,
+            batch_elapsed,
+            phase_elapsed,
+            file_elapsed,
+        )
     }
 
     fn display_for_snapshot(
@@ -1346,8 +1735,6 @@ struct ProgressRenderer<W: Write> {
     interactive: bool,
     has_drawn: bool,
     last_line_widths: Vec<usize>,
-    last_line_identities: Vec<String>,
-    last_render_at: Option<Instant>,
 }
 
 impl<W: Write> ProgressRenderer<W> {
@@ -1357,8 +1744,6 @@ impl<W: Write> ProgressRenderer<W> {
             interactive,
             has_drawn: false,
             last_line_widths: Vec::new(),
-            last_line_identities: Vec::new(),
-            last_render_at: None,
         }
     }
 
@@ -1367,24 +1752,11 @@ impl<W: Write> ProgressRenderer<W> {
         self.render(frame)
     }
 
-    fn should_render(&self, force: bool, identities: &[String], batch_mode: bool) -> bool {
-        if !self.interactive {
-            return false;
-        }
-        if force || !self.has_drawn || self.last_line_identities != identities {
-            return true;
-        }
-
-        self.last_render_at
-            .is_none_or(|last_rendered| last_rendered.elapsed() >= render_interval(batch_mode))
-    }
-
     fn render(&mut self, frame: ProgressFrame) -> std::io::Result<()> {
         if !self.interactive {
             return Ok(());
         }
         self.draw_frame(&frame)?;
-        self.last_render_at = Some(Instant::now());
         Ok(())
     }
 
@@ -1412,11 +1784,6 @@ impl<W: Write> ProgressRenderer<W> {
 
         self.has_drawn = true;
         self.last_line_widths = frame.lines.iter().map(String::len).collect();
-        self.last_line_identities = frame
-            .lines
-            .iter()
-            .map(|line| frame_line_identity(line))
-            .collect();
         self.writer.flush()
     }
 
@@ -1615,45 +1982,13 @@ fn format_batch_file_line(
     )
 }
 
-fn progress_frame_identities(
-    filename: &str,
-    batch_mode: bool,
-    phase_label: Option<&str>,
-) -> Vec<String> {
-    if batch_mode {
-        vec![
-            "Batch".to_string(),
-            format!("{filename} | {}", phase_label.unwrap_or("File")),
-        ]
-    } else {
-        vec![
-            phase_label
-                .map(|phase| format!("{filename} | {phase}"))
-                .unwrap_or_else(|| filename.to_string()),
-        ]
-    }
-}
-
-fn render_interval(batch_mode: bool) -> Duration {
-    if batch_mode {
-        BATCH_RENDER_INTERVAL
-    } else {
-        SINGLE_RENDER_INTERVAL
-    }
-}
-
-fn frame_line_identity(line: &str) -> String {
-    if line.starts_with("Batch | ") {
-        return "Batch".to_string();
-    }
-    let mut parts = line.split(" | ");
-    let first = parts.next().unwrap_or_default();
-    let second = parts.next().unwrap_or_default();
-    if second.starts_with('[') || second.is_empty() {
-        first.to_string()
-    } else {
-        format!("{first} | {second}")
-    }
+fn time_until_next_second(elapsed: Duration) -> Duration {
+    Duration::from_secs(
+        elapsed
+            .as_secs()
+            .saturating_add(HEARTBEAT_INTERVAL.as_secs()),
+    )
+    .saturating_sub(elapsed)
 }
 
 fn progress_ratio(progress: SampleProgress) -> f64 {
@@ -1711,7 +2046,7 @@ mod tests {
     use super::{
         BatchProgressCoordinator, ProgressDisplay, ProgressEstimate, ProgressFrame,
         ProgressRenderer, ProgressState, SampleProgress, format_progress_frame,
-        progress_frame_identities, relative_display_name,
+        relative_display_name, time_until_next_second,
     };
     use flacx::{ProgressSnapshot, RecompressPhase, RecompressProgress};
 
@@ -1946,7 +2281,9 @@ mod tests {
     #[test]
     fn batch_progress_uses_exact_total_samples_before_completion() {
         let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 300, true);
-        progress.begin_file("disc1/first.wav", 1_024, 100, 100);
+        progress
+            .begin_file("disc1/first.wav", 1_024, 100, 100)
+            .unwrap();
         progress
             .observe_with_elapsed(
                 ProgressSnapshot {
@@ -1971,21 +2308,210 @@ mod tests {
     }
 
     #[test]
-    fn batch_renderer_uses_a_longer_refresh_interval_than_single_file_mode() {
-        let identities = progress_frame_identities("disc1/first.wav", true, None);
-        let mut renderer = ProgressRenderer::new(Vec::new(), true);
-        renderer.has_drawn = true;
-        renderer.last_line_identities = identities.clone();
-        renderer.last_render_at = Some(Instant::now() - Duration::from_millis(150));
+    fn begin_file_renders_an_initial_zero_progress_frame_for_encode_decode() {
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 300, true);
+        progress
+            .begin_file("disc1/first.wav", 1_024, 100, 100)
+            .unwrap();
+        progress.end().unwrap();
 
-        assert!(!renderer.should_render(false, &identities, true));
-        assert!(renderer.should_render(false, &identities, false));
+        let output = String::from_utf8(progress.renderer.writer).unwrap();
+        let final_lines = final_frame_lines(&output);
+        assert_eq!(final_lines.len(), 2);
+        assert!(final_lines[0].contains("Batch | "));
+        assert!(final_lines[0].contains("0.0%"));
+        assert!(final_lines[1].contains("disc1/first.wav | File | "));
+        assert!(final_lines[1].contains("0.0%"));
+        assert!(final_lines[1].contains("Rate warmup"));
+    }
+
+    #[test]
+    fn initial_frame_preserves_batch_elapsed_across_file_boundaries() {
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 200, true);
+        progress.completed_samples = 100;
+        progress
+            .begin_file("disc1/second.wav", 1_024, 100, 100)
+            .unwrap();
+        progress.batch_started_at = Some(Instant::now() - Duration::from_secs(5));
+        if let Some(current) = progress.current_file.as_mut() {
+            current.started_at = Some(Instant::now() - Duration::from_secs(2));
+        }
+        progress
+            .render_initial_file_frame("disc1/second.wav", 100)
+            .unwrap();
+        progress.end().unwrap();
+
+        let output = String::from_utf8(progress.renderer.writer).unwrap();
+        let final_lines = final_frame_lines(&output);
+        assert_eq!(final_lines.len(), 2);
+        assert!(final_lines[0].contains("Batch | "));
+        assert!(final_lines[0].contains("50.0%"));
+        assert!(final_lines[0].contains("Elapsed 00:05"));
+        assert!(final_lines[1].contains("disc1/second.wav | File | "));
+        assert!(final_lines[1].contains("Elapsed 00:02"));
+    }
+
+    #[test]
+    fn time_until_next_second_aligns_to_the_next_visible_clock_tick() {
+        assert_eq!(
+            time_until_next_second(Duration::from_millis(1_250)),
+            Duration::from_millis(750)
+        );
+        assert_eq!(
+            time_until_next_second(Duration::from_secs(3)),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn progress_updates_render_immediately_without_waiting_for_a_heartbeat() {
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 100, true);
+        progress
+            .begin_file("disc1/first.wav", 1_024, 100, 100)
+            .unwrap();
+        progress
+            .observe_with_elapsed(
+                ProgressSnapshot {
+                    processed_samples: 25,
+                    total_samples: 100,
+                    completed_frames: 1,
+                    total_frames: 4,
+                },
+                Duration::from_millis(300),
+                Duration::from_millis(300),
+            )
+            .unwrap();
+        progress
+            .observe_with_elapsed(
+                ProgressSnapshot {
+                    processed_samples: 50,
+                    total_samples: 100,
+                    completed_frames: 2,
+                    total_frames: 4,
+                },
+                Duration::from_millis(350),
+                Duration::from_millis(350),
+            )
+            .unwrap();
+        progress.end().unwrap();
+
+        let output = String::from_utf8(progress.renderer.writer).unwrap();
+        let final_lines = final_frame_lines(&output);
+        assert!(final_lines[0].contains("50.0%"));
+        assert!(final_lines[1].contains("50.0%"));
+    }
+
+    #[test]
+    fn heartbeat_repaints_cached_progress_when_callbacks_are_sparse() {
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 100, true);
+        progress
+            .begin_file("disc1/first.wav", 1_024, 100, 100)
+            .unwrap();
+        progress.batch_started_at = Some(Instant::now() - Duration::from_millis(400));
+        if let Some(current) = progress.current_file.as_mut() {
+            current.started_at = Some(Instant::now() - Duration::from_millis(400));
+        }
+        progress
+            .observe_with_elapsed(
+                ProgressSnapshot {
+                    processed_samples: 25,
+                    total_samples: 100,
+                    completed_frames: 1,
+                    total_frames: 4,
+                },
+                Duration::from_millis(400),
+                Duration::from_millis(400),
+            )
+            .unwrap();
+        progress.batch_started_at = Some(Instant::now() - Duration::from_millis(1_400));
+        if let Some(current) = progress.current_file.as_mut() {
+            current.started_at = Some(Instant::now() - Duration::from_millis(1_400));
+        }
+        progress.heartbeat().unwrap();
+        progress.end().unwrap();
+
+        let output = String::from_utf8(progress.renderer.writer).unwrap();
+        let final_lines = final_frame_lines(&output);
+        assert!(final_lines[0].contains("25.0%"));
+        assert!(final_lines[0].contains("Elapsed 00:01"));
+        assert!(final_lines[1].contains("25.0%"));
+        assert!(final_lines[1].contains("Elapsed 00:01"));
+    }
+
+    #[test]
+    fn progress_update_after_heartbeat_uses_the_newer_snapshot() {
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 100, true);
+        progress
+            .begin_file("disc1/first.wav", 1_024, 100, 100)
+            .unwrap();
+        progress
+            .observe_with_elapsed(
+                ProgressSnapshot {
+                    processed_samples: 25,
+                    total_samples: 100,
+                    completed_frames: 1,
+                    total_frames: 4,
+                },
+                Duration::from_millis(400),
+                Duration::from_millis(400),
+            )
+            .unwrap();
+        progress.batch_started_at = Some(Instant::now() - Duration::from_millis(1_400));
+        if let Some(current) = progress.current_file.as_mut() {
+            current.started_at = Some(Instant::now() - Duration::from_millis(1_400));
+        }
+        progress.heartbeat().unwrap();
+        progress
+            .observe_with_elapsed(
+                ProgressSnapshot {
+                    processed_samples: 50,
+                    total_samples: 100,
+                    completed_frames: 2,
+                    total_frames: 4,
+                },
+                Duration::from_millis(1_450),
+                Duration::from_millis(1_450),
+            )
+            .unwrap();
+        progress.end().unwrap();
+
+        let output = String::from_utf8(progress.renderer.writer).unwrap();
+        let final_lines = final_frame_lines(&output);
+        assert!(final_lines[0].contains("50.0%"));
+        assert!(final_lines[1].contains("50.0%"));
+    }
+
+    #[test]
+    fn recompress_begin_file_primes_heartbeat_before_the_first_progress_callback() {
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 200, true);
+        progress
+            .begin_file("disc1/first.flac", 1_024, 100, 200)
+            .unwrap();
+        assert!(progress.next_heartbeat_delay().is_some());
+        progress.batch_started_at = Some(Instant::now() - Duration::from_secs(2));
+        if let Some(current) = progress.current_file.as_mut() {
+            current.started_at = Some(Instant::now() - Duration::from_secs(2));
+            current.phase_started_at = Some(Instant::now() - Duration::from_secs(2));
+        }
+        progress.heartbeat().unwrap();
+        progress.end().unwrap();
+
+        let output = String::from_utf8(progress.renderer.writer).unwrap();
+        let final_lines = final_frame_lines(&output);
+        assert_eq!(final_lines.len(), 2);
+        assert!(final_lines[0].contains("Batch | "));
+        assert!(final_lines[0].contains("Elapsed 00:02"));
+        assert!(final_lines[1].contains("disc1/first.flac | Decode | "));
+        assert!(final_lines[1].contains("Elapsed 00:02"));
+        assert!(final_lines[1].contains("Rate warmup"));
     }
 
     #[test]
     fn recompress_batch_phase_switch_resets_file_estimate_state() {
         let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 200, true);
-        progress.begin_file("disc1/first.flac", 1_024, 100, 200);
+        progress
+            .begin_file("disc1/first.flac", 1_024, 100, 200)
+            .unwrap();
         progress
             .observe_recompress(RecompressProgress {
                 phase: RecompressPhase::Decode,
@@ -1997,7 +2523,6 @@ mod tests {
                 total_frames: 2,
             })
             .unwrap();
-        progress.renderer.last_render_at = Some(Instant::now() - Duration::from_secs(1));
         progress
             .observe_recompress(RecompressProgress {
                 phase: RecompressPhase::Decode,
@@ -2031,6 +2556,55 @@ mod tests {
                 .and_then(|current| current.phase),
             Some(RecompressPhase::Encode)
         );
+    }
+
+    #[test]
+    fn recompress_phase_switch_keeps_file_elapsed_continuous() {
+        let mut progress = BatchProgressCoordinator::new(Vec::new(), true, None, 200, true);
+        progress
+            .begin_file("disc1/first.flac", 1_024, 100, 200)
+            .unwrap();
+        if let Some(current) = progress.current_file.as_mut() {
+            current.started_at = Some(Instant::now() - Duration::from_secs(9));
+        }
+        progress
+            .observe_recompress_with_elapsed(
+                RecompressProgress {
+                    phase: RecompressPhase::Decode,
+                    phase_processed_samples: 50,
+                    phase_total_samples: 100,
+                    overall_processed_samples: 50,
+                    overall_total_samples: 200,
+                    completed_frames: 1,
+                    total_frames: 2,
+                },
+                Duration::from_secs(9),
+            )
+            .unwrap();
+        if let Some(current) = progress.current_file.as_mut() {
+            current.started_at = Some(Instant::now() - Duration::from_secs(9));
+        }
+        progress
+            .observe_recompress_with_elapsed(
+                RecompressProgress {
+                    phase: RecompressPhase::Encode,
+                    phase_processed_samples: 10,
+                    phase_total_samples: 100,
+                    overall_processed_samples: 110,
+                    overall_total_samples: 200,
+                    completed_frames: 1,
+                    total_frames: 2,
+                },
+                Duration::from_secs(9),
+            )
+            .unwrap();
+        progress.end().unwrap();
+
+        let output = String::from_utf8(progress.renderer.writer).unwrap();
+        let final_lines = final_frame_lines(&output);
+        assert_eq!(final_lines.len(), 2);
+        assert!(final_lines[1].contains("disc1/first.flac | Encode | "));
+        assert!(final_lines[1].contains("Elapsed 00:09"));
     }
 
     #[test]

@@ -111,6 +111,18 @@ fn recompress_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -
         .unwrap()
 }
 
+fn assert_progress_trace_has_startup_events(trace: &str, kind: &str, filename: &str) {
+    assert!(trace.contains("event=planning_start"));
+    assert!(trace.contains("event=planning_finish"));
+    assert!(trace.contains("event=command"));
+    assert!(trace.contains(&format!("kind={kind}")));
+    assert!(trace.contains("command_elapsed_seconds="));
+    assert!(trace.contains("event=file_begin"));
+    assert!(trace.contains("event=first_progress"));
+    assert!(trace.contains("event=file_finish"));
+    assert!(trace.contains(&format!("filename={filename}")));
+}
+
 #[test]
 fn cli_dispatch_does_not_depend_on_builtin_shortcut_routing() {
     let source = include_str!("../src/lib.rs");
@@ -331,12 +343,42 @@ fn encode_command_emits_progress_trace_when_requested() {
         String::from_utf8_lossy(&output.stderr)
     );
     let trace = fs::read_to_string(&trace_path).unwrap();
-    assert!(trace.contains("event=command"));
-    assert!(trace.contains("kind=encode"));
+    assert_progress_trace_has_startup_events(&trace, "encode", "input.wav");
     assert!(trace.contains("interactive=0"));
     assert!(trace.contains("batch_mode=0"));
-    assert!(trace.contains("event=file_finish"));
-    assert!(trace.contains("filename=input.wav"));
+    assert!(trace.contains("planning_elapsed_seconds="));
+    assert!(trace.contains("phase_total_samples="));
+    assert!(trace.contains("overall_total_samples="));
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn decode_command_emits_progress_trace_when_requested() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("input.flac");
+    let output_path = input_dir.join("input.wav");
+    let trace_path = input_dir.join("progress.trace");
+    write_flac_file(&input_path, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .env("FLACX_PROGRESS_TRACE", &trace_path)
+        .args([
+            "decode",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let trace = fs::read_to_string(&trace_path).unwrap();
+    assert_progress_trace_has_startup_events(&trace, "decode", "input.flac");
 
     let _ = fs::remove_dir_all(input_dir);
 }
