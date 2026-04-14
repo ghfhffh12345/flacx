@@ -143,8 +143,7 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for RawPcmStream<R> {
         self.last_chunk_bytes.clear();
         self.last_chunk_bytes.resize(byte_len, 0);
         self.reader.read_exact(&mut self.last_chunk_bytes)?;
-        let samples = decode_raw_samples(&self.last_chunk_bytes, self.validated)?;
-        output.extend(samples);
+        decode_raw_samples_into(&self.last_chunk_bytes, self.validated, output)?;
         self.remaining_frames -= frames as u64;
         Ok(frames)
     }
@@ -251,7 +250,11 @@ fn total_samples_from_byte_len(byte_len: u64, frame_bytes: u64) -> Result<u64> {
     Ok(byte_len / frame_bytes)
 }
 
-fn decode_raw_samples(data: &[u8], descriptor: ValidatedRawDescriptor) -> Result<Vec<i32>> {
+fn decode_raw_samples_into(
+    data: &[u8],
+    descriptor: ValidatedRawDescriptor,
+    output: &mut Vec<i32>,
+) -> Result<()> {
     let shift = descriptor
         .envelope
         .container_bits_per_sample
@@ -261,16 +264,17 @@ fn decode_raw_samples(data: &[u8], descriptor: ValidatedRawDescriptor) -> Result
         ))? as u32;
 
     match descriptor.envelope.container_bits_per_sample {
-        8 => Ok(data
-            .iter()
-            .map(|&byte| {
+        8 => {
+            output.reserve(data.len());
+            output.extend(data.iter().map(|&byte| {
                 let value = i32::from(i8::from_ne_bytes([byte]));
                 if shift == 0 { value } else { value >> shift }
-            })
-            .collect()),
-        16 => Ok(data
-            .chunks_exact(2)
-            .map(|chunk| {
+            }));
+            Ok(())
+        }
+        16 => {
+            output.reserve(data.len() / 2);
+            output.extend(data.chunks_exact(2).map(|chunk| {
                 let value = match descriptor.descriptor.byte_order {
                     RawPcmByteOrder::LittleEndian => {
                         i16::from_le_bytes([chunk[0], chunk[1]]) as i32
@@ -278,11 +282,12 @@ fn decode_raw_samples(data: &[u8], descriptor: ValidatedRawDescriptor) -> Result
                     RawPcmByteOrder::BigEndian => i16::from_be_bytes([chunk[0], chunk[1]]) as i32,
                 };
                 if shift == 0 { value } else { value >> shift }
-            })
-            .collect()),
-        24 => Ok(data
-            .chunks_exact(3)
-            .map(|chunk| {
+            }));
+            Ok(())
+        }
+        24 => {
+            output.reserve(data.len() / 3);
+            output.extend(data.chunks_exact(3).map(|chunk| {
                 let mut value = match descriptor.descriptor.byte_order {
                     RawPcmByteOrder::LittleEndian => {
                         i32::from(chunk[0])
@@ -299,11 +304,12 @@ fn decode_raw_samples(data: &[u8], descriptor: ValidatedRawDescriptor) -> Result
                     value |= !0x00ff_ffff;
                 }
                 if shift == 0 { value } else { value >> shift }
-            })
-            .collect()),
-        32 => Ok(data
-            .chunks_exact(4)
-            .map(|chunk| {
+            }));
+            Ok(())
+        }
+        32 => {
+            output.reserve(data.len() / 4);
+            output.extend(data.chunks_exact(4).map(|chunk| {
                 let value = match descriptor.descriptor.byte_order {
                     RawPcmByteOrder::LittleEndian => {
                         i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
@@ -313,8 +319,9 @@ fn decode_raw_samples(data: &[u8], descriptor: ValidatedRawDescriptor) -> Result
                     }
                 };
                 if shift == 0 { value } else { value >> shift }
-            })
-            .collect()),
+            }));
+            Ok(())
+        }
         _ => Err(Error::UnsupportedWav(format!(
             "unsupported container bits/sample for decoder: {}",
             descriptor.envelope.container_bits_per_sample

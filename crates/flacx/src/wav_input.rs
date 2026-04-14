@@ -163,8 +163,7 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
         self.last_chunk_bytes.clear();
         self.last_chunk_bytes.resize(byte_len, 0);
         self.reader.read_exact(&mut self.last_chunk_bytes)?;
-        let samples = decode_samples(&self.last_chunk_bytes, self.envelope)?;
-        output.extend(samples);
+        decode_samples_into(&self.last_chunk_bytes, self.envelope, output)?;
         self.remaining_frames -= frames as u64;
         Ok(frames)
     }
@@ -643,7 +642,7 @@ fn is_captured_metadata_chunk(chunk_id: [u8; 4]) -> bool {
     matches!(&chunk_id, b"LIST" | b"cue " | &FXMD_CHUNK_ID)
 }
 
-fn decode_samples(data: &[u8], envelope: PcmEnvelope) -> Result<Vec<i32>> {
+fn decode_samples_into(data: &[u8], envelope: PcmEnvelope, output: &mut Vec<i32>) -> Result<()> {
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
@@ -654,36 +653,38 @@ fn decode_samples(data: &[u8], envelope: PcmEnvelope) -> Result<Vec<i32>> {
     match envelope.container_bits_per_sample {
         8 => {
             let bias = 1i32 << (envelope.valid_bits_per_sample - 1);
-            Ok(data
-                .iter()
-                .map(|&byte| (i32::from(byte) >> shift) - bias)
-                .collect())
+            output.reserve(data.len());
+            output.extend(data.iter().map(|&byte| (i32::from(byte) >> shift) - bias));
+            Ok(())
         }
-        16 => Ok(data
-            .chunks_exact(2)
-            .map(|chunk| {
+        16 => {
+            output.reserve(data.len() / 2);
+            output.extend(data.chunks_exact(2).map(|chunk| {
                 let value = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                 if shift == 0 { value } else { value >> shift }
-            })
-            .collect()),
-        24 => Ok(data
-            .chunks_exact(3)
-            .map(|chunk| {
+            }));
+            Ok(())
+        }
+        24 => {
+            output.reserve(data.len() / 3);
+            output.extend(data.chunks_exact(3).map(|chunk| {
                 let mut value =
                     i32::from(chunk[0]) | (i32::from(chunk[1]) << 8) | (i32::from(chunk[2]) << 16);
                 if value & 0x0080_0000 != 0 {
                     value |= !0x00ff_ffff;
                 }
                 if shift == 0 { value } else { value >> shift }
-            })
-            .collect()),
-        32 => Ok(data
-            .chunks_exact(4)
-            .map(|chunk| {
+            }));
+            Ok(())
+        }
+        32 => {
+            output.reserve(data.len() / 4);
+            output.extend(data.chunks_exact(4).map(|chunk| {
                 let value = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 if shift == 0 { value } else { value >> shift }
-            })
-            .collect()),
+            }));
+            Ok(())
+        }
         _ => Err(Error::UnsupportedWav(format!(
             "unsupported container bits/sample for decoder: {}",
             envelope.container_bits_per_sample

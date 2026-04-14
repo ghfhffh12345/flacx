@@ -121,10 +121,21 @@ pub(crate) fn encode_chunk(
 ) -> Result<EncodedChunk> {
     let frame_count = chunk_end - chunk_start;
     let worker_count = config.threads.max(1).min(frame_count.max(1));
+    let chunk_base_sample = plan.frame(chunk_start).sample_offset;
+
+    if worker_count == 1 || frame_count <= FRAME_CHUNK_SIZE {
+        return encode_frame_batch(
+            &chunk_samples,
+            plan,
+            chunk_start,
+            0,
+            frame_count,
+            chunk_base_sample,
+        );
+    }
+
     let next_frame = Arc::new(AtomicUsize::new(0));
     let samples: Arc<[i32]> = Arc::from(chunk_samples);
-    let channels = usize::from(plan.spec.channels);
-    let chunk_base_sample = plan.frame(chunk_start).sample_offset;
 
     thread::scope(|scope| -> Result<EncodedChunk> {
         let (sender, receiver) = mpsc::channel();
@@ -141,46 +152,15 @@ pub(crate) fn encode_chunk(
                         break;
                     }
                     let local_end = (local_index + FRAME_CHUNK_SIZE).min(frame_count);
-                    let mut encoded_frames = Vec::with_capacity(local_end - local_index);
-
-                    for local_frame in local_index..local_end {
-                        let frame_index = chunk_start + local_frame;
-                        let frame_plan = plan.frame(frame_index);
-                        let frame_samples = usize::from(frame_plan.block_size);
-                        let local_sample_start =
-                            usize::try_from(frame_plan.sample_offset - chunk_base_sample)
-                                .expect("sample offset fits usize")
-                                * channels;
-                        let local_sample_end = local_sample_start + frame_samples * channels;
-                        let frame = encode_frame(
-                            &samples[local_sample_start..local_sample_end],
-                            plan.spec.channels,
-                            plan.spec.bits_per_sample,
-                            plan.spec.sample_rate,
-                            match frame_plan.coded_number_kind {
-                                FrameCodedNumberKind::FrameNumber => {
-                                    FrameHeaderNumber::Frame(frame_plan.coded_number)
-                                }
-                                FrameCodedNumberKind::SampleNumber => {
-                                    FrameHeaderNumber::Sample(frame_plan.coded_number)
-                                }
-                            },
-                            plan.profile,
-                        );
-                        match frame {
-                            Ok(frame) => encoded_frames.push(frame),
-                            Err(error) => {
-                                let _ = sender.send(Err(error));
-                                return;
-                            }
-                        }
-                    }
-
                     if sender
-                        .send(Ok(EncodedChunk {
-                            start_frame: chunk_start + local_index,
-                            frames: encoded_frames,
-                        }))
+                        .send(encode_frame_batch(
+                            &samples,
+                            &plan,
+                            chunk_start,
+                            local_index,
+                            local_end,
+                            chunk_base_sample,
+                        ))
                         .is_err()
                     {
                         return;
@@ -212,6 +192,48 @@ pub(crate) fn encode_chunk(
             frames: ordered_frames,
         })
     })
+}
+
+pub(crate) fn encode_frame_batch(
+    samples: &[i32],
+    plan: &EncodePlan,
+    chunk_start: usize,
+    local_start: usize,
+    local_end: usize,
+    chunk_base_sample: u64,
+) -> Result<EncodedChunk> {
+    let channels = usize::from(plan.spec.channels);
+    let mut encoded_frames = Vec::with_capacity(local_end.saturating_sub(local_start));
+
+    for local_frame in local_start..local_end {
+        let frame_index = chunk_start + local_frame;
+        let frame_plan = plan.frame(frame_index);
+        let frame_samples = usize::from(frame_plan.block_size);
+        let local_sample_start = usize::try_from(frame_plan.sample_offset - chunk_base_sample)
+            .expect("sample offset fits usize")
+            * channels;
+        let local_sample_end = local_sample_start + frame_samples * channels;
+        encoded_frames.push(encode_frame(
+            &samples[local_sample_start..local_sample_end],
+            plan.spec.channels,
+            plan.spec.bits_per_sample,
+            plan.spec.sample_rate,
+            frame_header_number(frame_plan.coded_number_kind, frame_plan.coded_number),
+            plan.profile,
+        )?);
+    }
+
+    Ok(EncodedChunk {
+        start_frame: chunk_start + local_start,
+        frames: encoded_frames,
+    })
+}
+
+fn frame_header_number(kind: FrameCodedNumberKind, coded_number: u64) -> FrameHeaderNumber {
+    match kind {
+        FrameCodedNumberKind::FrameNumber => FrameHeaderNumber::Frame(coded_number),
+        FrameCodedNumberKind::SampleNumber => FrameHeaderNumber::Sample(coded_number),
+    }
 }
 
 fn drain_chunk(

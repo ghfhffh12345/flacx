@@ -17,14 +17,15 @@ mod support;
 #[cfg(all(feature = "aiff", feature = "caf"))]
 use flacx::{PcmContainer, PcmReader};
 use support::TestDecoder;
+use support::{
+    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, parse_first_flac_frame_header,
+    parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
+    wav_data_bytes,
+};
 #[cfg(feature = "aiff")]
 use support::{aiff_pcm_bytes, is_aifc_bytes, is_aiff_bytes};
 #[cfg(feature = "caf")]
 use support::{caf_lpcm_bytes, is_caf_bytes};
-use support::{
-    parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
-    wav_data_bytes,
-};
 
 fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {
     match config.mode() {
@@ -378,6 +379,46 @@ fn wav_reader_exposes_spec_before_stream_consumption() {
 }
 
 #[test]
+fn wav_reader_stream_appends_into_existing_output_buffer() {
+    let expected_samples = sample_fixture(2, 4);
+    let wav = pcm_wav_bytes(16, 2, 44_100, &expected_samples);
+    let reader = WavReader::new(Cursor::new(&wav)).unwrap();
+    let mut stream = reader.into_pcm_stream();
+    let mut output = vec![-999];
+
+    assert_eq!(stream.read_chunk(2, &mut output).unwrap(), 2);
+    assert_eq!(stream.read_chunk(2, &mut output).unwrap(), 2);
+    assert_eq!(stream.read_chunk(2, &mut output).unwrap(), 0);
+
+    assert_eq!(output[0], -999);
+    assert_eq!(&output[1..], expected_samples.as_slice());
+}
+
+#[test]
+fn raw_reader_stream_appends_into_existing_output_buffer() {
+    let expected_samples = sample_fixture(2, 4);
+    let (raw_bytes, descriptor) = raw_pcm_fixture(
+        44_100,
+        2,
+        16,
+        16,
+        RawPcmByteOrder::LittleEndian,
+        None,
+        &expected_samples,
+    );
+    let reader = flacx::RawPcmReader::new(Cursor::new(raw_bytes), descriptor).unwrap();
+    let mut stream = reader.into_pcm_stream().unwrap();
+    let mut output = vec![-999];
+
+    assert_eq!(stream.read_chunk(1, &mut output).unwrap(), 1);
+    assert_eq!(stream.read_chunk(3, &mut output).unwrap(), 3);
+    assert_eq!(stream.read_chunk(1, &mut output).unwrap(), 0);
+
+    assert_eq!(output[0], -999);
+    assert_eq!(&output[1..], expected_samples.as_slice());
+}
+
+#[test]
 fn explicit_reader_session_pipeline_round_trips_without_builtin_inference() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
     let reader = WavReader::new(Cursor::new(&wav)).unwrap();
@@ -411,6 +452,95 @@ fn explicit_reader_session_pipeline_round_trips_without_builtin_inference() {
     assert_eq!(decoded_spec.sample_rate, 44_100);
     assert_eq!(decoded_spec.channels, 2);
     assert_eq!(wav_data_bytes(roundtrip.get_ref()), wav_data_bytes(&wav));
+}
+
+#[test]
+fn explicit_reader_session_supports_variable_block_schedule_semantics() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_352));
+    let reader = WavReader::new(Cursor::new(&wav)).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = EncoderConfig::default()
+        .with_threads(2)
+        .with_block_schedule(vec![576, 1_152, 576, 2_048])
+        .into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+
+    let summary = encoder.encode(stream).unwrap();
+    let flac = encoder.into_inner().into_inner();
+    let decoded = builtin::decode_bytes(&flac).unwrap();
+    let header = parse_first_flac_frame_header(&flac);
+
+    assert_eq!(summary.total_samples, 4_352);
+    assert_eq!(summary.frame_count, 4);
+    assert_eq!(summary.min_block_size, 576);
+    assert_eq!(summary.max_block_size, 2_048);
+    assert_eq!(
+        header.blocking_strategy,
+        ParsedFlacBlockingStrategy::Variable
+    );
+    assert_eq!(
+        header.coded_number_kind,
+        ParsedFlacCodedNumberKind::SampleNumber
+    );
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn explicit_reader_session_progress_matches_default_output_for_variable_schedule() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_352));
+    let config = EncoderConfig::default()
+        .with_threads(2)
+        .with_block_schedule(vec![576, 1_152, 576, 2_048]);
+
+    let baseline_reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
+    let baseline_metadata = baseline_reader.metadata().clone();
+    let baseline_stream = baseline_reader.into_pcm_stream();
+    let mut baseline_encoder = config.clone().into_encoder(Cursor::new(Vec::new()));
+    baseline_encoder.set_metadata(baseline_metadata);
+    let expected_summary = baseline_encoder.encode(baseline_stream).unwrap();
+    let expected_output = baseline_encoder.into_inner().into_inner();
+
+    let progress_reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
+    let progress_metadata = progress_reader.metadata().clone();
+    let progress_stream = progress_reader.into_pcm_stream();
+    let mut progress_encoder = config.into_encoder(Cursor::new(Vec::new()));
+    progress_encoder.set_metadata(progress_metadata);
+
+    let mut updates = Vec::new();
+    let summary = progress_encoder
+        .encode_with_progress(progress_stream, |progress| {
+            updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+    let output = progress_encoder.into_inner().into_inner();
+
+    assert_eq!(summary, expected_summary);
+    assert_eq!(output, expected_output);
+    assert_eq!(summary.frame_count, 4);
+    assert_eq!(summary.total_samples, 4_352);
+    assert!(!updates.is_empty());
+    assert!(updates.iter().all(|progress| progress.total_frames == 4));
+    assert_eq!(
+        updates.last().unwrap().processed_samples,
+        summary.total_samples
+    );
+    assert_eq!(
+        updates.last().unwrap().completed_frames,
+        summary.frame_count
+    );
+    assert!(
+        updates
+            .windows(2)
+            .all(|pair| pair[0].processed_samples <= pair[1].processed_samples)
+    );
+    assert!(
+        updates
+            .windows(2)
+            .all(|pair| pair[0].completed_frames <= pair[1].completed_frames)
+    );
 }
 
 #[test]

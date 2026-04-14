@@ -17,14 +17,13 @@ use std::{
 
 use crate::{
     config::{EncoderBuilder, EncoderConfig},
-    encode_pipeline::{EncodedChunk, encode_stream, write_encoded_chunk},
+    encode_pipeline::{EncodedChunk, encode_frame_batch, encode_stream, write_encoded_chunk},
     error::{Error, Result},
     input::{EncodePcmStream, PcmStream},
     metadata::EncodeMetadata,
-    model::encode_frame,
-    plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
+    plan::{EncodePlan, summary_from_stream_info},
     progress::{NoProgress, ProgressSink},
-    write::{FlacWriter, FrameHeaderNumber},
+    write::FlacWriter,
 };
 
 #[cfg(feature = "progress")]
@@ -246,9 +245,22 @@ where
     const FRAME_CHUNK_SIZE: usize = 32;
 
     let worker_count = config.threads.max(1).min(plan.total_frames.max(1));
+    if worker_count == 1 || plan.total_frames <= FRAME_CHUNK_SIZE {
+        let chunk = encode_frame_batch(&samples, &plan, 0, 0, plan.total_frames, 0)?;
+        write_encoded_chunk(
+            writer,
+            chunk,
+            0,
+            plan.spec.total_samples,
+            0,
+            plan.total_frames,
+            progress,
+        )?;
+        return Ok(());
+    }
+
     let next_frame = Arc::new(AtomicUsize::new(0));
     let samples: Arc<[i32]> = Arc::from(samples);
-    let channels = usize::from(plan.spec.channels);
 
     thread::scope(|scope| -> Result<()> {
         let (sender, receiver) = mpsc::channel();
@@ -265,44 +277,15 @@ where
                         break;
                     }
                     let chunk_end = (chunk_start + FRAME_CHUNK_SIZE).min(plan.total_frames);
-                    let mut encoded_frames = Vec::with_capacity(chunk_end - chunk_start);
-
-                    for frame_index in chunk_start..chunk_end {
-                        let frame_plan = plan.frame(frame_index);
-                        let frame_samples = usize::from(frame_plan.block_size);
-                        let sample_start = usize::try_from(frame_plan.sample_offset)
-                            .expect("sample offset fits usize")
-                            * channels;
-                        let sample_end = sample_start + frame_samples * channels;
-                        let frame = encode_frame(
-                            &samples[sample_start..sample_end],
-                            plan.spec.channels,
-                            plan.spec.bits_per_sample,
-                            plan.spec.sample_rate,
-                            match frame_plan.coded_number_kind {
-                                FrameCodedNumberKind::FrameNumber => {
-                                    FrameHeaderNumber::Frame(frame_plan.coded_number)
-                                }
-                                FrameCodedNumberKind::SampleNumber => {
-                                    FrameHeaderNumber::Sample(frame_plan.coded_number)
-                                }
-                            },
-                            plan.profile,
-                        );
-                        match frame {
-                            Ok(frame) => encoded_frames.push(frame),
-                            Err(error) => {
-                                let _ = sender.send(Err(error));
-                                return;
-                            }
-                        }
-                    }
-
                     if sender
-                        .send(Ok(EncodedChunk {
-                            start_frame: chunk_start,
-                            frames: encoded_frames,
-                        }))
+                        .send(encode_frame_batch(
+                            &samples,
+                            &plan,
+                            0,
+                            chunk_start,
+                            chunk_end,
+                            0,
+                        ))
                         .is_err()
                     {
                         return;
