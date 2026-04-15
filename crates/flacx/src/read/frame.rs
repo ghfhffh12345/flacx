@@ -83,6 +83,13 @@ where
     if worker_count == 1 || frames.len() <= FRAME_CHUNK_SIZE {
         let mut processed_samples = 0u64;
         let total_frames = frames.len();
+        let indexed_total_samples = frames
+            .iter()
+            .map(|frame| u64::from(frame.block_size))
+            .sum::<u64>();
+        // The frame index is the authoritative decode schedule here, so the
+        // single-threaded fast path should validate against its summed block
+        // sizes instead of assuming STREAMINFO's advertised total still matches.
         let mut decoded_frames = Vec::with_capacity(total_frames);
         for frame in frames.iter() {
             let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
@@ -98,7 +105,7 @@ where
             0,
             total_frames,
         )?;
-        debug_assert_eq!(processed_samples, stream_info.total_samples);
+        debug_assert_eq!(processed_samples, indexed_total_samples);
         return Ok(());
     }
 

@@ -363,6 +363,35 @@ fn flac_reader_stream_starts_before_all_frames_are_decoded() {
 }
 
 #[test]
+fn flac_reader_stream_single_thread_chunk_decode_round_trips_full_stream() {
+    let expected_samples = sample_fixture(2, 16_384);
+    let wav = pcm_wav_bytes(16, 2, 44_100, &expected_samples);
+    let reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = EncoderConfig::default()
+        .with_block_size(576)
+        .into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    encoder.encode(stream).unwrap();
+    let flac = encoder.into_inner().into_inner();
+
+    let reader = read_flac_reader(Cursor::new(flac)).unwrap();
+    let mut stream = reader.into_pcm_stream();
+    stream.set_threads(1);
+
+    let mut decoded_samples = Vec::new();
+    let mut chunk_reads = 0usize;
+    while stream.read_chunk(4_096, &mut decoded_samples).unwrap() != 0 {
+        chunk_reads += 1;
+    }
+
+    assert_eq!(decoded_samples, expected_samples);
+    assert!(chunk_reads > 1);
+    assert!(stream.completed_input_frames() > 0);
+}
+
+#[test]
 fn wav_reader_exposes_spec_before_stream_consumption() {
     let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 256));
     let reader = WavReader::new(Cursor::new(&wav)).unwrap();
