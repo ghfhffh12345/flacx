@@ -654,35 +654,40 @@ fn decode_samples_into(data: &[u8], envelope: PcmEnvelope, output: &mut Vec<i32>
         8 => {
             let bias = 1i32 << (envelope.valid_bits_per_sample - 1);
             output.reserve(data.len());
-            output.extend(data.iter().map(|&byte| (i32::from(byte) >> shift) - bias));
+            for &byte in data {
+                output.push((i32::from(byte) >> shift) - bias);
+            }
             Ok(())
         }
         16 => {
-            output.reserve(data.len() / 2);
-            output.extend(data.chunks_exact(2).map(|chunk| {
+            let sample_count = data.len() / 2;
+            output.reserve(sample_count);
+            for chunk in data.chunks_exact(2) {
                 let value = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
-                if shift == 0 { value } else { value >> shift }
-            }));
+                output.push(if shift == 0 { value } else { value >> shift });
+            }
             Ok(())
         }
         24 => {
-            output.reserve(data.len() / 3);
-            output.extend(data.chunks_exact(3).map(|chunk| {
+            let sample_count = data.len() / 3;
+            output.reserve(sample_count);
+            for chunk in data.chunks_exact(3) {
                 let mut value =
                     i32::from(chunk[0]) | (i32::from(chunk[1]) << 8) | (i32::from(chunk[2]) << 16);
                 if value & 0x0080_0000 != 0 {
                     value |= !0x00ff_ffff;
                 }
-                if shift == 0 { value } else { value >> shift }
-            }));
+                output.push(if shift == 0 { value } else { value >> shift });
+            }
             Ok(())
         }
         32 => {
-            output.reserve(data.len() / 4);
-            output.extend(data.chunks_exact(4).map(|chunk| {
+            let sample_count = data.len() / 4;
+            output.reserve(sample_count);
+            for chunk in data.chunks_exact(4) {
                 let value = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                if shift == 0 { value } else { value >> shift }
-            }));
+                output.push(if shift == 0 { value } else { value >> shift });
+            }
             Ok(())
         }
         _ => Err(Error::UnsupportedWav(format!(

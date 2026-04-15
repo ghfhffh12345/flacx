@@ -266,28 +266,30 @@ fn decode_raw_samples_into(
     match descriptor.envelope.container_bits_per_sample {
         8 => {
             output.reserve(data.len());
-            output.extend(data.iter().map(|&byte| {
+            for &byte in data {
                 let value = i32::from(i8::from_ne_bytes([byte]));
-                if shift == 0 { value } else { value >> shift }
-            }));
+                output.push(if shift == 0 { value } else { value >> shift });
+            }
             Ok(())
         }
         16 => {
-            output.reserve(data.len() / 2);
-            output.extend(data.chunks_exact(2).map(|chunk| {
+            let sample_count = data.len() / 2;
+            output.reserve(sample_count);
+            for chunk in data.chunks_exact(2) {
                 let value = match descriptor.descriptor.byte_order {
                     RawPcmByteOrder::LittleEndian => {
                         i16::from_le_bytes([chunk[0], chunk[1]]) as i32
                     }
                     RawPcmByteOrder::BigEndian => i16::from_be_bytes([chunk[0], chunk[1]]) as i32,
                 };
-                if shift == 0 { value } else { value >> shift }
-            }));
+                output.push(if shift == 0 { value } else { value >> shift });
+            }
             Ok(())
         }
         24 => {
-            output.reserve(data.len() / 3);
-            output.extend(data.chunks_exact(3).map(|chunk| {
+            let sample_count = data.len() / 3;
+            output.reserve(sample_count);
+            for chunk in data.chunks_exact(3) {
                 let mut value = match descriptor.descriptor.byte_order {
                     RawPcmByteOrder::LittleEndian => {
                         i32::from(chunk[0])
@@ -303,13 +305,14 @@ fn decode_raw_samples_into(
                 if value & 0x0080_0000 != 0 {
                     value |= !0x00ff_ffff;
                 }
-                if shift == 0 { value } else { value >> shift }
-            }));
+                output.push(if shift == 0 { value } else { value >> shift });
+            }
             Ok(())
         }
         32 => {
-            output.reserve(data.len() / 4);
-            output.extend(data.chunks_exact(4).map(|chunk| {
+            let sample_count = data.len() / 4;
+            output.reserve(sample_count);
+            for chunk in data.chunks_exact(4) {
                 let value = match descriptor.descriptor.byte_order {
                     RawPcmByteOrder::LittleEndian => {
                         i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
@@ -318,8 +321,8 @@ fn decode_raw_samples_into(
                         i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
                     }
                 };
-                if shift == 0 { value } else { value >> shift }
-            }));
+                output.push(if shift == 0 { value } else { value >> shift });
+            }
             Ok(())
         }
         _ => Err(Error::UnsupportedWav(format!(

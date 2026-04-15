@@ -319,7 +319,8 @@ fn write_residual(
         match partition {
             ResidualPartition::Rice {
                 parameter,
-                residuals,
+                start,
+                end,
             } => {
                 writer.write_unsigned_var(encoding.method.parameter_bits() as u32, *parameter)?;
                 let mask = if *parameter == 0 {
@@ -327,7 +328,7 @@ fn write_residual(
                 } else {
                     (1u32 << u32::from(*parameter)) - 1
                 };
-                for &residual in residuals {
+                for &residual in &encoding.residuals[*start..*end] {
                     let folded = fold_residual(residual) as u32;
                     let quotient = folded >> u32::from(*parameter);
                     writer.write_unary::<1>(quotient)?;
@@ -336,14 +337,14 @@ fn write_residual(
                     }
                 }
             }
-            ResidualPartition::Escape { bits, residuals } => {
+            ResidualPartition::Escape { bits, start, end } => {
                 writer.write_unsigned_var(
                     encoding.method.parameter_bits() as u32,
                     encoding.method.escape_code(),
                 )?;
                 writer.write_unsigned_var(5, *bits)?;
                 if *bits > 0 {
-                    for &residual in residuals {
+                    for &residual in &encoding.residuals[*start..*end] {
                         writer.write_signed_var(u32::from(*bits), residual)?;
                     }
                 }

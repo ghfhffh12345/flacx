@@ -123,6 +123,16 @@ fn assert_progress_trace_has_startup_events(trace: &str, kind: &str, filename: &
     assert!(trace.contains(&format!("filename={filename}")));
 }
 
+fn trace_event_index(trace: &str, event: &str, filename: &str) -> usize {
+    trace
+        .lines()
+        .position(|line| {
+            line.contains(&format!("event={event}"))
+                && line.contains(&format!("filename={filename}"))
+        })
+        .unwrap_or_else(|| panic!("missing {event} for {filename} in trace:\n{trace}"))
+}
+
 #[test]
 fn cli_dispatch_does_not_depend_on_builtin_shortcut_routing() {
     let source = include_str!("../src/lib.rs");
@@ -351,6 +361,61 @@ fn encode_command_emits_progress_trace_when_requested() {
     assert!(trace.contains("overall_total_samples="));
 
     let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn encode_directory_progress_trace_preserves_per_file_event_order_with_parallel_budget() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_dir();
+    let trace_path = input_dir.join("directory-progress.trace");
+    write_wav_file(&input_dir.join("disc1/first.wav"), 1, 4_096);
+    write_wav_file(&input_dir.join("disc1/second.wav"), 2, 8_192);
+
+    let output = Command::new(flacx_bin())
+        .env("FLACX_PROGRESS_TRACE", &trace_path)
+        .args([
+            "encode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--depth",
+            "0",
+            "--threads",
+            "4",
+            "--level",
+            "8",
+            "--depth",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_dir.join("disc1/first.flac").exists());
+    assert!(output_dir.join("disc1/second.flac").exists());
+
+    let trace = fs::read_to_string(&trace_path).unwrap();
+    assert!(trace.contains("batch_mode=1"));
+    for filename in ["disc1/first.wav", "disc1/second.wav"] {
+        let begin = trace_event_index(&trace, "file_begin", filename);
+        let first_progress = trace_event_index(&trace, "first_progress", filename);
+        let finish = trace_event_index(&trace, "file_finish", filename);
+        assert!(
+            begin < first_progress,
+            "trace begin/progress order broke for {filename}"
+        );
+        assert!(
+            first_progress < finish,
+            "trace progress/finish order broke for {filename}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(input_dir);
+    let _ = fs::remove_dir_all(output_dir);
 }
 
 #[test]

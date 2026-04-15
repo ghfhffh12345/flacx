@@ -212,5 +212,8 @@ required secret setup, and manual recovery notes.
   review audit for WAV/AIFF/CAF parity and remaining naming caveats
 - [`docs/flacx-major-refactor-review.md`](docs/flacx-major-refactor-review.md) —
   maintainer guide for the explicit-core / convenience-layer refactor
+- [`docs/flacx-cli-encoding-performance-review.md`](docs/flacx-cli-encoding-performance-review.md) —
+  maintainer guide for bounded directory-encode scheduling, progress ordering,
+  and verification evidence
 - [`crates/flacx-cli/README.md`](crates/flacx-cli/README.md) — CLI user guide
 - [`docs/releasing.md`](docs/releasing.md) — maintainer release workflow

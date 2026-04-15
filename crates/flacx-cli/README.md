@@ -191,3 +191,5 @@ terminal.
 
 For the library API guide, see `crates/flacx/README.md`.
 For workspace-level context, see the repository root `README.md`.
+For the active directory-encode performance review and documentation contract,
+see `docs/flacx-cli-encoding-performance-review.md`.

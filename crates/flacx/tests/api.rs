@@ -150,6 +150,26 @@ fn recompress_verification_lane_keeps_the_v082_authority_gate_bound() {
     assert!(throughput_bench.contains("\"recompress_corpus_throughput\""));
 }
 
+#[test]
+fn encoding_speed_verification_lane_keeps_identity_and_perf_gates_bound() {
+    let throughput_bench = include_str!("../benches/throughput.rs");
+    let encode_tests = include_str!("encode.rs");
+
+    assert!(throughput_bench.contains("\"encode_corpus_throughput\""));
+    assert!(throughput_bench.contains("mono-compact.wav"));
+    assert!(throughput_bench.contains("stereo-medium.wav"));
+    assert!(throughput_bench.contains("stereo-large.wav"));
+    assert!(encode_tests.contains("bench-mono-default"));
+    assert!(encode_tests.contains("bench-stereo-medium-default"));
+    assert!(encode_tests.contains("bench-stereo-large-default"));
+    assert!(encode_tests.contains("level0-block576"));
+    assert!(encode_tests.contains("variable-block-schedule"));
+    assert!(encode_tests.contains("metadata-bearing-wav"));
+    assert!(encode_tests.contains("produces_identical_output_across_thread_counts"));
+    assert!(encode_tests.contains("preserves_metadata_deterministically_across_thread_counts"));
+    assert!(encode_tests.contains("reference_identity_matrix_repeats_exact_encode_bytes"));
+}
+
 #[cfg(feature = "aiff")]
 #[test]
 fn builtin_encode_file_accepts_aiff_inputs() {

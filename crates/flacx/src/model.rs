@@ -56,6 +56,7 @@ pub(crate) enum AnalyzedSubframe {
 pub(crate) struct ResidualEncoding {
     pub(crate) method: RiceMethod,
     pub(crate) partition_order: u8,
+    pub(crate) residuals: Vec<i32>,
     pub(crate) partitions: Vec<ResidualPartition>,
 }
 
@@ -67,8 +68,16 @@ pub(crate) enum RiceMethod {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ResidualPartition {
-    Rice { parameter: u8, residuals: Vec<i32> },
-    Escape { bits: u8, residuals: Vec<i32> },
+    Rice {
+        parameter: u8,
+        start: usize,
+        end: usize,
+    },
+    Escape {
+        bits: u8,
+        start: usize,
+        end: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -138,8 +147,8 @@ fn analyze_frame(
 
     let candidates = match channels {
         1 => {
-            let samples = extract_channel(interleaved_samples, channel_count, 0);
-            let subframe = choose_subframe(&samples, bits_per_sample, sample_rate, profile)?;
+            let subframe =
+                choose_subframe(interleaved_samples, bits_per_sample, sample_rate, profile)?;
             vec![Candidate {
                 bits: subframe.bit_len(bits_per_sample),
                 assignment: ChannelAssignment::Independent(1),
@@ -147,38 +156,40 @@ fn analyze_frame(
             }]
         }
         2 => {
-            let (left, right) = extract_stereo_channels(interleaved_samples);
             if profile.use_mid_side_stereo {
-                let mut side = Vec::with_capacity(left.len());
-                let mut mid = Vec::with_capacity(left.len());
-                for (&left_sample, &right_sample) in left.iter().zip(&right) {
-                    side.push(left_sample - right_sample);
-                    mid.push(((i64::from(left_sample) + i64::from(right_sample)) >> 1) as i32);
-                }
-                let independent_cost = sample_magnitude_cost(&left) + sample_magnitude_cost(&right);
-                let mid_side_cost = sample_magnitude_cost(&mid) + sample_magnitude_cost(&side);
+                let (independent_cost, mid_side_cost) =
+                    stereo_assignment_costs(interleaved_samples);
 
                 if mid_side_cost < independent_cost {
+                    let split = split_mid_side_channels(interleaved_samples);
+                    let frame_count = split.len() / 2;
+                    let (mid, side) = split.split_at(frame_count);
                     vec![analyze_stereo_candidate(
                         ChannelAssignment::MidSide,
-                        [&mid, &side],
+                        [mid, side],
                         [bits_per_sample, bits_per_sample + 1],
                         sample_rate,
                         profile,
                     )?]
                 } else {
+                    let split = split_stereo_channels(interleaved_samples);
+                    let frame_count = split.len() / 2;
+                    let (left, right) = split.split_at(frame_count);
                     vec![analyze_stereo_candidate(
                         ChannelAssignment::Independent(2),
-                        [&left, &right],
+                        [left, right],
                         [bits_per_sample, bits_per_sample],
                         sample_rate,
                         profile,
                     )?]
                 }
             } else {
+                let split = split_stereo_channels(interleaved_samples);
+                let frame_count = split.len() / 2;
+                let (left, right) = split.split_at(frame_count);
                 vec![analyze_stereo_candidate(
                     ChannelAssignment::Independent(2),
-                    [&left, &right],
+                    [left, right],
                     [bits_per_sample, bits_per_sample],
                     sample_rate,
                     profile,
@@ -255,22 +266,40 @@ fn analyze_stereo_candidate(
     })
 }
 
-fn extract_channel(interleaved: &[i32], channels: usize, channel: usize) -> Vec<i32> {
-    interleaved
-        .chunks_exact(channels)
-        .map(|frame| frame[channel])
-        .collect()
+fn split_stereo_channels(interleaved: &[i32]) -> Vec<i32> {
+    let frame_count = interleaved.len() / 2;
+    let mut split = vec![0; interleaved.len()];
+    for (frame_index, frame) in interleaved.chunks_exact(2).enumerate() {
+        split[frame_index] = frame[0];
+        split[frame_count + frame_index] = frame[1];
+    }
+    split
 }
 
-fn extract_stereo_channels(interleaved: &[i32]) -> (Vec<i32>, Vec<i32>) {
+fn split_mid_side_channels(interleaved: &[i32]) -> Vec<i32> {
     let frame_count = interleaved.len() / 2;
-    let mut left = Vec::with_capacity(frame_count);
-    let mut right = Vec::with_capacity(frame_count);
-    for frame in interleaved.chunks_exact(2) {
-        left.push(frame[0]);
-        right.push(frame[1]);
+    let mut split = vec![0; interleaved.len()];
+    for (frame_index, frame) in interleaved.chunks_exact(2).enumerate() {
+        let left_sample = frame[0];
+        let right_sample = frame[1];
+        split[frame_index] = ((i64::from(left_sample) + i64::from(right_sample)) >> 1) as i32;
+        split[frame_count + frame_index] = left_sample - right_sample;
     }
-    (left, right)
+    split
+}
+
+fn stereo_assignment_costs(interleaved: &[i32]) -> (u64, u64) {
+    let mut independent_cost = 0u64;
+    let mut mid_side_cost = 0u64;
+    for frame in interleaved.chunks_exact(2) {
+        let left_sample = frame[0];
+        let right_sample = frame[1];
+        independent_cost += i64::from(left_sample).unsigned_abs();
+        independent_cost += i64::from(right_sample).unsigned_abs();
+        mid_side_cost += ((i64::from(left_sample) + i64::from(right_sample)) >> 1).unsigned_abs();
+        mid_side_cost += i64::from(left_sample - right_sample).unsigned_abs();
+    }
+    (independent_cost, mid_side_cost)
 }
 
 fn split_channels(interleaved: &[i32], channels: usize) -> Vec<i32> {
@@ -282,13 +311,6 @@ fn split_channels(interleaved: &[i32], channels: usize) -> Vec<i32> {
         }
     }
     split
-}
-
-fn sample_magnitude_cost(samples: &[i32]) -> u64 {
-    samples
-        .iter()
-        .map(|&sample| i64::from(sample).unsigned_abs())
-        .sum()
 }
 
 impl AnalyzedSubframe {
@@ -324,21 +346,22 @@ impl ResidualEncoding {
             + self
                 .partitions
                 .iter()
-                .map(|partition| partition.bit_len(self.method))
+                .map(|partition| partition.bit_len(self.method, &self.residuals))
                 .sum::<usize>()
     }
 }
 
 impl ResidualPartition {
-    fn bit_len(&self, method: RiceMethod) -> usize {
+    fn bit_len(&self, method: RiceMethod, residuals: &[i32]) -> usize {
         let parameter_bits = method.parameter_bits();
         match self {
             Self::Rice {
                 parameter,
-                residuals,
+                start,
+                end,
             } => {
                 parameter_bits
-                    + residuals
+                    + residuals[*start..*end]
                         .iter()
                         .map(|&residual| {
                             let folded = fold_residual(residual);
@@ -346,8 +369,8 @@ impl ResidualPartition {
                         })
                         .sum::<usize>()
             }
-            Self::Escape { bits, residuals } => {
-                parameter_bits + 5 + residuals.len() * usize::from(*bits)
+            Self::Escape { bits, start, end } => {
+                parameter_bits + 5 + (end - start) * usize::from(*bits)
             }
         }
     }
@@ -415,15 +438,21 @@ fn choose_subframe(
         if fixed_subframe_lower_bound(order, bits_per_sample, samples.len()) >= best_bits {
             continue;
         }
+        let fixed_overhead =
+            SUBFRAME_HEADER_BITS + usize::from(order) * usize::from(bits_per_sample);
+        let Some(residual_bit_limit) = best_bits.checked_sub(fixed_overhead) else {
+            continue;
+        };
         if let Some(residuals) = fixed_residuals(samples, order)
-            && let Some(residual) = choose_residual_encoding(&residuals, order, max_partition_order)
+            && let Some((residual, residual_bits)) =
+                choose_residual_encoding(&residuals, order, max_partition_order, residual_bit_limit)
         {
+            let candidate_bits = fixed_overhead + residual_bits;
             let candidate = AnalyzedSubframe::Fixed {
                 order,
                 warmup: samples[..usize::from(order)].to_vec(),
                 residual,
             };
-            let candidate_bits = candidate.bit_len(bits_per_sample);
             if candidate_bits < best_bits {
                 best_bits = candidate_bits;
                 best = Some(candidate);
@@ -487,18 +516,35 @@ fn choose_lpc_subframe(
             {
                 continue;
             }
-            let quantized = quantize_lpc_coefficients(coefficients, precision)?;
-            let residuals = lpc_residuals(samples, &quantized.coefficients, quantized.shift)?;
-            let residual = choose_residual_encoding(&residuals, order, max_partition_order)?;
+            let lpc_overhead = SUBFRAME_HEADER_BITS
+                + usize::from(order) * usize::from(bits_per_sample)
+                + 4
+                + 5
+                + usize::from(order) * usize::from(precision);
+            let Some(residual_bit_limit) = best_bits.checked_sub(lpc_overhead) else {
+                continue;
+            };
+            let QuantizedLpc {
+                precision,
+                shift,
+                coefficients,
+            } = quantize_lpc_coefficients(coefficients, precision)?;
+            let residuals = lpc_residuals(samples, &coefficients, shift)?;
+            let (residual, residual_bits) = choose_residual_encoding(
+                &residuals,
+                order,
+                max_partition_order,
+                residual_bit_limit,
+            )?;
+            let candidate_bits = lpc_overhead + residual_bits;
             let candidate = AnalyzedSubframe::Lpc {
                 order,
                 warmup: samples[..usize::from(order)].to_vec(),
-                precision: quantized.precision,
-                shift: quantized.shift,
-                coefficients: quantized.coefficients.clone(),
+                precision,
+                shift,
+                coefficients,
                 residual,
             };
-            let candidate_bits = candidate.bit_len(bits_per_sample);
             if candidate_bits < best_bits {
                 best_bits = candidate_bits;
                 best = Some((candidate_bits, candidate));
@@ -591,20 +637,26 @@ fn choose_residual_encoding(
     residuals: &[i32],
     predictor_order: u8,
     max_partition_order: u8,
-) -> Option<ResidualEncoding> {
+    residual_bit_limit: usize,
+) -> Option<(ResidualEncoding, usize)> {
     let block_size = residuals.len() + usize::from(predictor_order);
     let mut best: Option<(usize, RiceMethod, u8, Vec<PartitionEncodingSpec>)> = None;
     let (partition_orders, partition_order_count) =
         partition_order_candidates(block_size, predictor_order, max_partition_order);
+    let (methods, method_count) = candidate_rice_methods(residuals);
     for &partition_order in partition_orders[..partition_order_count].iter() {
         let partition_count = 1usize << partition_order;
         let partition_len = block_size >> partition_order;
         let first_partition_len = partition_len - usize::from(predictor_order);
 
-        let (methods, method_count) = candidate_rice_methods(residuals);
         for &method in methods[..method_count].iter() {
             let mut offset = 0usize;
             let mut bit_len = 2 + 4;
+            let current_limit = best
+                .as_ref()
+                .map(|(best_bits, ..)| *best_bits)
+                .unwrap_or(residual_bit_limit)
+                .min(residual_bit_limit);
             let mut partitions = Vec::with_capacity(partition_count);
             let mut valid = true;
             for partition_index in 0..partition_count {
@@ -614,8 +666,13 @@ fn choose_residual_encoding(
                     partition_len
                 };
                 let end = offset + count;
+                if bit_len >= current_limit {
+                    valid = false;
+                    break;
+                }
+                let remaining_limit = current_limit - bit_len;
                 if let Some((partition_bits, kind)) =
-                    choose_partition_encoding(&residuals[offset..end], method)
+                    choose_partition_encoding(&residuals[offset..end], method, remaining_limit)
                 {
                     bit_len += partition_bits;
                     partitions.push(PartitionEncodingSpec {
@@ -623,6 +680,10 @@ fn choose_residual_encoding(
                         start: offset,
                         end,
                     });
+                    if bit_len >= current_limit {
+                        valid = false;
+                        break;
+                    }
                 } else {
                     valid = false;
                     break;
@@ -632,22 +693,29 @@ fn choose_residual_encoding(
             if valid {
                 best = match best {
                     Some((best_bits, ..)) if best_bits <= bit_len => best,
-                    _ => Some((bit_len, method, partition_order, partitions)),
+                    _ if bit_len < residual_bit_limit => {
+                        Some((bit_len, method, partition_order, partitions))
+                    }
+                    _ => best,
                 };
             }
         }
     }
 
-    best.map(
-        |(_, method, partition_order, partitions)| ResidualEncoding {
-            method,
-            partition_order,
-            partitions: partitions
-                .into_iter()
-                .map(|partition| materialize_partition_encoding(partition, residuals))
-                .collect(),
-        },
-    )
+    best.map(|(bit_len, method, partition_order, partitions)| {
+        (
+            ResidualEncoding {
+                method,
+                partition_order,
+                residuals: residuals.to_vec(),
+                partitions: partitions
+                    .into_iter()
+                    .map(materialize_partition_encoding)
+                    .collect(),
+            },
+            bit_len,
+        )
+    })
 }
 
 fn partition_order_candidates(
@@ -691,31 +759,73 @@ fn candidate_rice_methods(residuals: &[i32]) -> ([RiceMethod; 2], usize) {
 fn choose_partition_encoding(
     residuals: &[i32],
     method: RiceMethod,
+    bit_limit: usize,
 ) -> Option<(usize, PartitionEncodingKind)> {
-    let mut best: Option<(usize, PartitionEncodingKind)> = None;
-    if let Some(bits) = residual_escape_width(residuals) {
-        let bit_len = method.parameter_bits() + 5 + residuals.len() * usize::from(bits);
-        best = Some((bit_len, PartitionEncodingKind::Escape { bits }));
+    let mut min_value = i64::MAX;
+    let mut max_value = i64::MIN;
+    let mut sum_folded = 0usize;
+    let mut all_zero = true;
+    for &residual in residuals {
+        let value = i64::from(residual);
+        min_value = min_value.min(value);
+        max_value = max_value.max(value);
+        all_zero &= residual == 0;
+        sum_folded += fold_residual(residual);
     }
 
-    let (parameters, parameter_count) = candidate_rice_parameters(residuals, method);
-    for &parameter in parameters[..parameter_count].iter() {
-        let mut bit_len = method.parameter_bits();
-        let parameter_shift = usize::from(parameter);
-        let mut valid = true;
-        for &residual in residuals {
-            let folded = fold_residual(residual);
+    let mut best: Option<(usize, PartitionEncodingKind)> = None;
+    if let Some(bits) = residual_escape_width_from_range(min_value, max_value, all_zero) {
+        let bit_len = method.parameter_bits() + 5 + residuals.len() * usize::from(bits);
+        if bit_len < bit_limit {
+            best = Some((bit_len, PartitionEncodingKind::Escape { bits }));
+        }
+    }
+
+    let estimated = estimate_rice_parameter_from_mean_folded(sum_folded / residuals.len().max(1))
+        .min(method.max_parameter());
+    let (parameters, parameter_count) = candidate_rice_parameters_from_estimated(estimated);
+    if parameter_count == 0 {
+        return best;
+    }
+
+    let current_limit = best
+        .as_ref()
+        .map(|(best_bits, _)| *best_bits)
+        .unwrap_or(bit_limit)
+        .min(bit_limit);
+    let mut rice_bit_lens = [method.parameter_bits(); 2];
+    let mut rice_valid = [true; 2];
+    for &residual in residuals {
+        let folded = fold_residual(residual);
+        for (index, &parameter) in parameters[..parameter_count].iter().enumerate() {
+            if !rice_valid[index] {
+                continue;
+            }
+            let parameter_shift = usize::from(parameter);
             let quotient = folded >> parameter_shift;
             if quotient > u32::MAX as usize {
-                valid = false;
-                break;
+                rice_valid[index] = false;
+                continue;
             }
-            bit_len += quotient + 1 + parameter_shift;
+            rice_bit_lens[index] += quotient + 1 + parameter_shift;
+            if rice_bit_lens[index] >= current_limit {
+                rice_valid[index] = false;
+            }
         }
-        if valid {
+        if rice_valid[..parameter_count].iter().all(|valid| !valid) {
+            break;
+        }
+    }
+
+    for (index, &parameter) in parameters[..parameter_count].iter().enumerate() {
+        let bit_len = rice_bit_lens[index];
+        if rice_valid[index] {
             best = match best {
                 Some((best_bits, _)) if best_bits <= bit_len => best,
-                _ => Some((bit_len, PartitionEncodingKind::Rice { parameter })),
+                _ if bit_len < bit_limit => {
+                    Some((bit_len, PartitionEncodingKind::Rice { parameter }))
+                }
+                _ => best,
             };
         }
     }
@@ -723,28 +833,22 @@ fn choose_partition_encoding(
     best
 }
 
-fn materialize_partition_encoding(
-    partition: PartitionEncodingSpec,
-    residuals: &[i32],
-) -> ResidualPartition {
-    let residuals = residuals[partition.start..partition.end].to_vec();
+fn materialize_partition_encoding(partition: PartitionEncodingSpec) -> ResidualPartition {
     match partition.kind {
         PartitionEncodingKind::Rice { parameter } => ResidualPartition::Rice {
             parameter,
-            residuals,
+            start: partition.start,
+            end: partition.end,
         },
-        PartitionEncodingKind::Escape { bits } => ResidualPartition::Escape { bits, residuals },
+        PartitionEncodingKind::Escape { bits } => ResidualPartition::Escape {
+            bits,
+            start: partition.start,
+            end: partition.end,
+        },
     }
 }
 
-fn candidate_rice_parameters(residuals: &[i32], method: RiceMethod) -> ([u8; 2], usize) {
-    let max_parameter = method.max_parameter();
-    if residuals.is_empty() {
-        return ([0, 0], 1);
-    }
-
-    let estimated = estimate_rice_parameter_from_residuals(residuals).min(max_parameter);
-
+fn candidate_rice_parameters_from_estimated(estimated: u8) -> ([u8; 2], usize) {
     let mut parameters = [0; 2];
     let mut count = 0usize;
     if estimated <= 2 {
@@ -761,6 +865,10 @@ fn candidate_rice_parameters(residuals: &[i32], method: RiceMethod) -> ([u8; 2],
 fn estimate_rice_parameter_from_residuals(residuals: &[i32]) -> u8 {
     let mean_folded =
         residuals.iter().copied().map(fold_residual).sum::<usize>() / residuals.len().max(1);
+    estimate_rice_parameter_from_mean_folded(mean_folded)
+}
+
+fn estimate_rice_parameter_from_mean_folded(mean_folded: usize) -> u8 {
     if mean_folded == 0 {
         0
     } else {
@@ -768,17 +876,10 @@ fn estimate_rice_parameter_from_residuals(residuals: &[i32]) -> u8 {
     }
 }
 
-fn residual_escape_width(residuals: &[i32]) -> Option<u8> {
-    if residuals.iter().all(|&value| value == 0) {
+fn residual_escape_width_from_range(min_value: i64, max_value: i64, all_zero: bool) -> Option<u8> {
+    if all_zero {
         return Some(0);
     }
-    let (min_value, max_value) =
-        residuals
-            .iter()
-            .fold((i64::MAX, i64::MIN), |(min_value, max_value), &value| {
-                let value = i64::from(value);
-                (min_value.min(value), max_value.max(value))
-            });
     (1..=MAX_ESCAPE_BITS).find(|&bits| {
         let minimum = -(1i64 << (bits - 1));
         let maximum = (1i64 << (bits - 1)) - 1;
@@ -853,10 +954,9 @@ fn estimate_lpc_coefficients(samples: &[i32], max_order: u8) -> Option<Vec<Vec<f
 
 fn quantize_lpc_coefficients(coefficients: &[f64], precision: u8) -> Option<QuantizedLpc> {
     let max_value = (1i32 << (precision - 1)) - 1;
-    let mut best: Option<(f64, QuantizedLpc)> = None;
+    let mut best: Option<(f64, u8)> = None;
     for shift in (0..=15u8).rev() {
         let scale = f64::from(1u32 << shift);
-        let mut quantized = Vec::with_capacity(coefficients.len());
         let mut error = 0.0;
         let mut valid = true;
         for &coefficient in coefficients {
@@ -865,24 +965,28 @@ fn quantize_lpc_coefficients(coefficients: &[f64], precision: u8) -> Option<Quan
                 valid = false;
                 break;
             }
-            quantized.push(rounded as i16);
             let restored = f64::from(rounded) / scale;
             let delta = coefficient - restored;
             error += delta * delta;
         }
         if valid {
-            let candidate = QuantizedLpc {
-                precision,
-                shift,
-                coefficients: quantized,
-            };
             best = match best {
                 Some((best_error, _)) if best_error <= error => best,
-                _ => Some((error, candidate)),
+                _ => Some((error, shift)),
             };
         }
     }
-    best.map(|(_, candidate)| candidate)
+    let (_, shift) = best?;
+    let scale = f64::from(1u32 << shift);
+    let mut quantized = Vec::with_capacity(coefficients.len());
+    for &coefficient in coefficients {
+        quantized.push((coefficient * scale).round() as i16);
+    }
+    Some(QuantizedLpc {
+        precision,
+        shift,
+        coefficients: quantized,
+    })
 }
 
 fn lpc_residuals(samples: &[i32], coefficients: &[i16], shift: u8) -> Option<Vec<i32>> {

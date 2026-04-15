@@ -177,6 +177,86 @@ fn produces_identical_output_across_thread_counts() {
 }
 
 #[test]
+fn reference_identity_matrix_repeats_exact_encode_bytes() {
+    struct IdentityCase {
+        label: &'static str,
+        wav: Vec<u8>,
+        config: EncoderConfig,
+    }
+
+    let metadata_wav = wav_with_chunks(
+        pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192)),
+        &[
+            (
+                *b"LIST",
+                info_list_chunk(&[
+                    (*b"IART", b"Example Artist"),
+                    (*b"INAM", b"Identity Matrix Title"),
+                ]),
+            ),
+            (*b"cue ", cue_chunk(&[0, 4_096])),
+        ],
+    );
+
+    let cases = vec![
+        IdentityCase {
+            label: "bench-mono-default",
+            wav: pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_096)),
+            config: EncoderConfig::default().with_threads(2),
+        },
+        IdentityCase {
+            label: "bench-stereo-medium-default",
+            wav: pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192)),
+            config: EncoderConfig::default().with_threads(2),
+        },
+        IdentityCase {
+            label: "bench-stereo-large-default",
+            wav: pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 16_384)),
+            config: EncoderConfig::default().with_threads(2),
+        },
+        IdentityCase {
+            label: "level0-block576",
+            wav: pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_608)),
+            config: EncoderConfig::default()
+                .with_threads(1)
+                .with_level(flacx::level::Level::Level0)
+                .with_block_size(576),
+        },
+        IdentityCase {
+            label: "variable-block-schedule",
+            wav: pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_352)),
+            config: EncoderConfig::default()
+                .with_threads(2)
+                .with_block_schedule(vec![576, 1_152, 576, 2_048]),
+        },
+        IdentityCase {
+            label: "metadata-bearing-wav",
+            wav: metadata_wav,
+            config: EncoderConfig::default().with_threads(2),
+        },
+    ];
+
+    for case in cases {
+        let first = Encoder::new(case.config.clone())
+            .encode_bytes(&case.wav)
+            .unwrap_or_else(|error| panic!("{} first encode failed: {error}", case.label));
+        let second = Encoder::new(case.config)
+            .encode_bytes(&case.wav)
+            .unwrap_or_else(|error| panic!("{} second encode failed: {error}", case.label));
+        let decoded = decode_bytes(&first)
+            .unwrap_or_else(|error| panic!("{} decode failed: {error}", case.label));
+
+        assert_eq!(first, second, "{}", case.label);
+        assert_eq!(
+            wav_data_bytes(&decoded),
+            wav_data_bytes(&case.wav),
+            "{}",
+            case.label
+        );
+    }
+}
+
+#[test]
 fn preserves_list_info_text_metadata_as_vorbis_comments() {
     let wav = wav_with_chunks(
         pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048)),
