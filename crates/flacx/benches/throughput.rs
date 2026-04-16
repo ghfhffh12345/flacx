@@ -1,6 +1,7 @@
 use std::{
     env,
     fs::{self, File},
+    io::{self, Cursor},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -8,13 +9,14 @@ use std::{
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use flacx::{
     DecodeConfig, EncoderConfig, FlacReaderOptions, FlacRecompressSource, PcmReaderOptions,
-    RecompressConfig, RecompressMode, read_flac_reader_with_options, read_pcm_reader_with_options,
+    RecompressConfig, RecompressMode, builtin, read_flac_reader_with_options,
+    read_pcm_reader_with_options,
 };
 
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-use support::{pcm_wav_bytes, sample_fixture};
+use support::{cue_chunk, info_list_chunk, pcm_wav_bytes, sample_fixture, wav_with_chunks};
 
 const CORPUS_FIXTURES: [CorpusFixture; 3] = [
     CorpusFixture {
@@ -76,11 +78,102 @@ fn recompress_corpus_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+fn builtin_bytes_encode(c: &mut Criterion) {
+    let corpus = BenchmarkCorpus::generate().expect("benchmark corpus");
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(
+        corpus.representative_wav_bytes.len() as u64
+    ));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("builtin_bytes_encode", |b| {
+        b.iter(|| builtin::encode_bytes(&corpus.representative_wav_bytes).expect("builtin encode"))
+    });
+    group.finish();
+}
+
+fn builtin_bytes_decode(c: &mut Criterion) {
+    let corpus = BenchmarkCorpus::generate().expect("benchmark corpus");
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(
+        corpus.representative_flac_bytes.len() as u64
+    ));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("builtin_bytes_decode", |b| {
+        b.iter(|| builtin::decode_bytes(&corpus.representative_flac_bytes).expect("builtin decode"))
+    });
+    group.finish();
+}
+
+fn builtin_bytes_recompress(c: &mut Criterion) {
+    let corpus = BenchmarkCorpus::generate().expect("benchmark corpus");
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(
+        corpus.representative_flac_bytes.len() as u64
+    ));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("builtin_bytes_recompress", |b| {
+        b.iter(|| {
+            builtin::recompress_bytes(&corpus.representative_flac_bytes)
+                .expect("builtin recompress")
+        })
+    });
+    group.finish();
+}
+
+fn metadata_write_path(c: &mut Criterion) {
+    let corpus = BenchmarkCorpus::generate().expect("benchmark corpus");
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(corpus.metadata_flac_bytes.len() as u64));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("metadata_write_path", |b| {
+        b.iter(|| builtin::decode_bytes(&corpus.metadata_flac_bytes).expect("metadata write path"))
+    });
+    group.finish();
+}
+
+fn decode_frame_materialization(c: &mut Criterion) {
+    let corpus = BenchmarkCorpus::generate().expect("benchmark corpus");
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(
+        corpus.decode_materialization_flac_bytes.len() as u64,
+    ));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("decode_frame_materialization", |b| {
+        b.iter(|| {
+            builtin::decode_bytes(&corpus.decode_materialization_flac_bytes)
+                .expect("decode frame materialization")
+        })
+    });
+    group.finish();
+}
+
+fn test_wavs_roundtrip_throughput(c: &mut Criterion) {
+    let corpus = BenchmarkCorpus::generate().expect("benchmark corpus");
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(
+        corpus.representative_test_wav.wav_bytes.len() as u64,
+    ));
+    group.measurement_time(Duration::from_secs(3));
+    group.sample_size(10);
+    group.bench_function("test_wavs_roundtrip_throughput", |b| {
+        b.iter(|| {
+            run_test_wav_roundtrip(&corpus.representative_test_wav).expect("test-wavs roundtrip")
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     encode_corpus_throughput,
     decode_corpus_throughput,
-    recompress_corpus_throughput
+    recompress_corpus_throughput,
+    builtin_bytes_encode,
+    builtin_bytes_decode,
+    builtin_bytes_recompress,
+    metadata_write_path,
+    decode_frame_materialization,
+    test_wavs_roundtrip_throughput
 );
 criterion_main!(benches);
 
@@ -90,12 +183,23 @@ struct CorpusFixture {
     frames: usize,
 }
 
+#[derive(Clone)]
+struct TestWavFixture {
+    _file_name: String,
+    wav_bytes: Vec<u8>,
+}
+
 struct BenchmarkCorpus {
     wav_root: PathBuf,
     wav_inputs: Vec<PathBuf>,
     flac_root: PathBuf,
     flac_inputs: Vec<PathBuf>,
     total_input_bytes: u64,
+    representative_wav_bytes: Vec<u8>,
+    representative_flac_bytes: Vec<u8>,
+    metadata_flac_bytes: Vec<u8>,
+    decode_materialization_flac_bytes: Vec<u8>,
+    representative_test_wav: TestWavFixture,
 }
 
 impl BenchmarkCorpus {
@@ -118,7 +222,7 @@ impl BenchmarkCorpus {
             let samples = sample_fixture(fixture.channels, fixture.frames);
             let wav_bytes = pcm_wav_bytes(16, fixture.channels, 44_100, &samples);
             total_input_bytes += wav_bytes.len() as u64;
-            fs::write(&wav_path, wav_bytes)?;
+            fs::write(&wav_path, &wav_bytes)?;
             wav_inputs.push(wav_path.clone());
 
             let flac_path = flac_root.join(fixture.file_name).with_extension("flac");
@@ -129,12 +233,32 @@ impl BenchmarkCorpus {
             flac_inputs.push(flac_path);
         }
 
+        let representative_wav_bytes = fs::read(&wav_inputs[1])?;
+        let representative_flac_bytes = fs::read(&flac_inputs[1])?;
+        let metadata_flac_bytes = encode_fixture_bytes(&config, &metadata_wav_fixture())?;
+        let decode_materialization_flac_bytes = encode_fixture_bytes(
+            &EncoderConfig::default()
+                .with_threads(threads)
+                .with_block_schedule(vec![576, 1_152, 576, 2_304, 4_096, 576, 1_152]),
+            &pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 10_432)),
+        )?;
+        let (test_wav_inputs, _) = load_test_wav_fixtures()?;
+        let representative_test_wav = test_wav_inputs
+            .first()
+            .expect("test-wavs corpus fixture")
+            .clone();
+
         Ok(Self {
             wav_root,
             wav_inputs,
             flac_root,
             flac_inputs,
             total_input_bytes,
+            representative_wav_bytes,
+            representative_flac_bytes,
+            metadata_flac_bytes,
+            decode_materialization_flac_bytes,
+            representative_test_wav,
         })
     }
 
@@ -215,6 +339,13 @@ fn run_recompress_corpus(
     })
 }
 
+fn run_test_wav_roundtrip(fixture: &TestWavFixture) -> Result<(), Box<dyn std::error::Error>> {
+    let encoded = builtin::encode_bytes(&fixture.wav_bytes)?;
+    let decoded = builtin::decode_bytes(&encoded)?;
+    let _ = builtin::encode_bytes(&decoded)?;
+    Ok(())
+}
+
 fn with_temp_dir<T>(
     label: &str,
     f: impl FnOnce(&Path) -> Result<T, Box<dyn std::error::Error>>,
@@ -252,6 +383,100 @@ fn encode_fixture_file(
     encoder.set_metadata(metadata);
     encoder.encode(stream)?;
     Ok(())
+}
+
+fn encode_fixture_bytes(
+    config: &EncoderConfig,
+    input: &[u8],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let reader = read_pcm_reader_with_options(
+        Cursor::new(input),
+        PcmReaderOptions {
+            capture_fxmd: config.capture_fxmd,
+            strict_fxmd_validation: config.strict_fxmd_validation,
+        },
+    )?;
+    let metadata = reader.metadata().clone();
+    let stream = reader.into_pcm_stream();
+    let mut encoder = config.clone().into_encoder(Cursor::new(Vec::new()));
+    encoder.set_metadata(metadata);
+    encoder.encode(stream)?;
+    Ok(encoder.into_inner().into_inner())
+}
+
+fn metadata_wav_fixture() -> Vec<u8> {
+    wav_with_chunks(
+        pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192)),
+        &[
+            (
+                *b"LIST",
+                info_list_chunk(&[
+                    (*b"IART", b"Benchmark Artist"),
+                    (*b"INAM", b"Metadata Write Path"),
+                ]),
+            ),
+            (*b"cue ", cue_chunk(&[0, 4_096])),
+        ],
+    )
+}
+
+fn load_test_wav_fixtures() -> Result<(Vec<TestWavFixture>, u64), Box<dyn std::error::Error>> {
+    let corpus_root = locate_test_wavs_root()?;
+    let mut files: Vec<PathBuf> = fs::read_dir(&corpus_root)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+        })
+        .collect();
+    files.sort();
+
+    let mut fixtures = Vec::with_capacity(files.len());
+    let mut total_input_bytes = 0u64;
+    for path in files {
+        let wav_bytes = fs::read(&path)?;
+        total_input_bytes += wav_bytes.len() as u64;
+        fixtures.push(TestWavFixture {
+            _file_name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("fixture.wav")
+                .to_owned(),
+            wav_bytes,
+        });
+    }
+
+    if fixtures.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "test-wavs corpus is empty").into());
+    }
+
+    Ok((fixtures, total_input_bytes))
+}
+
+fn locate_test_wavs_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Ok(explicit) = env::var("FLACX_TEST_WAVS_ROOT") {
+        let path = PathBuf::from(explicit);
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+
+    let mut cursor = env::current_dir()?;
+    loop {
+        let candidate = cursor.join("test-wavs");
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+        if !cursor.pop() {
+            break;
+        }
+    }
+
+    Err(io::Error::new(io::ErrorKind::NotFound, "unable to locate test-wavs corpus").into())
 }
 
 fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {

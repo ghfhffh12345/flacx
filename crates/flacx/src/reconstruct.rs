@@ -81,13 +81,25 @@ pub(crate) fn restore_lpc(
     Ok(samples)
 }
 
+#[cfg(test)]
 pub(crate) fn interleave_channels(
     assignment: ChannelAssignment,
     channels: &[Vec<i32>],
 ) -> Result<Vec<i32>> {
+    let mut interleaved = Vec::with_capacity(interleaved_sample_count(assignment, channels)?);
+    interleave_channels_into(assignment, channels, &mut interleaved)?;
+    Ok(interleaved)
+}
+
+pub(crate) fn interleave_channels_into(
+    assignment: ChannelAssignment,
+    channels: &[Vec<i32>],
+    output: &mut Vec<i32>,
+) -> Result<()> {
+    output.reserve(interleaved_sample_count(assignment, channels)?);
     match assignment {
         ChannelAssignment::Independent(channels_count) => {
-            interleave_independent(usize::from(channels_count), channels)
+            interleave_independent(usize::from(channels_count), channels, output)
         }
         ChannelAssignment::LeftSide => {
             let left = channels
@@ -101,15 +113,14 @@ pub(crate) fn interleave_channels(
                     "left and side channels differ in length".into(),
                 ));
             }
-            let mut interleaved = Vec::with_capacity(left.len() * 2);
             for (&left_sample, &side_sample) in left.iter().zip(side) {
                 let right_sample =
                     i32::try_from(i64::from(left_sample) - i64::from(side_sample))
                         .map_err(|_| Error::Decode("left+side reconstruction overflowed".into()))?;
-                interleaved.push(left_sample);
-                interleaved.push(right_sample);
+                output.push(left_sample);
+                output.push(right_sample);
             }
-            Ok(interleaved)
+            Ok(())
         }
         ChannelAssignment::SideRight => {
             let side = channels
@@ -123,16 +134,15 @@ pub(crate) fn interleave_channels(
                     "side and right channels differ in length".into(),
                 ));
             }
-            let mut interleaved = Vec::with_capacity(side.len() * 2);
             for (&side_sample, &right_sample) in side.iter().zip(right) {
                 let left_sample = i32::try_from(i64::from(side_sample) + i64::from(right_sample))
                     .map_err(|_| {
                     Error::Decode("side+right reconstruction overflowed".into())
                 })?;
-                interleaved.push(left_sample);
-                interleaved.push(right_sample);
+                output.push(left_sample);
+                output.push(right_sample);
             }
-            Ok(interleaved)
+            Ok(())
         }
         ChannelAssignment::MidSide => {
             let mid = channels
@@ -146,7 +156,6 @@ pub(crate) fn interleave_channels(
                     "mid and side channels differ in length".into(),
                 ));
             }
-            let mut interleaved = Vec::with_capacity(mid.len() * 2);
             for (&mid_sample, &side_sample) in mid.iter().zip(side) {
                 let left_sample = i32::try_from(
                     i64::from(mid_sample)
@@ -156,15 +165,30 @@ pub(crate) fn interleave_channels(
                 let right_sample =
                     i32::try_from(i64::from(left_sample) - i64::from(side_sample))
                         .map_err(|_| Error::Decode("mid+side reconstruction overflowed".into()))?;
-                interleaved.push(left_sample);
-                interleaved.push(right_sample);
+                output.push(left_sample);
+                output.push(right_sample);
             }
-            Ok(interleaved)
+            Ok(())
         }
     }
 }
 
-fn interleave_independent(expected_channels: usize, channels: &[Vec<i32>]) -> Result<Vec<i32>> {
+fn interleaved_sample_count(assignment: ChannelAssignment, channels: &[Vec<i32>]) -> Result<usize> {
+    let channel_count = match assignment {
+        ChannelAssignment::Independent(expected_channels) => usize::from(expected_channels),
+        _ => assignment.channel_count(),
+    };
+    let Some(first) = channels.first() else {
+        return Err(Error::Decode("independent frame is missing samples".into()));
+    };
+    Ok(first.len() * channel_count)
+}
+
+fn interleave_independent(
+    expected_channels: usize,
+    channels: &[Vec<i32>],
+    output: &mut Vec<i32>,
+) -> Result<()> {
     if channels.len() != expected_channels {
         return Err(Error::Decode(format!(
             "independent frame expected {expected_channels} channels, found {}",
@@ -188,28 +212,26 @@ fn interleave_independent(expected_channels: usize, channels: &[Vec<i32>]) -> Re
     if expected_channels == 2 {
         let left = &channels[0];
         let right = &channels[1];
-        let mut interleaved = Vec::with_capacity(first.len() * 2);
         for (&left_sample, &right_sample) in left.iter().zip(right) {
-            interleaved.push(left_sample);
-            interleaved.push(right_sample);
+            output.push(left_sample);
+            output.push(right_sample);
         }
-        return Ok(interleaved);
+        return Ok(());
     }
 
-    let mut interleaved = Vec::with_capacity(first.len() * expected_channels);
     for frame_index in 0..first.len() {
         for channel in channels {
-            interleaved.push(channel[frame_index]);
+            output.push(channel[frame_index]);
         }
     }
-    Ok(interleaved)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use crate::model::ChannelAssignment;
 
-    use super::{interleave_channels, unfold_residual};
+    use super::{interleave_channels, interleave_channels_into, unfold_residual};
 
     #[test]
     fn unfold_residual_matches_rice_mapping() {
@@ -236,5 +258,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(interleaved, vec![1, 3, 5, 2, 4, 6]);
+    }
+
+    #[test]
+    fn interleave_channels_into_appends_samples_to_existing_output() {
+        let mut interleaved = vec![-1, -2];
+        interleave_channels_into(
+            ChannelAssignment::Independent(2),
+            &[vec![1, 2], vec![3, 4]],
+            &mut interleaved,
+        )
+        .unwrap();
+
+        assert_eq!(interleaved, vec![-1, -2, 1, 3, 2, 4]);
     }
 }

@@ -48,10 +48,10 @@ struct FrameIndex {
     assignment: ChannelAssignment,
 }
 
-#[allow(dead_code)]
 struct FrameChunkResult {
     start_index: usize,
-    decoded_frames: Vec<Result<Vec<i32>>>,
+    frame_count: usize,
+    decoded_samples: Vec<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,19 +71,10 @@ struct SubframeHeader {
     effective_bps: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FlacReaderOptions {
     pub strict_seektable_validation: bool,
     pub strict_channel_mask_provenance: bool,
-}
-
-impl Default for FlacReaderOptions {
-    fn default() -> Self {
-        Self {
-            strict_seektable_validation: false,
-            strict_channel_mask_provenance: false,
-        }
-    }
 }
 
 pub trait DecodePcmStream: EncodePcmStream {
@@ -125,20 +116,31 @@ impl<R: Read + Seek> FlacReader<R> {
         self.stream_info
     }
 
-    pub fn into_pcm_stream(mut self) -> FlacPcmStream<R> {
+    pub fn into_pcm_stream(self) -> FlacPcmStream<R> {
+        self.into_session_parts().3
+    }
+
+    pub(crate) fn into_session_parts(
+        mut self,
+    ) -> (DecodeMetadata, StreamInfo, WavSpec, FlacPcmStream<R>) {
         self.reader
             .seek(std::io::SeekFrom::Start(self.frame_offset))
             .expect("flac reader remains seekable through stream conversion");
-        FlacPcmStream {
-            reader: self.reader,
-            stream_info: self.stream_info,
-            spec: self.spec,
-            next_frame_index: 0,
-            next_sample_number: 0,
-            threads: 1,
-            pending_bytes: Vec::new(),
-            eof: false,
-        }
+        (
+            self.metadata,
+            self.stream_info,
+            self.spec,
+            FlacPcmStream {
+                reader: self.reader,
+                stream_info: self.stream_info,
+                spec: self.spec,
+                next_frame_index: 0,
+                next_sample_number: 0,
+                threads: 1,
+                pending_bytes: Vec::new(),
+                eof: false,
+            },
+        )
     }
 }
 
@@ -287,14 +289,14 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         let read_elapsed = read_start.elapsed();
         self.eof = true;
         if bytes.is_empty() {
-            if let Some(path) = profile_path {
-                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = writeln!(
-                        file,
-                        "event=decode_phase\tphase=read_to_end\telapsed_seconds={:.9}",
-                        read_elapsed.as_secs_f64()
-                    );
-                }
+            if let Some(path) = profile_path
+                && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+            {
+                let _ = writeln!(
+                    file,
+                    "event=decode_phase\tphase=read_to_end\telapsed_seconds={:.9}",
+                    read_elapsed.as_secs_f64()
+                );
             }
             return Ok(Some((Vec::new(), 0)));
         }
@@ -318,29 +320,29 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
             &mut samples,
         )?;
         let decode_elapsed = decode_start.elapsed();
-        if let Some(path) = profile_path {
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                let _ = writeln!(
-                    file,
-                    "event=decode_phase\tphase=read_to_end\telapsed_seconds={:.9}",
-                    read_elapsed.as_secs_f64()
-                );
-                let _ = writeln!(
-                    file,
-                    "event=decode_phase\tphase=index_frames\telapsed_seconds={:.9}",
-                    index_elapsed.as_secs_f64()
-                );
-                let _ = writeln!(
-                    file,
-                    "event=decode_phase\tphase=decode_frames_parallel\telapsed_seconds={:.9}",
-                    decode_elapsed.as_secs_f64()
-                );
-                let _ = writeln!(
-                    file,
-                    "event=decode_phase\tphase=total_take_decoded_samples\telapsed_seconds={:.9}",
-                    profile_start.elapsed().as_secs_f64()
-                );
-            }
+        if let Some(path) = profile_path
+            && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = writeln!(
+                file,
+                "event=decode_phase\tphase=read_to_end\telapsed_seconds={:.9}",
+                read_elapsed.as_secs_f64()
+            );
+            let _ = writeln!(
+                file,
+                "event=decode_phase\tphase=index_frames\telapsed_seconds={:.9}",
+                index_elapsed.as_secs_f64()
+            );
+            let _ = writeln!(
+                file,
+                "event=decode_phase\tphase=decode_frames_parallel\telapsed_seconds={:.9}",
+                decode_elapsed.as_secs_f64()
+            );
+            let _ = writeln!(
+                file,
+                "event=decode_phase\tphase=total_take_decoded_samples\telapsed_seconds={:.9}",
+                profile_start.elapsed().as_secs_f64()
+            );
         }
         self.next_frame_index = frame_count;
         self.next_sample_number = self.spec.total_samples;

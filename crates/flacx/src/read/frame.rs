@@ -7,7 +7,7 @@ use crate::{
     DecodeConfig,
     crc::{crc8, crc16},
     progress::{ProgressSink, ProgressSnapshot},
-    reconstruct::{interleave_channels, restore_fixed, restore_lpc, unfold_residual},
+    reconstruct::{interleave_channels_into, restore_fixed, restore_lpc, unfold_residual},
 };
 use bitstream_io::{BigEndian, BitRead, BitReader};
 use std::{
@@ -79,6 +79,7 @@ where
         return Ok(());
     }
 
+    samples.reserve(total_interleaved_sample_count(&frames));
     let worker_count = config.threads.max(1).min(frames.len());
     if worker_count == 1 || frames.len() <= FRAME_CHUNK_SIZE {
         let mut processed_samples = 0u64;
@@ -90,21 +91,17 @@ where
         // The frame index is the authoritative decode schedule here, so the
         // single-threaded fast path should validate against its summed block
         // sizes instead of assuming STREAMINFO's advertised total still matches.
-        let mut decoded_frames = Vec::with_capacity(total_frames);
-        for frame in frames.iter() {
+        for (frame_offset, frame) in frames.iter().enumerate() {
             let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
-            decoded_frames.push(decode_frame_samples_indexed(frame_bytes, frame));
+            decode_frame_samples_into(frame_bytes, frame, samples)?;
+            processed_samples += u64::from(frame.block_size);
+            progress.on_frame(ProgressSnapshot {
+                processed_samples,
+                total_samples: stream_info.total_samples,
+                completed_frames: frame_offset + 1,
+                total_frames,
+            })?;
         }
-        processed_samples = process_frame_chunk_results(
-            samples,
-            decoded_frames,
-            &frames,
-            processed_samples,
-            stream_info,
-            progress,
-            0,
-            total_frames,
-        )?;
         debug_assert_eq!(processed_samples, indexed_total_samples);
         return Ok(());
     }
@@ -112,7 +109,7 @@ where
     let next_chunk = Arc::new(AtomicUsize::new(0));
 
     thread::scope(|scope| -> Result<()> {
-        let (sender, receiver) = mpsc::channel::<FrameChunkResult>();
+        let (sender, receiver) = mpsc::channel::<Result<FrameChunkResult>>();
 
         for _ in 0..worker_count {
             let sender = sender.clone();
@@ -128,18 +125,26 @@ where
                     }
                     let chunk_end = (chunk_start + FRAME_CHUNK_SIZE).min(frames.len());
 
-                    let mut decoded_frames = Vec::with_capacity(chunk_end - chunk_start);
+                    let mut decoded_samples = Vec::with_capacity(total_interleaved_sample_count(
+                        &frames[chunk_start..chunk_end],
+                    ));
                     for frame_index in chunk_start..chunk_end {
                         let frame = &frames[frame_index];
                         let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
-                        decoded_frames.push(decode_frame_samples_indexed(frame_bytes, frame));
+                        if let Err(error) =
+                            decode_frame_samples_into(frame_bytes, frame, &mut decoded_samples)
+                        {
+                            let _ = sender.send(Err(error));
+                            return;
+                        }
                     }
 
                     if sender
-                        .send(FrameChunkResult {
+                        .send(Ok(FrameChunkResult {
                             start_index: chunk_start,
-                            decoded_frames,
-                        })
+                            frame_count: chunk_end - chunk_start,
+                            decoded_samples,
+                        }))
                         .is_err()
                     {
                         return;
@@ -152,20 +157,22 @@ where
 
         let mut next_expected = 0usize;
         let mut processed_samples = 0u64;
-        let mut pending: HashMap<usize, Vec<Result<Vec<i32>>>> = HashMap::new();
+        let mut pending: HashMap<usize, FrameChunkResult> = HashMap::new();
 
         while next_expected < frames.len() {
-            if let Some(chunk_results) = pending.remove(&next_expected) {
-                let chunk_len = chunk_results.len();
-                processed_samples = process_frame_chunk_results(
+            if let Some(chunk_result) = pending.remove(&next_expected) {
+                let chunk_len = chunk_result.frame_count;
+                processed_samples = process_frame_chunk_result(
                     samples,
-                    chunk_results,
+                    chunk_result,
                     &frames[next_expected..next_expected + chunk_len],
                     processed_samples,
-                    stream_info,
                     progress,
-                    next_expected,
-                    frames.len(),
+                    FrameProgressWindow {
+                        stream_info,
+                        start_index: next_expected,
+                        total_frames: frames.len(),
+                    },
                 )?;
                 next_expected += chunk_len;
                 continue;
@@ -173,20 +180,22 @@ where
 
             let frame_chunk = receiver.recv().map_err(|_| {
                 Error::Thread("frame worker channel closed before all frames were decoded".into())
-            })?;
-            pending.insert(frame_chunk.start_index, frame_chunk.decoded_frames);
+            })??;
+            pending.insert(frame_chunk.start_index, frame_chunk);
 
-            while let Some(chunk_results) = pending.remove(&next_expected) {
-                let chunk_len = chunk_results.len();
-                processed_samples = process_frame_chunk_results(
+            while let Some(chunk_result) = pending.remove(&next_expected) {
+                let chunk_len = chunk_result.frame_count;
+                processed_samples = process_frame_chunk_result(
                     samples,
-                    chunk_results,
+                    chunk_result,
                     &frames[next_expected..next_expected + chunk_len],
                     processed_samples,
-                    stream_info,
                     progress,
-                    next_expected,
-                    frames.len(),
+                    FrameProgressWindow {
+                        stream_info,
+                        start_index: next_expected,
+                        total_frames: frames.len(),
+                    },
                 )?;
                 next_expected += chunk_len;
             }
@@ -196,31 +205,42 @@ where
     })
 }
 
-fn process_frame_chunk_results<P>(
+fn process_frame_chunk_result<P>(
     samples: &mut Vec<i32>,
-    results: Vec<Result<Vec<i32>>>,
+    chunk: FrameChunkResult,
     frames: &[FrameIndex],
     mut processed_samples: u64,
-    stream_info: StreamInfo,
     progress: &mut P,
-    start_index: usize,
-    total_frames: usize,
+    progress_window: FrameProgressWindow,
 ) -> Result<u64>
 where
     P: ProgressSink,
 {
-    for (frame_offset, result) in results.into_iter().enumerate() {
-        let frame_samples = result?;
-        samples.extend(frame_samples);
-        processed_samples += u64::from(frames[frame_offset].block_size);
+    samples.extend(chunk.decoded_samples);
+    for (frame_offset, frame) in frames.iter().enumerate() {
+        processed_samples += u64::from(frame.block_size);
         progress.on_frame(ProgressSnapshot {
             processed_samples,
-            total_samples: stream_info.total_samples,
-            completed_frames: start_index + frame_offset + 1,
-            total_frames,
+            total_samples: progress_window.stream_info.total_samples,
+            completed_frames: progress_window.start_index + frame_offset + 1,
+            total_frames: progress_window.total_frames,
         })?;
     }
     Ok(processed_samples)
+}
+
+#[derive(Clone, Copy)]
+struct FrameProgressWindow {
+    stream_info: StreamInfo,
+    start_index: usize,
+    total_frames: usize,
+}
+
+fn total_interleaved_sample_count(frames: &[FrameIndex]) -> usize {
+    frames
+        .iter()
+        .map(|frame| usize::from(frame.block_size) * frame.assignment.channel_count())
+        .sum()
 }
 
 pub(super) fn scan_frame(
@@ -364,7 +384,11 @@ fn parse_frame(
     })
 }
 
-fn decode_frame_samples_indexed(bytes: &[u8], frame: &FrameIndex) -> Result<Vec<i32>> {
+fn decode_frame_samples_into(
+    bytes: &[u8],
+    frame: &FrameIndex,
+    output: &mut Vec<i32>,
+) -> Result<()> {
     let mut reader = BitReader::endian(
         Cursor::new(&bytes[frame.header_bytes_consumed..]),
         BigEndian,
@@ -381,7 +405,7 @@ fn decode_frame_samples_indexed(bytes: &[u8], frame: &FrameIndex) -> Result<Vec<
             frame.block_size,
         )?);
     }
-    Ok(interleave_channels(frame.assignment, &channels)?)
+    interleave_channels_into(frame.assignment, &channels, output)
 }
 
 impl FrameHeaderNumberKind {

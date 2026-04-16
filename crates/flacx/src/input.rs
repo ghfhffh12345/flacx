@@ -65,12 +65,25 @@ impl<R: Read + Seek> PcmReader<R> {
 
     /// Convert the parsed reader into its single-pass PCM stream.
     pub fn into_pcm_stream(self) -> AnyPcmStream<R> {
+        self.into_session_parts().1
+    }
+
+    pub(crate) fn into_session_parts(self) -> (EncodeMetadata, AnyPcmStream<R>) {
         match self {
-            Self::Wav(reader) => AnyPcmStream::Wav(reader.into_pcm_stream()),
+            Self::Wav(reader) => {
+                let (metadata, stream) = reader.into_session_parts();
+                (metadata, AnyPcmStream::Wav(stream))
+            }
             #[cfg(feature = "aiff")]
-            Self::Aiff(reader) => AnyPcmStream::Aiff(reader.into_pcm_stream()),
+            Self::Aiff(reader) => {
+                let (metadata, stream) = reader.into_session_parts();
+                (metadata, AnyPcmStream::Aiff(stream))
+            }
             #[cfg(feature = "caf")]
-            Self::Caf(reader) => AnyPcmStream::Caf(reader.into_pcm_stream()),
+            Self::Caf(reader) => {
+                let (metadata, stream) = reader.into_session_parts();
+                (metadata, AnyPcmStream::Caf(stream))
+            }
         }
     }
 }

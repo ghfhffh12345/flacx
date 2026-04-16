@@ -20,14 +20,11 @@ impl<R: Read + Seek> FlacRecompressSource<R> {
     /// Convert an inspected [`FlacReader`] into the single-pass recompress source.
     #[must_use]
     pub fn from_reader(reader: FlacReader<R>) -> Self {
-        let metadata = reader.metadata().clone().into_encode_metadata();
-        let total_samples = reader.spec().total_samples;
-        let stream_info = reader.stream_info();
-        let stream = VerifyingPcmStream::new(reader.into_pcm_stream(), stream_info.md5);
+        let (metadata, stream_info, spec, stream) = reader.into_session_parts();
         Self {
-            metadata,
-            total_samples,
-            stream,
+            metadata: metadata.into_encode_metadata(),
+            total_samples: spec.total_samples,
+            stream: VerifyingPcmStream::new(stream, stream_info.md5),
         }
     }
 

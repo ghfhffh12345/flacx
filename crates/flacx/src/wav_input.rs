@@ -123,15 +123,28 @@ impl<R: Read + Seek> WavReader<R> {
 
     #[must_use]
     pub fn into_pcm_stream(self) -> WavPcmStream<R> {
-        WavPcmStream {
-            reader: self.reader,
-            spec: self.spec,
-            envelope: self.envelope,
-            remaining_frames: self.spec.total_samples,
-            frame_bytes: usize::from(self.envelope.channels)
-                * usize::from(self.envelope.container_bits_per_sample / 8),
-            last_chunk_bytes: Vec::new(),
-        }
+        self.into_session_parts().1
+    }
+
+    pub(crate) fn into_session_parts(self) -> (EncodeMetadata, WavPcmStream<R>) {
+        let Self {
+            reader,
+            spec,
+            metadata,
+            envelope,
+        } = self;
+        (
+            metadata,
+            WavPcmStream {
+                reader,
+                spec,
+                envelope,
+                remaining_frames: spec.total_samples,
+                frame_bytes: usize::from(envelope.channels)
+                    * usize::from(envelope.container_bits_per_sample / 8),
+                last_chunk_bytes: Vec::new(),
+            },
+        )
     }
 }
 

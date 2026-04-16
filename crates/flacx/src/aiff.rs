@@ -84,15 +84,29 @@ impl<R: Read + Seek> AiffReader<R> {
 
     #[must_use]
     pub fn into_pcm_stream(self) -> AiffPcmStream<R> {
-        AiffPcmStream {
-            reader: self.reader,
-            spec: self.spec,
-            envelope: self.envelope,
-            endianness: self.endianness,
-            remaining_frames: self.spec.total_samples,
-            frame_bytes: usize::from(self.envelope.channels)
-                * usize::from(self.envelope.container_bits_per_sample / 8),
-        }
+        self.into_session_parts().1
+    }
+
+    pub(crate) fn into_session_parts(self) -> (EncodeMetadata, AiffPcmStream<R>) {
+        let Self {
+            reader,
+            spec,
+            metadata,
+            envelope,
+            endianness,
+        } = self;
+        (
+            metadata,
+            AiffPcmStream {
+                reader,
+                spec,
+                envelope,
+                endianness,
+                remaining_frames: spec.total_samples,
+                frame_bytes: usize::from(envelope.channels)
+                    * usize::from(envelope.container_bits_per_sample / 8),
+            },
+        )
     }
 }
 

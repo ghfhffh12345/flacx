@@ -73,14 +73,23 @@ impl<R: Read + Seek> CafReader<R> {
     }
 
     pub fn into_pcm_stream(self) -> CafPcmStream<R> {
-        CafPcmStream {
-            inner: crate::raw::RawPcmStream::new(
-                self.reader,
-                self.descriptor,
-                self.spec.total_samples,
-            )
-            .expect("validated CAF descriptor remains valid"),
-        }
+        self.into_session_parts().1
+    }
+
+    pub(crate) fn into_session_parts(self) -> (crate::metadata::EncodeMetadata, CafPcmStream<R>) {
+        let Self {
+            reader,
+            spec,
+            metadata,
+            descriptor,
+        } = self;
+        (
+            metadata,
+            CafPcmStream {
+                inner: crate::raw::RawPcmStream::new(reader, descriptor, spec.total_samples)
+                    .expect("validated CAF descriptor remains valid"),
+            },
+        )
     }
 }
 

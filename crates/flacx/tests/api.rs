@@ -170,6 +170,39 @@ fn encoding_speed_verification_lane_keeps_identity_and_perf_gates_bound() {
     assert!(encode_tests.contains("reference_identity_matrix_repeats_exact_encode_bytes"));
 }
 
+#[test]
+fn allocation_refactor_evidence_lane_keeps_required_reports_and_benchmark_ids_bound() {
+    let throughput_bench = include_str!("../benches/throughput.rs");
+    let evidence = include_str!("../../../scripts/flacx_api_allocation_refactor_evidence.py");
+
+    for benchmark_id in [
+        "encode_corpus_throughput",
+        "decode_corpus_throughput",
+        "recompress_corpus_throughput",
+        "builtin_bytes_encode",
+        "builtin_bytes_decode",
+        "builtin_bytes_recompress",
+        "metadata_write_path",
+        "decode_frame_materialization",
+        "test_wavs_roundtrip_throughput",
+    ] {
+        assert!(
+            throughput_bench.contains(&format!("\"{benchmark_id}\"")),
+            "missing benchmark id binding for {benchmark_id}"
+        );
+    }
+
+    assert!(throughput_bench.contains("FLACX_TEST_WAVS_ROOT"));
+    assert!(throughput_bench.contains("test-wavs"));
+    assert!(evidence.contains("flacx-api-allocation-refactor-baseline"));
+    assert!(evidence.contains("bench-summary.md"));
+    assert!(evidence.contains("bench-summary.json"));
+    assert!(evidence.contains("test-wavs-roundtrip.md"));
+    assert!(evidence.contains("test-wavs-roundtrip.json"));
+    assert!(evidence.contains("public-surface-check.md"));
+    assert!(evidence.contains("cargo bench -p flacx --bench throughput -- --noplot"));
+}
+
 #[cfg(feature = "aiff")]
 #[test]
 fn builtin_encode_file_accepts_aiff_inputs() {
