@@ -1,7 +1,5 @@
 /target
-/.omx
 /test-wavs
-/.cargo
-rfc9639.txt
+.cargo/
 .omx/
-/scripts
+/test-flacs

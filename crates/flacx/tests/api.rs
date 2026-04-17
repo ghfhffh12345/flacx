@@ -6,10 +6,10 @@ use std::{
 };
 
 use flacx::{
-    builtin, inspect_raw_pcm_total_samples, level::Level, read_flac_reader,
-    read_flac_reader_with_options, read_pcm_reader, write_pcm_stream, DecodePcmStream,
-    DecodeSummary, EncodePcmStream, EncoderConfig, FlacReaderOptions, FlacRecompressSource,
-    PcmSpec, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig, RecompressMode, WavReader,
+    DecodePcmStream, DecodeSummary, EncodePcmStream, EncoderConfig, FlacReaderOptions,
+    FlacRecompressSource, PcmSpec, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig,
+    RecompressMode, WavReader, builtin, inspect_raw_pcm_total_samples, level::Level,
+    read_flac_reader, read_flac_reader_with_options, read_pcm_reader, write_pcm_stream,
 };
 
 mod support;
@@ -17,15 +17,15 @@ mod support;
 #[cfg(all(feature = "aiff", feature = "caf"))]
 use flacx::{PcmContainer, PcmReader};
 use support::TestDecoder;
+use support::{
+    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, parse_first_flac_frame_header,
+    parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
+    wav_data_bytes,
+};
 #[cfg(feature = "aiff")]
 use support::{aiff_pcm_bytes, is_aifc_bytes, is_aiff_bytes};
 #[cfg(feature = "caf")]
 use support::{caf_lpcm_bytes, is_caf_bytes};
-use support::{
-    parse_first_flac_frame_header, parse_wav_format, pcm_wav_bytes, raw_pcm_fixture,
-    sample_fixture, unique_temp_path, wav_data_bytes, ParsedFlacBlockingStrategy,
-    ParsedFlacCodedNumberKind,
-};
 
 fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {
     match config.mode() {
@@ -548,12 +548,16 @@ fn explicit_reader_session_progress_matches_default_output_for_variable_schedule
         updates.last().unwrap().completed_frames,
         summary.frame_count
     );
-    assert!(updates
-        .windows(2)
-        .all(|pair| pair[0].processed_samples <= pair[1].processed_samples));
-    assert!(updates
-        .windows(2)
-        .all(|pair| pair[0].completed_frames <= pair[1].completed_frames));
+    assert!(
+        updates
+            .windows(2)
+            .all(|pair| pair[0].processed_samples <= pair[1].processed_samples)
+    );
+    assert!(
+        updates
+            .windows(2)
+            .all(|pair| pair[0].completed_frames <= pair[1].completed_frames)
+    );
 }
 
 #[test]
