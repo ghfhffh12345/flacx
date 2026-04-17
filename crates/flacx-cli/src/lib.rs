@@ -1893,10 +1893,7 @@ impl<W: Write> BatchProgressCoordinator<W> {
     }
 
     #[cfg(test)]
-    fn render_initial_file_frame(
-        &mut self,
-        file_total_samples: u64,
-    ) -> std::io::Result<()> {
+    fn render_initial_file_frame(&mut self, file_total_samples: u64) -> std::io::Result<()> {
         self.render_initial_file_frame_for(0, file_total_samples)
     }
 
@@ -2368,8 +2365,8 @@ mod tests {
     };
 
     use super::{
-        BatchProgressCoordinator, ProgressDisplay, ProgressEstimate, ProgressFrame,
-        ProgressRenderer, ProgressState, SampleProgress, format_progress_frame,
+        BatchProgressCoordinator, DirectoryEncodeSchedule, ProgressDisplay, ProgressEstimate,
+        ProgressFrame, ProgressRenderer, ProgressState, SampleProgress, format_progress_frame,
         relative_display_name, time_until_next_second,
     };
     use flacx::{ProgressSnapshot, RecompressPhase, RecompressProgress};
