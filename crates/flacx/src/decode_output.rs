@@ -51,14 +51,14 @@ where
                 container: config.output_container,
             },
         )?;
-        if let Some(path) = profile_path {
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                let _ = writeln!(
-                    file,
-                    "event=decode_phase\tphase=write_wav\telapsed_seconds={:.9}",
-                    write_start.elapsed().as_secs_f64()
-                );
-            }
+        if let Some(path) = profile_path
+            && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = writeln!(
+                file,
+                "event=decode_phase\tphase=write_wav\telapsed_seconds={:.9}",
+                write_start.elapsed().as_secs_f64()
+            );
         }
         progress.on_frame(ProgressSnapshot {
             processed_samples: spec.total_samples,

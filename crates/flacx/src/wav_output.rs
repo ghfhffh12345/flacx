@@ -964,8 +964,7 @@ fn write_sample_bytes<W: Write>(
         let worker_count = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1)
-            .min(MAX_PARALLEL_PACK_THREADS)
-            .max(1);
+            .clamp(1, MAX_PARALLEL_PACK_THREADS);
         let shard_len = samples.len().div_ceil(worker_count);
         let packed_chunks = thread::scope(|scope| {
             let mut handles = Vec::new();

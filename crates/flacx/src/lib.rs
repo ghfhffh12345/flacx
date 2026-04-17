@@ -63,8 +63,7 @@
 //! ├─ convenience.rs         # implementation backing the public `builtin` module
 //! ├─ encoder.rs             # encode façade
 //! ├─ decode.rs              # decode façade
-//! ├─ recompress/
-//! │  ├─ mod.rs              # public recompress surface + exports
+//! ├─ recompress.rs          # public recompress surface + exports
 //! │  ├─ config.rs           # recompress policy + builder
 //! │  ├─ source.rs           # reader-to-session handoff
 //! │  ├─ session.rs          # writer-owning recompress execution
@@ -80,12 +79,10 @@
 //! ├─ metadata/
 //! │  ├─ blocks.rs           # FLAC metadata block model
 //! │  └─ draft.rs            # metadata drafting/translation helpers
-//! ├─ read/
-//! │  ├─ mod.rs              # FLAC read orchestration
+//! ├─ read.rs                # FLAC read orchestration
 //! │  ├─ frame.rs            # FLAC frame parsing/decoding
 //! │  └─ metadata.rs         # FLAC metadata parsing + inspection
-//! ├─ write/
-//! │  ├─ mod.rs              # FLAC write orchestration
+//! ├─ write.rs               # FLAC write orchestration
 //! │  └─ frame.rs            # frame/subframe serialization
 //! └─ progress.rs            # optional callback-oriented progress reporting
 //! ```

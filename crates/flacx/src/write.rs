@@ -324,13 +324,16 @@ mod tests {
 
     #[test]
     fn utf8_like_frame_numbers_match_rfc_ranges() {
-        assert_eq!(encode_utf8_number(0).unwrap(), vec![0x00]);
-        assert_eq!(encode_utf8_number(0x7f).unwrap(), vec![0x7f]);
-        assert_eq!(encode_utf8_number(0x80).unwrap(), vec![0xc2, 0x80]);
-        assert_eq!(encode_utf8_number(0x800).unwrap(), vec![0xe0, 0xa0, 0x80]);
+        assert_eq!(encode_utf8_number(0).unwrap().as_slice(), &[0x00]);
+        assert_eq!(encode_utf8_number(0x7f).unwrap().as_slice(), &[0x7f]);
+        assert_eq!(encode_utf8_number(0x80).unwrap().as_slice(), &[0xc2, 0x80]);
         assert_eq!(
-            encode_utf8_number(0x1f_ffff).unwrap(),
-            vec![0xf7, 0xbf, 0xbf, 0xbf]
+            encode_utf8_number(0x800).unwrap().as_slice(),
+            &[0xe0, 0xa0, 0x80]
+        );
+        assert_eq!(
+            encode_utf8_number(0x1f_ffff).unwrap().as_slice(),
+            &[0xf7, 0xbf, 0xbf, 0xbf]
         );
     }
 

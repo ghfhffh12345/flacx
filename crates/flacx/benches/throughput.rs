@@ -264,7 +264,7 @@ fn run_decode_corpus(corpus: &Corpus, threads: usize) -> Result<(), Box<dyn std:
             )?;
             let metadata = reader.metadata().clone();
             let stream = reader.into_pcm_stream();
-            let mut decoder = config.clone().into_decoder(File::create(&output)?);
+            let mut decoder = config.into_decoder(File::create(&output)?);
             decoder.set_metadata(metadata);
             decoder.decode(stream)?;
         }

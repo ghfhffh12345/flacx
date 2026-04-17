@@ -129,8 +129,8 @@ crates/flacx/src/
 ├─ convenience.rs         # implementation backing the public `builtin` module
 ├─ encoder.rs             # encode façade
 ├─ decode.rs              # decode façade
+├─ recompress.rs          # public recompress surface + exports
 ├─ recompress/
-│  ├─ mod.rs              # public recompress surface + exports
 │  ├─ config.rs           # recompress policy + builder
 │  ├─ source.rs           # reader-to-session handoff
 │  ├─ session.rs          # writer-owning recompress execution
@@ -146,12 +146,12 @@ crates/flacx/src/
 ├─ metadata/
 │  ├─ blocks.rs           # metadata block model
 │  └─ draft.rs            # metadata drafting/translation helpers
+├─ read.rs                # FLAC read orchestration
 ├─ read/
-│  ├─ mod.rs              # FLAC read orchestration
 │  ├─ frame.rs            # frame parsing/decoding
 │  └─ metadata.rs         # FLAC metadata parsing + inspection
+├─ write.rs               # FLAC write orchestration
 ├─ write/
-│  ├─ mod.rs              # FLAC write orchestration
 │  └─ frame.rs            # frame/subframe serialization
 └─ progress.rs            # optional progress support
 ```

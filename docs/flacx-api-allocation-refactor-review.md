@@ -49,7 +49,7 @@ Required checks:
 - no removed public struct changed the core usage model without approval
 - the hotspot contracts remain explicitly reviewed:
   - `crates/flacx/src/input.rs` — `EncodePcmStream`
-  - `crates/flacx/src/read/mod.rs` — `DecodePcmStream`
+  - `crates/flacx/src/read.rs` — `DecodePcmStream`
   - `crates/flacx/src/recompress/source.rs` — `FlacRecompressSource`
 
 The `public-surface-check.md` artifact should therefore be treated as a
@@ -64,7 +64,7 @@ report must map touched files to the benchmark IDs that now bind them.
 | --- | --- | --- |
 | Session orchestration | `convenience.rs`, `encoder.rs`, `decode.rs`, `recompress/source.rs`, `recompress/session.rs` | `builtin_bytes_encode`, `builtin_bytes_decode`, `builtin_bytes_recompress` |
 | Metadata / container write | `metadata.rs`, `metadata/blocks.rs`, `wav_output.rs`, `aiff_output.rs`, `caf_output.rs`, `recompress/source.rs` | `metadata_write_path` |
-| Buffer lifecycle / decode materialization | `encode_pipeline.rs`, `input.rs`, `read/mod.rs`, `read/frame.rs`, `decode_output.rs` | `decode_frame_materialization` |
+| Buffer lifecycle / decode materialization | `encode_pipeline.rs`, `input.rs`, `read.rs`, `read/frame.rs`, `decode_output.rs` | `decode_frame_materialization` |
 | Whole-crate acceptance | any touched `crates/flacx` file | `encode_corpus_throughput`, `decode_corpus_throughput`, `recompress_corpus_throughput`, `test_wavs_roundtrip_throughput` |
 
 If benchmark naming evolves, the final report must map the old names from the

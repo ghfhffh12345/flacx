@@ -627,9 +627,11 @@ fn read_pcm_reader_dispatches_family_peers_without_wav_bias() {
 #[cfg(all(feature = "aiff", feature = "caf"))]
 #[test]
 fn explicit_decode_sessions_can_emit_peer_family_outputs() {
+    type DecodePeerCase = (PcmContainer, fn(&[u8]) -> bool, &'static str);
+
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
     let flac = builtin::encode_bytes(&wav).unwrap();
-    let cases: &[(PcmContainer, fn(&[u8]) -> bool, &str)] = &[
+    let cases: &[DecodePeerCase] = &[
         (PcmContainer::Aiff, is_aiff_bytes, "aiff"),
         (PcmContainer::Aifc, is_aifc_bytes, "aifc"),
         (PcmContainer::Caf, is_caf_bytes, "caf"),

@@ -96,8 +96,7 @@ crates/flacx/src/
 ├─ convenience.rs         # implementation backing the public `builtin` module
 ├─ encoder.rs
 ├─ decode.rs
-├─ recompress/
-│  ├─ mod.rs
+├─ recompress.rs
 │  ├─ config.rs
 │  ├─ source.rs
 │  ├─ session.rs
@@ -113,12 +112,10 @@ crates/flacx/src/
 ├─ metadata/
 │  ├─ blocks.rs
 │  └─ draft.rs
-├─ read/
-│  ├─ mod.rs
+├─ read.rs
 │  ├─ frame.rs
 │  └─ metadata.rs
-├─ write/
-│  ├─ mod.rs
+├─ write.rs
 │  └─ frame.rs
 ├─ raw.rs
 ├─ level.rs
@@ -128,10 +125,10 @@ crates/flacx/src/
 
 ### Reading the tree
 - `lib.rs` is the public contract surface.
-- `config.rs`, `encoder.rs`, `decode.rs`, `recompress/`, and `pcm.rs` are
+- `config.rs`, `encoder.rs`, `decode.rs`, `recompress.rs`, `recompress/`, and `pcm.rs` are
   the fastest way to orient yourself around the exported architecture.
 - `input.rs`, `wav_input.rs`, `aiff.rs`, `caf.rs`, `wav_output.rs`,
-  `aiff_output.rs`, `caf_output.rs`, `read/`, and `write/` show how the
+  `aiff_output.rs`, `caf_output.rs`, `read.rs`, `read/`, `write.rs`, and `write/` show how the
   family-facing and FLAC-facing edges were separated without splitting crates.
 - `metadata/` and `decode_output.rs` exist to keep major responsibilities out of
   the top-level façades.
@@ -145,12 +142,12 @@ crate contract                      lib.rs
 config/builders                     config.rs
 explicit encode façade              encoder.rs + encode_pipeline.rs
 explicit decode façade              decode.rs + decode_output.rs
-explicit recompress session         recompress/
+explicit recompress session         recompress.rs + recompress/
 typed PCM boundary                  pcm.rs + input.rs
 WAV-family ingest/output            wav_input.rs + wav_output.rs
 AIFF-family ingest/output           aiff.rs + aiff_output.rs
 CAF-family ingest/output            caf.rs + caf_output.rs
-FLAC read/write internals           read/ + write/
+FLAC read/write internals           read.rs + read/ + write.rs + write/
 metadata model / translation        metadata.rs + metadata/
 optional progress                   progress.rs
 ```

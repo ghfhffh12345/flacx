@@ -60,9 +60,9 @@ Current file-size hotspots still show where ownership is most fragile:
 - `crates/flacx/src/aiff_output.rs` — 756 LOC
 - `crates/flacx/src/caf_output.rs` — 733 LOC
 - `crates/flacx/src/aiff.rs` — 679 LOC
-- `crates/flacx/src/write/mod.rs` — 532 LOC
+- `crates/flacx/src/write.rs` — 532 LOC
 - `crates/flacx/src/caf.rs` — 500 LOC
-- `crates/flacx/src/read/mod.rs` — 483 LOC
+- `crates/flacx/src/read.rs` — 483 LOC
 - `crates/flacx/src/config.rs` — 472 LOC
 
 These are not automatically design failures, but they are the places where

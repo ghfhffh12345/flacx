@@ -404,13 +404,15 @@ fn decode_bytes_can_emit_caf_when_requested() {
 #[cfg(all(feature = "aiff", feature = "caf"))]
 #[test]
 fn decode_file_infers_aiff_family_and_caf_from_output_extension() {
+    type OutputCase = (&'static str, fn(&[u8]) -> bool);
+
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let input_path = unique_temp_path("flac");
     fs::write(&input_path, flac).unwrap();
 
     #[allow(unused_mut)]
-    let cases: &[(&str, fn(&[u8]) -> bool)] = &[
+    let cases: &[OutputCase] = &[
         #[cfg(feature = "aiff")]
         ("aiff", is_aiff_bytes as fn(&[u8]) -> bool),
         #[cfg(feature = "aiff")]
