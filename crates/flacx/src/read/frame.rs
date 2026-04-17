@@ -7,7 +7,9 @@ use crate::{
     DecodeConfig,
     crc::{crc8, crc16},
     progress::{ProgressSink, ProgressSnapshot},
-    reconstruct::{interleave_channels_into, restore_fixed, restore_lpc, unfold_residual},
+    reconstruct::{
+        append_fixed_residual, append_lpc_residual, interleave_channels_into, unfold_residual,
+    },
 };
 use bitstream_io::{BigEndian, BitRead, BitReader};
 use std::{
@@ -437,13 +439,16 @@ fn decode_subframe<R: Read>(
         }
         0b001000..=0b001100 => {
             let order = header.kind - 0b001000;
-            let warmup = read_warmup(reader, header.effective_bps, order)?;
-            let residuals = read_residual(reader, block_size, order)?;
-            restore_fixed(order, warmup, residuals)?
+            let mut samples = read_warmup(reader, header.effective_bps, order)?;
+            samples.reserve(usize::from(block_size) - usize::from(order));
+            visit_residuals(reader, block_size, order, |residual| {
+                append_fixed_residual(&mut samples, order, residual)
+            })?;
+            samples
         }
         0b100000..=0b111111 => {
             let order = header.kind - 0b100000 + 1;
-            let warmup = read_warmup(reader, header.effective_bps, order)?;
+            let mut samples = read_warmup(reader, header.effective_bps, order)?;
             let precision_minus_one: u8 = reader.read_unsigned_var(4)?;
             if precision_minus_one == 0b1111 {
                 return Err(Error::UnsupportedFlac(
@@ -456,8 +461,11 @@ fn decode_subframe<R: Read>(
             for _ in 0..order {
                 coefficients.push(reader.read_signed_var::<i16>(u32::from(precision))?);
             }
-            let residuals = read_residual(reader, block_size, order)?;
-            restore_lpc(order, warmup, shift, &coefficients, residuals)?
+            samples.reserve(usize::from(block_size) - usize::from(order));
+            visit_residuals(reader, block_size, order, |residual| {
+                append_lpc_residual(&mut samples, shift, &coefficients, residual)
+            })?;
+            samples
         }
         _ => {
             return Err(Error::UnsupportedFlac(format!(
@@ -624,19 +632,6 @@ where
     }
 
     Ok(())
-}
-
-fn read_residual<R: Read>(
-    reader: &mut BitReader<R, BigEndian>,
-    block_size: u16,
-    predictor_order: u8,
-) -> Result<Vec<i32>> {
-    let mut residuals = Vec::with_capacity(usize::from(block_size) - usize::from(predictor_order));
-    visit_residuals(reader, block_size, predictor_order, |residual| {
-        residuals.push(residual);
-        Ok(())
-    })?;
-    Ok(residuals)
 }
 
 fn skip_residual<R: Read>(

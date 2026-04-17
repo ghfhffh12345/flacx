@@ -73,7 +73,9 @@ where
 pub(crate) fn encode_bytes_with_config(config: &EncoderConfig, input: &[u8]) -> Result<Vec<u8>> {
     let (metadata, stream) =
         read_pcm_session_parts(Cursor::new(input), pcm_reader_options(config))?;
-    let mut encoder = config.clone().into_encoder(Cursor::new(Vec::new()));
+    let mut encoder = config
+        .clone()
+        .into_encoder(Cursor::new(Vec::with_capacity(input.len())));
     encoder.set_metadata(metadata);
     encoder.encode(stream)?;
     Ok(encoder.into_inner().into_inner())
@@ -87,7 +89,7 @@ pub(crate) fn recompress_bytes_with_config(
     let (writer, _) = recompress_reader_session_with_config_and_progress(
         config,
         reader,
-        Cursor::new(Vec::new()),
+        Cursor::new(Vec::with_capacity(input.len())),
         &mut crate::progress::NoProgress,
     )?;
     Ok(writer.into_inner())
@@ -166,7 +168,7 @@ pub fn decode_bytes(input: &[u8]) -> Result<Vec<u8>> {
 pub(crate) fn decode_bytes_with_config(config: &DecodeConfig, input: &[u8]) -> Result<Vec<u8>> {
     let (metadata, stream) =
         read_flac_session_parts(Cursor::new(input), flac_reader_options(config))?;
-    let mut decoder = (*config).into_decoder(Cursor::new(Vec::new()));
+    let mut decoder = (*config).into_decoder(Cursor::new(Vec::with_capacity(input.len())));
     decoder.set_metadata(metadata);
     decoder.decode(stream)?;
     Ok(decoder.into_inner().into_inner())

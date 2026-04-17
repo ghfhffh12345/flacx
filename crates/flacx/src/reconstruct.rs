@@ -11,6 +11,7 @@ pub(crate) fn unfold_residual(folded: u32) -> i32 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn restore_fixed(order: u8, warmup: Vec<i32>, residuals: Vec<i32>) -> Result<Vec<i32>> {
     if warmup.len() != usize::from(order) {
         return Err(Error::Decode(
@@ -21,33 +22,12 @@ pub(crate) fn restore_fixed(order: u8, warmup: Vec<i32>, residuals: Vec<i32>) ->
     let mut samples = warmup;
     samples.reserve(residuals.len());
     for residual in residuals {
-        let index = samples.len();
-        let predicted = match order {
-            0 => 0,
-            1 => i64::from(samples[index - 1]),
-            2 => 2 * i64::from(samples[index - 1]) - i64::from(samples[index - 2]),
-            3 => {
-                3 * i64::from(samples[index - 1]) - 3 * i64::from(samples[index - 2])
-                    + i64::from(samples[index - 3])
-            }
-            4 => {
-                4 * i64::from(samples[index - 1]) - 6 * i64::from(samples[index - 2])
-                    + 4 * i64::from(samples[index - 3])
-                    - i64::from(samples[index - 4])
-            }
-            _ => {
-                return Err(Error::UnsupportedFlac(format!(
-                    "fixed predictor order {order} is out of scope"
-                )));
-            }
-        };
-        let sample = i32::try_from(predicted + i64::from(residual))
-            .map_err(|_| Error::Decode("fixed predictor overflowed".into()))?;
-        samples.push(sample);
+        append_fixed_residual(&mut samples, order, residual)?;
     }
     Ok(samples)
 }
 
+#[cfg(test)]
 pub(crate) fn restore_lpc(
     order: u8,
     warmup: Vec<i32>,
@@ -64,21 +44,75 @@ pub(crate) fn restore_lpc(
     let mut samples = warmup;
     samples.reserve(residuals.len());
     for residual in residuals {
-        let index = samples.len();
-        let mut predicted = 0i64;
-        for (offset, &coefficient) in coefficients.iter().enumerate() {
-            predicted += i64::from(coefficient) * i64::from(samples[index - offset - 1]);
-        }
-        if shift >= 0 {
-            predicted >>= i32::from(shift);
-        } else {
-            predicted <<= i32::from(-shift);
-        }
-        let sample = i32::try_from(predicted + i64::from(residual))
-            .map_err(|_| Error::Decode("LPC predictor overflowed".into()))?;
-        samples.push(sample);
+        append_lpc_residual(&mut samples, shift, coefficients, residual)?;
     }
     Ok(samples)
+}
+
+pub(crate) fn append_fixed_residual(
+    samples: &mut Vec<i32>,
+    order: u8,
+    residual: i32,
+) -> Result<()> {
+    let order = usize::from(order);
+    if samples.len() < order {
+        return Err(Error::Decode(
+            "warmup length does not match predictor order".into(),
+        ));
+    }
+
+    let index = samples.len();
+    let predicted = match order {
+        0 => 0,
+        1 => i64::from(samples[index - 1]),
+        2 => 2 * i64::from(samples[index - 1]) - i64::from(samples[index - 2]),
+        3 => {
+            3 * i64::from(samples[index - 1]) - 3 * i64::from(samples[index - 2])
+                + i64::from(samples[index - 3])
+        }
+        4 => {
+            4 * i64::from(samples[index - 1]) - 6 * i64::from(samples[index - 2])
+                + 4 * i64::from(samples[index - 3])
+                - i64::from(samples[index - 4])
+        }
+        _ => {
+            return Err(Error::UnsupportedFlac(format!(
+                "fixed predictor order {order} is out of scope"
+            )));
+        }
+    };
+    let sample = i32::try_from(predicted + i64::from(residual))
+        .map_err(|_| Error::Decode("fixed predictor overflowed".into()))?;
+    samples.push(sample);
+    Ok(())
+}
+
+pub(crate) fn append_lpc_residual(
+    samples: &mut Vec<i32>,
+    shift: i8,
+    coefficients: &[i16],
+    residual: i32,
+) -> Result<()> {
+    if samples.len() < coefficients.len() {
+        return Err(Error::Decode(
+            "LPC coefficient/warmup length does not match predictor order".into(),
+        ));
+    }
+
+    let index = samples.len();
+    let mut predicted = 0i64;
+    for (offset, &coefficient) in coefficients.iter().enumerate() {
+        predicted += i64::from(coefficient) * i64::from(samples[index - offset - 1]);
+    }
+    if shift >= 0 {
+        predicted >>= i32::from(shift);
+    } else {
+        predicted <<= i32::from(-shift);
+    }
+    let sample = i32::try_from(predicted + i64::from(residual))
+        .map_err(|_| Error::Decode("LPC predictor overflowed".into()))?;
+    samples.push(sample);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -231,7 +265,9 @@ fn interleave_independent(
 mod tests {
     use crate::model::ChannelAssignment;
 
-    use super::{interleave_channels, interleave_channels_into, unfold_residual};
+    use super::{
+        interleave_channels, interleave_channels_into, restore_fixed, restore_lpc, unfold_residual,
+    };
 
     #[test]
     fn unfold_residual_matches_rice_mapping() {
@@ -271,5 +307,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(interleaved, vec![-1, -2, 1, 3, 2, 4]);
+    }
+
+    #[test]
+    fn restores_fixed_predictor_samples() {
+        let samples = restore_fixed(2, vec![10, 12], vec![3, -2]).unwrap();
+
+        assert_eq!(samples, vec![10, 12, 17, 20]);
+    }
+
+    #[test]
+    fn restores_lpc_predictor_samples() {
+        let samples = restore_lpc(1, vec![5], 0, &[1], vec![2, -1]).unwrap();
+
+        assert_eq!(samples, vec![5, 7, 6]);
     }
 }

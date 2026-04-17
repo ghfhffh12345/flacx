@@ -22,6 +22,25 @@ pub(crate) struct EncodedFrame {
     pub(crate) sample_count: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeaderBytes {
+    bytes: [u8; 7],
+    len: usize,
+}
+
+impl HeaderBytes {
+    fn empty() -> Self {
+        Self {
+            bytes: [0; 7],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn sample_rate_is_representable(sample_rate: u32) -> bool {
     sample_rate_code(sample_rate).is_some()
@@ -96,9 +115,10 @@ pub(crate) fn encode_frame_header(
     writer.write_unsigned_var(4, channel_assignment_bits(assignment))?;
     writer.write_unsigned_var(3, bit_depth_bits(bits_per_sample)?)?;
     writer.write_bit(false)?;
-    writer.write_bytes(&encode_utf8_number(header_number.value())?)?;
-    writer.write_bytes(&block_size_extra)?;
-    writer.write_bytes(&sample_rate_extra)?;
+    let header_number_bytes = encode_utf8_number(header_number.value())?;
+    writer.write_bytes(header_number_bytes.as_slice())?;
+    writer.write_bytes(block_size_extra.as_slice())?;
+    writer.write_bytes(sample_rate_extra.as_slice())?;
     writer.byte_align()?;
     let mut header = writer.into_writer();
     header.push(crc8(&header));
@@ -137,58 +157,72 @@ pub(crate) fn bit_depth_bits(bits_per_sample: u8) -> Result<u8> {
     }
 }
 
-fn block_size_code(block_size: u16) -> (u8, Vec<u8>) {
+fn block_size_code(block_size: u16) -> (u8, HeaderBytes) {
     match block_size {
-        192 => (0b0001, Vec::new()),
-        576 => (0b0010, Vec::new()),
-        1152 => (0b0011, Vec::new()),
-        2304 => (0b0100, Vec::new()),
-        4608 => (0b0101, Vec::new()),
-        256 => (0b1000, Vec::new()),
-        512 => (0b1001, Vec::new()),
-        1024 => (0b1010, Vec::new()),
-        2048 => (0b1011, Vec::new()),
-        4096 => (0b1100, Vec::new()),
-        8192 => (0b1101, Vec::new()),
-        16384 => (0b1110, Vec::new()),
-        32768 => (0b1111, Vec::new()),
-        _ if block_size <= 256 => (0b0110, vec![(block_size - 1) as u8]),
-        _ => (0b0111, (block_size - 1).to_be_bytes().to_vec()),
+        192 => (0b0001, HeaderBytes::empty()),
+        576 => (0b0010, HeaderBytes::empty()),
+        1152 => (0b0011, HeaderBytes::empty()),
+        2304 => (0b0100, HeaderBytes::empty()),
+        4608 => (0b0101, HeaderBytes::empty()),
+        256 => (0b1000, HeaderBytes::empty()),
+        512 => (0b1001, HeaderBytes::empty()),
+        1024 => (0b1010, HeaderBytes::empty()),
+        2048 => (0b1011, HeaderBytes::empty()),
+        4096 => (0b1100, HeaderBytes::empty()),
+        8192 => (0b1101, HeaderBytes::empty()),
+        16384 => (0b1110, HeaderBytes::empty()),
+        32768 => (0b1111, HeaderBytes::empty()),
+        _ if block_size <= 256 => {
+            let mut bytes = [0; 7];
+            bytes[0] = (block_size - 1) as u8;
+            (0b0110, HeaderBytes { bytes, len: 1 })
+        }
+        _ => {
+            let mut bytes = [0; 7];
+            bytes[..2].copy_from_slice(&(block_size - 1).to_be_bytes());
+            (0b0111, HeaderBytes { bytes, len: 2 })
+        }
     }
 }
 
-fn sample_rate_code_or_streaminfo(sample_rate: u32) -> Result<(u8, Vec<u8>)> {
+fn sample_rate_code_or_streaminfo(sample_rate: u32) -> Result<(u8, HeaderBytes)> {
     match sample_rate_code(sample_rate) {
         Some(encoding) => Ok(encoding),
         None if sample_rate != 0 && sample_rate <= MAX_STREAMINFO_SAMPLE_RATE => {
-            Ok((0b0000, Vec::new()))
+            Ok((0b0000, HeaderBytes::empty()))
         }
         None => Err(streaminfo_sample_rate_limit_error(sample_rate)),
     }
 }
 
-fn sample_rate_code(sample_rate: u32) -> Option<(u8, Vec<u8>)> {
+fn sample_rate_code(sample_rate: u32) -> Option<(u8, HeaderBytes)> {
     match sample_rate {
         0 => None,
-        88_200 => Some((0b0001, Vec::new())),
-        176_400 => Some((0b0010, Vec::new())),
-        192_000 => Some((0b0011, Vec::new())),
-        8_000 => Some((0b0100, Vec::new())),
-        16_000 => Some((0b0101, Vec::new())),
-        22_050 => Some((0b0110, Vec::new())),
-        24_000 => Some((0b0111, Vec::new())),
-        32_000 => Some((0b1000, Vec::new())),
-        44_100 => Some((0b1001, Vec::new())),
-        48_000 => Some((0b1010, Vec::new())),
-        96_000 => Some((0b1011, Vec::new())),
+        88_200 => Some((0b0001, HeaderBytes::empty())),
+        176_400 => Some((0b0010, HeaderBytes::empty())),
+        192_000 => Some((0b0011, HeaderBytes::empty())),
+        8_000 => Some((0b0100, HeaderBytes::empty())),
+        16_000 => Some((0b0101, HeaderBytes::empty())),
+        22_050 => Some((0b0110, HeaderBytes::empty())),
+        24_000 => Some((0b0111, HeaderBytes::empty())),
+        32_000 => Some((0b1000, HeaderBytes::empty())),
+        44_100 => Some((0b1001, HeaderBytes::empty())),
+        48_000 => Some((0b1010, HeaderBytes::empty())),
+        96_000 => Some((0b1011, HeaderBytes::empty())),
         _ if sample_rate.is_multiple_of(1000) && sample_rate / 1000 <= u32::from(u8::MAX) => {
-            Some((0b1100, vec![(sample_rate / 1000) as u8]))
+            let mut bytes = [0; 7];
+            bytes[0] = (sample_rate / 1000) as u8;
+            Some((0b1100, HeaderBytes { bytes, len: 1 }))
         }
         _ if sample_rate <= u32::from(u16::MAX) => {
-            Some((0b1101, (sample_rate as u16).to_be_bytes().to_vec()))
+            let mut bytes = [0; 7];
+            bytes[..2].copy_from_slice(&(sample_rate as u16).to_be_bytes());
+            Some((0b1101, HeaderBytes { bytes, len: 2 }))
         }
         _ if sample_rate.is_multiple_of(10) && sample_rate / 10 <= u32::from(u16::MAX) => {
-            Some((0b1110, ((sample_rate / 10) as u16).to_be_bytes().to_vec()))
+            let mut bytes = [0; 7];
+            bytes[..2].copy_from_slice(&((sample_rate / 10) as u16).to_be_bytes());
+            Some((0b1110, HeaderBytes { bytes, len: 2 }))
         }
         _ => None,
     }
@@ -200,48 +234,84 @@ fn streaminfo_sample_rate_limit_error(sample_rate: u32) -> Error {
     ))
 }
 
-pub(crate) fn encode_utf8_number(value: u64) -> Result<Vec<u8>> {
+pub(crate) fn encode_utf8_number(value: u64) -> Result<HeaderBytes> {
     let bytes = match value {
-        0x0000_0000_0000..=0x0000_0000_007f => vec![value as u8],
-        0x0000_0000_0080..=0x0000_0000_07ff => vec![
-            0b1100_0000 | ((value >> 6) as u8 & 0b0001_1111),
-            0b1000_0000 | (value as u8 & 0b0011_1111),
-        ],
-        0x0000_0000_0800..=0x0000_0000_ffff => vec![
-            0b1110_0000 | ((value >> 12) as u8 & 0b0000_1111),
-            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
-            0b1000_0000 | (value as u8 & 0b0011_1111),
-        ],
-        0x0000_0001_0000..=0x0000_001f_ffff => vec![
-            0b1111_0000 | ((value >> 18) as u8 & 0b0000_0111),
-            0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
-            0b1000_0000 | (value as u8 & 0b0011_1111),
-        ],
-        0x0000_0020_0000..=0x0000_03ff_ffff => vec![
-            0b1111_1000 | ((value >> 24) as u8 & 0b0000_0011),
-            0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
-            0b1000_0000 | (value as u8 & 0b0011_1111),
-        ],
-        0x0000_0400_0000..=0x0000_7fff_ffff => vec![
-            0b1111_1100 | ((value >> 30) as u8 & 0b0000_0001),
-            0b1000_0000 | ((value >> 24) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
-            0b1000_0000 | (value as u8 & 0b0011_1111),
-        ],
-        0x0000_8000_0000..=0x000f_ffff_ffff => vec![
-            0b1111_1110,
-            0b1000_0000 | ((value >> 30) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 24) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
-            0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
-            0b1000_0000 | (value as u8 & 0b0011_1111),
-        ],
+        0x0000_0000_0000..=0x0000_0000_007f => HeaderBytes {
+            bytes: [value as u8, 0, 0, 0, 0, 0, 0],
+            len: 1,
+        },
+        0x0000_0000_0080..=0x0000_0000_07ff => HeaderBytes {
+            bytes: [
+                0b1100_0000 | ((value >> 6) as u8 & 0b0001_1111),
+                0b1000_0000 | (value as u8 & 0b0011_1111),
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            len: 2,
+        },
+        0x0000_0000_0800..=0x0000_0000_ffff => HeaderBytes {
+            bytes: [
+                0b1110_0000 | ((value >> 12) as u8 & 0b0000_1111),
+                0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+                0b1000_0000 | (value as u8 & 0b0011_1111),
+                0,
+                0,
+                0,
+                0,
+            ],
+            len: 3,
+        },
+        0x0000_0001_0000..=0x0000_001f_ffff => HeaderBytes {
+            bytes: [
+                0b1111_0000 | ((value >> 18) as u8 & 0b0000_0111),
+                0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+                0b1000_0000 | (value as u8 & 0b0011_1111),
+                0,
+                0,
+                0,
+            ],
+            len: 4,
+        },
+        0x0000_0020_0000..=0x0000_03ff_ffff => HeaderBytes {
+            bytes: [
+                0b1111_1000 | ((value >> 24) as u8 & 0b0000_0011),
+                0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+                0b1000_0000 | (value as u8 & 0b0011_1111),
+                0,
+                0,
+            ],
+            len: 5,
+        },
+        0x0000_0400_0000..=0x0000_7fff_ffff => HeaderBytes {
+            bytes: [
+                0b1111_1100 | ((value >> 30) as u8 & 0b0000_0001),
+                0b1000_0000 | ((value >> 24) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+                0b1000_0000 | (value as u8 & 0b0011_1111),
+                0,
+            ],
+            len: 6,
+        },
+        0x0000_8000_0000..=0x000f_ffff_ffff => HeaderBytes {
+            bytes: [
+                0b1111_1110,
+                0b1000_0000 | ((value >> 30) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 24) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 18) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 12) as u8 & 0b0011_1111),
+                0b1000_0000 | ((value >> 6) as u8 & 0b0011_1111),
+                0b1000_0000 | (value as u8 & 0b0011_1111),
+            ],
+            len: 7,
+        },
         _ => {
             return Err(Error::UnsupportedFlac(format!(
                 "coded header number {value} exceeds the FLAC limit"
