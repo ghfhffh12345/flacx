@@ -384,8 +384,6 @@ fn encode_directory_progress_trace_preserves_per_file_event_order_with_parallel_
             "4",
             "--level",
             "8",
-            "--depth",
-            "0",
         ])
         .output()
         .unwrap();
