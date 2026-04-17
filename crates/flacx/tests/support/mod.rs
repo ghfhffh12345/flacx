@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 #![allow(unexpected_cfgs)]
 use flacx::{
-    DecodeConfig, DecodeSummary, EncodeSummary, EncoderConfig, FlacReaderOptions, PcmContainer,
-    RawPcmByteOrder, RawPcmDescriptor, read_flac_reader_with_options, read_pcm_reader,
+    read_flac_reader_with_options, read_pcm_reader, DecodeConfig, DecodeSummary, EncodeSummary,
+    EncoderConfig, FlacReaderOptions, PcmContainer, RawPcmByteOrder, RawPcmDescriptor,
 };
 use std::{
     env, fs,

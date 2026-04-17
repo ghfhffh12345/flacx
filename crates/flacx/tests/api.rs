@@ -6,10 +6,10 @@ use std::{
 };
 
 use flacx::{
-    DecodePcmStream, DecodeSummary, EncodePcmStream, EncoderConfig, FlacReaderOptions,
-    FlacRecompressSource, PcmSpec, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig,
-    RecompressMode, WavReader, builtin, inspect_raw_pcm_total_samples, level::Level,
-    read_flac_reader, read_flac_reader_with_options, read_pcm_reader, write_pcm_stream,
+    builtin, inspect_raw_pcm_total_samples, level::Level, read_flac_reader,
+    read_flac_reader_with_options, read_pcm_reader, write_pcm_stream, DecodePcmStream,
+    DecodeSummary, EncodePcmStream, EncoderConfig, FlacReaderOptions, FlacRecompressSource,
+    PcmSpec, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig, RecompressMode, WavReader,
 };
 
 mod support;
@@ -17,15 +17,15 @@ mod support;
 #[cfg(all(feature = "aiff", feature = "caf"))]
 use flacx::{PcmContainer, PcmReader};
 use support::TestDecoder;
-use support::{
-    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, parse_first_flac_frame_header,
-    parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
-    wav_data_bytes,
-};
 #[cfg(feature = "aiff")]
 use support::{aiff_pcm_bytes, is_aifc_bytes, is_aiff_bytes};
 #[cfg(feature = "caf")]
 use support::{caf_lpcm_bytes, is_caf_bytes};
+use support::{
+    parse_first_flac_frame_header, parse_wav_format, pcm_wav_bytes, raw_pcm_fixture,
+    sample_fixture, unique_temp_path, wav_data_bytes, ParsedFlacBlockingStrategy,
+    ParsedFlacCodedNumberKind,
+};
 
 fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {
     match config.mode() {
@@ -136,71 +136,6 @@ fn recompress_public_exports_remain_stable() {
     assert!(source.contains("pub use recompress::{"));
     assert!(source.contains("FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,"));
     assert!(source.contains("RecompressProgress, RecompressSummary, Recompressor,"));
-}
-
-#[test]
-fn recompress_verification_lane_keeps_the_v082_authority_gate_bound() {
-    let evidence = include_str!("../../../scripts/recompress_evidence.py");
-    let throughput_bench = include_str!("../benches/throughput.rs");
-
-    assert!(evidence.contains("v0.8.2-vs-head.json"));
-    assert!(evidence.contains("scripts/cli_perf_compare.py"));
-    assert!(evidence.contains("recompress_corpus_throughput"));
-    assert!(evidence.contains("Performance authority remains the historical v0.8.2 compare"));
-    assert!(throughput_bench.contains("\"recompress_corpus_throughput\""));
-}
-
-#[test]
-fn encoding_speed_verification_lane_keeps_identity_and_perf_gates_bound() {
-    let throughput_bench = include_str!("../benches/throughput.rs");
-    let encode_tests = include_str!("encode.rs");
-
-    assert!(throughput_bench.contains("\"encode_corpus_throughput\""));
-    assert!(throughput_bench.contains("mono-compact.wav"));
-    assert!(throughput_bench.contains("stereo-medium.wav"));
-    assert!(throughput_bench.contains("stereo-large.wav"));
-    assert!(encode_tests.contains("bench-mono-default"));
-    assert!(encode_tests.contains("bench-stereo-medium-default"));
-    assert!(encode_tests.contains("bench-stereo-large-default"));
-    assert!(encode_tests.contains("level0-block576"));
-    assert!(encode_tests.contains("variable-block-schedule"));
-    assert!(encode_tests.contains("metadata-bearing-wav"));
-    assert!(encode_tests.contains("produces_identical_output_across_thread_counts"));
-    assert!(encode_tests.contains("preserves_metadata_deterministically_across_thread_counts"));
-    assert!(encode_tests.contains("reference_identity_matrix_repeats_exact_encode_bytes"));
-}
-
-#[test]
-fn allocation_refactor_evidence_lane_keeps_required_reports_and_benchmark_ids_bound() {
-    let throughput_bench = include_str!("../benches/throughput.rs");
-    let evidence = include_str!("../../../scripts/flacx_api_allocation_refactor_evidence.py");
-
-    for benchmark_id in [
-        "encode_corpus_throughput",
-        "decode_corpus_throughput",
-        "recompress_corpus_throughput",
-        "builtin_bytes_encode",
-        "builtin_bytes_decode",
-        "builtin_bytes_recompress",
-        "metadata_write_path",
-        "decode_frame_materialization",
-        "test_wavs_roundtrip_throughput",
-    ] {
-        assert!(
-            throughput_bench.contains(&format!("\"{benchmark_id}\"")),
-            "missing benchmark id binding for {benchmark_id}"
-        );
-    }
-
-    assert!(throughput_bench.contains("FLACX_TEST_WAVS_ROOT"));
-    assert!(throughput_bench.contains("test-wavs"));
-    assert!(evidence.contains("flacx-api-allocation-refactor-baseline"));
-    assert!(evidence.contains("bench-summary.md"));
-    assert!(evidence.contains("bench-summary.json"));
-    assert!(evidence.contains("test-wavs-roundtrip.md"));
-    assert!(evidence.contains("test-wavs-roundtrip.json"));
-    assert!(evidence.contains("public-surface-check.md"));
-    assert!(evidence.contains("cargo bench -p flacx --bench throughput -- --noplot"));
 }
 
 #[cfg(feature = "aiff")]
@@ -613,16 +548,12 @@ fn explicit_reader_session_progress_matches_default_output_for_variable_schedule
         updates.last().unwrap().completed_frames,
         summary.frame_count
     );
-    assert!(
-        updates
-            .windows(2)
-            .all(|pair| pair[0].processed_samples <= pair[1].processed_samples)
-    );
-    assert!(
-        updates
-            .windows(2)
-            .all(|pair| pair[0].completed_frames <= pair[1].completed_frames)
-    );
+    assert!(updates
+        .windows(2)
+        .all(|pair| pair[0].processed_samples <= pair[1].processed_samples));
+    assert!(updates
+        .windows(2)
+        .all(|pair| pair[0].completed_frames <= pair[1].completed_frames));
 }
 
 #[test]

@@ -6,11 +6,11 @@ use std::{
     time::Duration,
 };
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use flacx::{
+    builtin, level::Level, read_flac_reader_with_options, read_pcm_reader_with_options,
     DecodeConfig, EncoderConfig, FlacReaderOptions, FlacRecompressSource, PcmReaderOptions,
-    RecompressConfig, RecompressMode, builtin, read_flac_reader_with_options,
-    read_pcm_reader_with_options,
+    RecompressConfig, RecompressMode,
 };
 
 #[path = "../tests/support/mod.rs"]
@@ -163,6 +163,20 @@ fn test_wavs_roundtrip_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+fn test_wavs_level8_threads8_encode_throughput(c: &mut Criterion) {
+    let corpus = BenchmarkCorpus::generate().expect("benchmark corpus");
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(corpus.test_wav_total_input_bytes()));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(10);
+    group.bench_function("test_wavs_level8_threads8_encode_throughput", |b| {
+        b.iter(|| {
+            run_test_wav_level8_encode(&corpus.test_wav_inputs).expect("test-wavs level-8 encode")
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     encode_corpus_throughput,
@@ -173,7 +187,8 @@ criterion_group!(
     builtin_bytes_recompress,
     metadata_write_path,
     decode_frame_materialization,
-    test_wavs_roundtrip_throughput
+    test_wavs_roundtrip_throughput,
+    test_wavs_level8_threads8_encode_throughput
 );
 criterion_main!(benches);
 
@@ -199,6 +214,8 @@ struct BenchmarkCorpus {
     representative_flac_bytes: Vec<u8>,
     metadata_flac_bytes: Vec<u8>,
     decode_materialization_flac_bytes: Vec<u8>,
+    test_wav_inputs: Vec<TestWavFixture>,
+    test_wav_total_input_bytes: u64,
     representative_test_wav: TestWavFixture,
 }
 
@@ -247,6 +264,10 @@ impl BenchmarkCorpus {
             .first()
             .expect("test-wavs corpus fixture")
             .clone();
+        let test_wav_total_input_bytes = test_wav_inputs
+            .iter()
+            .map(|fixture| fixture.wav_bytes.len() as u64)
+            .sum();
 
         Ok(Self {
             wav_root,
@@ -258,12 +279,18 @@ impl BenchmarkCorpus {
             representative_flac_bytes,
             metadata_flac_bytes,
             decode_materialization_flac_bytes,
+            test_wav_inputs,
+            test_wav_total_input_bytes,
             representative_test_wav,
         })
     }
 
     fn total_input_bytes(&self) -> u64 {
         self.total_input_bytes
+    }
+
+    fn test_wav_total_input_bytes(&self) -> u64 {
+        self.test_wav_total_input_bytes
     }
 }
 
@@ -343,6 +370,18 @@ fn run_test_wav_roundtrip(fixture: &TestWavFixture) -> Result<(), Box<dyn std::e
     let encoded = builtin::encode_bytes(&fixture.wav_bytes)?;
     let decoded = builtin::decode_bytes(&encoded)?;
     let _ = builtin::encode_bytes(&decoded)?;
+    Ok(())
+}
+
+fn run_test_wav_level8_encode(
+    fixtures: &[TestWavFixture],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = EncoderConfig::default()
+        .with_level(Level::Level8)
+        .with_threads(8);
+    for fixture in fixtures {
+        let _ = encode_fixture_bytes(&config, &fixture.wav_bytes)?;
+    }
     Ok(())
 }
 
