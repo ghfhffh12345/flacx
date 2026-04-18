@@ -23,7 +23,7 @@ choose features explicitly:
 
 ```toml
 [dependencies]
-flacx = { version = "0.8.2", default-features = false, features = ["wav", "progress"] }
+flacx = { version = "0.9.0", default-features = false, features = ["wav", "progress"] }
 ```
 
 Use the CLI with the installed or built `flacx` binary:

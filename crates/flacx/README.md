@@ -19,7 +19,7 @@ select features yourself, start with:
 
 ```toml
 [dependencies]
-flacx = { version = "0.8.2", default-features = false, features = ["wav", "progress"] }
+flacx = { version = "0.9.0", default-features = false, features = ["wav", "progress"] }
 ```
 
 For one-shot file workflows, use the built-in helpers:
