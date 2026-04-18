@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "High-performance WAV/FLAC conversion library in Rust."
+description = "Convert supported PCM containers to FLAC, decode FLAC back to PCM containers, and recompress existing FLAC streams."
 readme = "README.md"
-keywords = ["audio", "flac", "wav", "codec"]
+keywords = ["audio", "flac", "wav", "aiff", "caf", "codec"]
 categories = ["compression", "multimedia::audio"]
 
 [features]
