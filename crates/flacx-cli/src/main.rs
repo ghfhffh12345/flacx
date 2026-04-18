@@ -1,5 +1,5 @@
-//! Command-line WAV/FLAC conversion and FLAC recompression built on the `flacx`
-//! workspace library.
+//! Command-line conversion between supported PCM containers and FLAC, plus
+//! FLAC recompression, built on the `flacx` workspace library.
 //!
 //! This crate stays separate from the publishable library package while
 //! reusing the same encode pipeline and workspace version.
@@ -22,12 +22,21 @@ use flacx_cli::{
 
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Convert between FLAC and PCM containers, or recompress existing FLAC files.
+///
+/// `flacx` is the authoritative command-line reference for this workspace.
+/// Use `encode` to create FLAC from supported PCM containers or raw PCM,
+/// `decode` to write FLAC back to a PCM container, and `recompress` to
+/// rewrite existing FLAC files with a different encoding policy.
+///
+/// Run `flacx <command> --help` for command-specific workflow details,
+/// defaults, and batch-processing rules.
 #[derive(Debug, Parser)]
 #[command(
     name = "flacx",
-    about = "WAV/FLAC conversion and FLAC recompression using the flacx library",
     version = CLI_VERSION,
-    propagate_version = true
+    propagate_version = true,
+    subcommand_help_heading = "Commands"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -36,127 +45,284 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Encode a supported PCM container (`.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, `.caf`) or explicit raw PCM to FLAC.
+    /// Encode supported PCM-container input or explicit raw PCM to FLAC.
     Encode(EncodeArgs),
-    /// Decode a supported FLAC file to `.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, or `.caf`.
+    /// Decode FLAC into a supported PCM container.
     Decode(DecodeArgs),
-    /// Recompress a supported FLAC file to a new FLAC.
+    /// Recompress existing FLAC files into new FLAC output.
     Recompress(RecompressArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModePreset {
+    /// Favor tolerance by disabling fxmd capture or emission and relaxing validation.
     Loose,
+    /// Keep the standard metadata capture or emission policy and normal validation.
     Default,
+    /// Preserve metadata handling while enabling the strictest validation checks.
     Strict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum RawByteOrderArg {
+    /// Interpret raw PCM bytes as little-endian samples.
     Le,
+    /// Interpret raw PCM bytes as big-endian samples.
     Be,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum DecodeOutputFamilyArg {
+    /// Write RIFF/WAVE output (`.wav`).
     Wave,
+    /// Write RF64 output (`.rf64`).
     Rf64,
+    /// Write Sony Wave64 output (`.w64`).
     W64,
+    /// Write AIFF output (`.aiff`).
     Aiff,
+    /// Write AIFF-C output (`.aifc`).
     Aifc,
+    /// Write Core Audio Format output (`.caf`).
     Caf,
 }
 
+/// Encode one file or walk a directory of supported PCM inputs into FLAC.
+///
+/// Single-file runs write `<input>.flac` by default. Directory runs preserve
+/// the relative layout beneath the input root and honor `--depth` when
+/// searching for supported source files.
+///
+/// Add `--raw` to treat the input as headerless signed-integer PCM data. In
+/// raw mode, `--sample-rate`, `--channels`, `--bits-per-sample`,
+/// `--container-bits`, and `--byte-order` are required. Raw 3-8 channel input
+/// also requires `--channel-mask`.
 #[derive(Debug, Args)]
 struct EncodeArgs {
-    /// Input PCM-container path (`.wav`, `.rf64`, `.w64`, `.aif`, `.aiff`, `.aifc`, or `.caf`), or any file path when `--raw` is used.
+    /// File or directory to encode.
+    ///
+    /// Supported container input includes `.wav`, `.rf64`, `.w64`, `.aif`,
+    /// `.aiff`, `.aifc`, and `.caf`. With `--raw`, any file path is accepted
+    /// and interpreted as signed-integer PCM bytes using the accompanying raw
+    /// format flags.
+    #[arg(value_name = "INPUT")]
     input: std::path::PathBuf,
-    /// Output FLAC path for a single file, or destination directory for a folder input.
-    #[arg(short, long)]
+    /// Output path for the encoded FLAC.
+    ///
+    /// For a single file, pass a destination `.flac` path. For a directory
+    /// input, pass a destination directory root. If omitted, single-file
+    /// encode writes the output next to the input with a `.flac` extension.
+    #[arg(short, long, help_heading = "Output")]
     output: Option<std::path::PathBuf>,
-    /// Compression level (0-8).
-    #[arg(long, default_value_t = 8u8, value_parser = clap::value_parser!(u8).range(0..=8))]
+    /// FLAC compression level.
+    ///
+    /// Level `0` favors speed and level `8` favors compression ratio.
+    #[arg(
+        long,
+        default_value_t = 8u8,
+        value_parser = clap::value_parser!(u8).range(0..=8),
+        help_heading = "Encoding"
+    )]
     level: u8,
-    /// Number of encoding threads.
-    #[arg(long, default_value_t = 8usize)]
+    /// Number of encoding worker threads.
+    ///
+    /// Increase this to improve throughput when encoding many files or large
+    /// inputs.
+    #[arg(long, default_value_t = 8usize, help_heading = "Encoding")]
     threads: usize,
     /// Override the FLAC block size.
-    #[arg(long)]
+    ///
+    /// Leave unset to use the encoder's default block-size choice.
+    #[arg(long, help_heading = "Encoding")]
     block_size: Option<u16>,
-    /// Policy preset for fxmd handling and relaxable validation.
-    #[arg(long, value_enum, default_value_t = ModePreset::Default)]
+    /// Metadata and validation preset.
+    ///
+    /// Use `loose` for maximum tolerance, `default` for standard behavior, and
+    /// `strict` for the strongest validation checks.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ModePreset::Default,
+        help_heading = "Validation"
+    )]
     mode: ModePreset,
-    /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
-    #[arg(long, default_value_t = 1usize)]
+    /// Maximum directory traversal depth.
+    ///
+    /// This only applies when the input is a directory. Use `0` to recurse
+    /// without a depth limit.
+    #[arg(
+        long,
+        default_value_t = 1usize,
+        value_name = "DEPTH",
+        help_heading = "Validation"
+    )]
     depth: usize,
     /// Treat the input as raw signed-integer PCM instead of a self-describing container.
-    #[arg(long)]
+    ///
+    /// When this flag is present, `INPUT` is read as headerless PCM and the raw
+    /// format flags become the authoritative description of the sample layout.
+    #[arg(long, help_heading = "Raw PCM input")]
     raw: bool,
-    /// Raw PCM sample rate in Hz. Required with `--raw`.
-    #[arg(long)]
+    /// Raw PCM sample rate in Hz.
+    ///
+    /// Required with `--raw`.
+    #[arg(long, help_heading = "Raw PCM input")]
     sample_rate: Option<u32>,
-    /// Raw PCM channel count. Required with `--raw`.
-    #[arg(long)]
+    /// Raw PCM channel count.
+    ///
+    /// Required with `--raw`.
+    #[arg(long, help_heading = "Raw PCM input")]
     channels: Option<u8>,
-    /// Raw PCM valid bits per sample. Required with `--raw`.
-    #[arg(long)]
+    /// Raw PCM valid bits per sample.
+    ///
+    /// Required with `--raw`.
+    #[arg(long, help_heading = "Raw PCM input")]
     bits_per_sample: Option<u8>,
-    /// Raw PCM container bits per sample. Required with `--raw`.
-    #[arg(long)]
+    /// Raw PCM container bits per sample.
+    ///
+    /// Required with `--raw`.
+    #[arg(long, help_heading = "Raw PCM input")]
     container_bits: Option<u8>,
-    /// Raw PCM byte order. Required with `--raw`.
-    #[arg(long, value_enum)]
+    /// Raw PCM byte order.
+    ///
+    /// Required with `--raw`.
+    #[arg(long, value_enum, help_heading = "Raw PCM input")]
     byte_order: Option<RawByteOrderArg>,
-    /// Raw PCM channel mask in hex (required for 3..=8 channel raw mode).
-    #[arg(long)]
+    /// Raw PCM channel mask in hex.
+    ///
+    /// Required for 3-8 channel `--raw` input. Prefix values with `0x` to make
+    /// the speaker mask obvious, for example `0x33`.
+    #[arg(long, help_heading = "Raw PCM input")]
     channel_mask: Option<String>,
 }
 
+/// Decode FLAC into a supported PCM container.
+///
+/// Single-file runs use the explicit `--output` extension when provided and
+/// otherwise default to `.wav`. Directory runs preserve the relative layout
+/// beneath the input root; use `--output-family` to choose which container
+/// extension gets generated for batch output paths.
 #[derive(Debug, Args)]
 struct DecodeArgs {
-    /// Input FLAC path.
+    /// FLAC file or directory to decode.
+    ///
+    /// Directory input searches for `.flac` files at or below the configured
+    /// traversal depth.
+    #[arg(value_name = "INPUT")]
     input: std::path::PathBuf,
-    /// Output PCM-container path for a single file, or destination directory for a folder input.
-    #[arg(short, long)]
+    /// Output path for decoded PCM-container data.
+    ///
+    /// For a single file, pass a destination file path with the container
+    /// extension you want. For a directory input, pass a destination directory
+    /// root. If omitted, single-file decode writes next to the input using the
+    /// container implied by `--output-family` or the default `.wav`.
+    #[arg(short, long, help_heading = "Output")]
     output: Option<std::path::PathBuf>,
-    /// Explicit output family for directory decode. Single-file decode still prefers explicit output-path extensions.
-    #[arg(long, value_enum)]
+    /// Output container family for generated decode paths.
+    ///
+    /// Directory decode uses this for every generated output path. Single-file
+    /// decode uses it only when `--output` is omitted; otherwise the explicit
+    /// output-path extension wins.
+    #[arg(long, value_enum, help_heading = "Output")]
     output_family: Option<DecodeOutputFamilyArg>,
-    /// Number of decoding threads.
-    #[arg(long)]
+    /// Number of decoding worker threads.
+    ///
+    /// Leave unset to use the library default.
+    #[arg(long, help_heading = "Decoding")]
     threads: Option<usize>,
-    /// Policy preset for fxmd handling and relaxable validation.
-    #[arg(long, value_enum, default_value_t = ModePreset::Default)]
+    /// Metadata and validation preset.
+    ///
+    /// Use `loose` for maximum tolerance, `default` for standard behavior, and
+    /// `strict` for the strongest validation checks.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ModePreset::Default,
+        help_heading = "Validation"
+    )]
     mode: ModePreset,
-    /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
-    #[arg(long, default_value_t = 1usize)]
+    /// Maximum directory traversal depth.
+    ///
+    /// This only applies when the input is a directory. Use `0` to recurse
+    /// without a depth limit.
+    #[arg(
+        long,
+        default_value_t = 1usize,
+        value_name = "DEPTH",
+        help_heading = "Validation"
+    )]
     depth: usize,
 }
 
+/// Recompress existing FLAC files into new FLAC output.
+///
+/// Single-file runs write `<input-stem>.recompressed.flac` by default.
+/// Directory runs preserve the relative layout beneath the input root. Use
+/// `--in-place` to replace each source FLAC only after a successful
+/// recompression.
 #[derive(Debug, Args)]
 struct RecompressArgs {
-    /// Input FLAC path.
+    /// FLAC file or directory to recompress.
+    ///
+    /// Directory input searches for `.flac` files at or below the configured
+    /// traversal depth.
+    #[arg(value_name = "INPUT")]
     input: std::path::PathBuf,
-    /// Output FLAC path for a single file, or destination directory for a folder input.
-    #[arg(short, long)]
+    /// Output path for recompressed FLAC data.
+    ///
+    /// For a single file, pass a destination `.flac` path that differs from the
+    /// input. For a directory input, pass a destination directory root. If
+    /// omitted and `--in-place` is not set, single-file recompress writes
+    /// `<input-stem>.recompressed.flac`.
+    #[arg(short, long, help_heading = "Output")]
     output: Option<std::path::PathBuf>,
-    /// Replace the source FLAC(s) in place after successful recompression.
-    #[arg(long, conflicts_with = "output")]
+    /// Replace the source FLAC file or files after successful recompression.
+    ///
+    /// This rewrites output in place and cannot be combined with `--output`.
+    #[arg(long, conflicts_with = "output", help_heading = "Output")]
     in_place: bool,
-    /// Compression level (0-8).
-    #[arg(long, default_value_t = 8u8, value_parser = clap::value_parser!(u8).range(0..=8))]
+    /// FLAC compression level.
+    ///
+    /// Level `0` favors speed and level `8` favors compression ratio.
+    #[arg(
+        long,
+        default_value_t = 8u8,
+        value_parser = clap::value_parser!(u8).range(0..=8),
+        help_heading = "Recompression"
+    )]
     level: u8,
     /// Number of recompression worker threads.
-    #[arg(long, default_value_t = 8usize)]
+    ///
+    /// Increase this to improve throughput when processing many files or large
+    /// inputs.
+    #[arg(long, default_value_t = 8usize, help_heading = "Recompression")]
     threads: usize,
     /// Override the FLAC block size.
-    #[arg(long)]
+    ///
+    /// Leave unset to use the recompressor's default block-size choice.
+    #[arg(long, help_heading = "Recompression")]
     block_size: Option<u16>,
-    /// Policy preset for metadata handling and relaxable validation.
-    #[arg(long, value_enum, default_value_t = ModePreset::Default)]
+    /// Metadata and validation preset.
+    ///
+    /// Use `loose` for maximum tolerance, `default` for standard behavior, and
+    /// `strict` for the strongest validation checks.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ModePreset::Default,
+        help_heading = "Validation"
+    )]
     mode: ModePreset,
-    /// Maximum folder traversal depth; only applies when the input is a directory. Use 0 for unlimited depth.
-    #[arg(long, default_value_t = 1usize)]
+    /// Maximum directory traversal depth.
+    ///
+    /// This only applies when the input is a directory. Use `0` to recurse
+    /// without a depth limit.
+    #[arg(
+        long,
+        default_value_t = 1usize,
+        value_name = "DEPTH",
+        help_heading = "Validation"
+    )]
     depth: usize,
 }
 

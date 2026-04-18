@@ -30,6 +30,10 @@ pub trait EncodePcmStream {
 }
 
 /// Owned encode-side handoff that keeps metadata and the PCM stream together.
+///
+/// Most explicit encode workflows construct one of these from a reader's
+/// [`into_source`](PcmReader::into_source) method and then pass it to
+/// [`crate::Encoder::encode_source`].
 pub struct EncodeSource<S> {
     metadata: Metadata,
     stream: S,
@@ -75,6 +79,10 @@ impl<S: EncodePcmStream> EncodeSource<S> {
 }
 
 /// Family-dispatched PCM reader for the explicit encode workflow.
+///
+/// Use `PcmReader` when the input family is only known at runtime. If you know
+/// the container ahead of time, prefer the more specific reader types such as
+/// [`crate::WavReader`] or [`crate::AiffReader`].
 pub enum PcmReader<R: Read + Seek> {
     Wav(crate::wav_input::WavReader<R>),
     #[cfg(feature = "aiff")]

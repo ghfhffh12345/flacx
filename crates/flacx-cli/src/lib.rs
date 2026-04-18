@@ -1,38 +1,12 @@
-//! Command-line support utilities for the `flacx-cli` crate.
+//! Shared command implementations for the `flacx` CLI.
 //!
-//! `flacx-cli` provides the command-line interface for PCM-container/FLAC conversion in
-//! this workspace. It stays separate from the publishable `flacx` library
-//! crate while reusing the same encode/decode pipeline and workspace version.
+//! `flacx-cli` owns command planning, directory traversal, and progress
+//! rendering for the `flacx` binary while delegating encode, decode, and
+//! recompress work to the workspace `flacx` library.
 //!
-//! Progress rendering stays a CLI concern. The library reports real encode,
-//! decode, and recompress progress, while this crate decides when and how to
-//! render live single-file and batch progress.
-//!
-//! # Command shape
-//!
-//! - `flacx encode <input> [-o <output-or-dir>] [--depth <depth>]`
-//! - `flacx decode <input> [-o <output-or-dir>] [--depth <depth>]`
-//! - `flacx recompress <input> [-o <output-or-dir>] [--in-place] [--depth <depth>]`
-//! - encode-only flags:
-//!   - `--output`
-//!   - `--level`
-//!   - `--threads`
-//!   - `--block-size`
-//!   - `--mode`
-//!   - `--depth` (directory input only)
-//! - decode-only flags:
-//!   - `--output`
-//!   - `--threads`
-//!   - `--mode`
-//!   - `--depth` (directory input only)
-//! - recompress-only flags:
-//!   - `--output`
-//!   - `--in-place`
-//!   - `--level`
-//!   - `--threads`
-//!   - `--block-size`
-//!   - `--mode`
-//!   - `--depth` (directory input only)
+//! The authoritative user-facing reference lives in clap help:
+//! `flacx --help`, `flacx encode --help`, `flacx decode --help`, and
+//! `flacx recompress --help`.
 
 use std::{
     collections::BTreeMap,

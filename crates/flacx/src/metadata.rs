@@ -50,6 +50,11 @@ impl FxmdChunkPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Semantic metadata captured from container inputs or staged for output.
+///
+/// `Metadata` is the type to reach for when you want to inspect or edit comment
+/// fields, cue points, or channel-layout preservation information before an
+/// encode, decode, or recompress operation.
 pub struct Metadata {
     preserved: PreservedMetadataBundle,
     vorbis_comment: Option<VorbisCommentBlock>,

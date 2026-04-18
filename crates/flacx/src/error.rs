@@ -1,16 +1,26 @@
 use std::{fmt, io};
 
+/// Result alias used by the public `flacx` API.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Error type used by encode, decode, inspect, and recompress operations.
 #[derive(Debug)]
 pub enum Error {
+    /// Wrapper for I/O failures from callers or owned readers/writers.
     Io(io::Error),
+    /// The input PCM container is structurally invalid.
     InvalidWav(&'static str),
+    /// The FLAC input is structurally invalid.
     InvalidFlac(&'static str),
+    /// The input PCM container is valid enough to parse but uses unsupported features.
     UnsupportedWav(String),
+    /// The FLAC input is valid enough to parse but uses unsupported features.
     UnsupportedFlac(String),
+    /// The encode pipeline failed after input validation.
     Encode(String),
+    /// The decode pipeline failed after input validation.
     Decode(String),
+    /// A worker-thread or cross-thread coordination error occurred.
     Thread(String),
 }
 

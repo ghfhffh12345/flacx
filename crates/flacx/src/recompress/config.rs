@@ -19,6 +19,9 @@ pub enum RecompressMode {
 }
 
 /// User-facing recompression configuration for FLAC-to-FLAC conversion.
+///
+/// Recompression reuses the decode pipeline to verify and materialize PCM, then
+/// runs the encode pipeline again with the selected output policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecompressConfig {
     mode: RecompressMode,

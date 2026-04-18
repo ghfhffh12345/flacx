@@ -42,6 +42,7 @@ pub struct CafReader<R> {
 }
 
 impl<R: Read + Seek> CafReader<R> {
+    /// Parse a CAF reader into a reusable encode-side façade.
     pub fn new(mut reader: R) -> Result<Self> {
         let parsed = parse_caf(&mut reader, false)?;
         reader.seek(SeekFrom::Start(parsed.data_offset))?;
@@ -62,11 +63,13 @@ impl<R: Read + Seek> CafReader<R> {
         })
     }
 
+    /// Return the parsed PCM stream specification.
     #[must_use]
     pub fn spec(&self) -> crate::input::PcmSpec {
         self.spec
     }
 
+    /// Return metadata staged for encode-side preservation.
     #[must_use]
     pub fn metadata(&self) -> &crate::metadata::Metadata {
         &self.metadata

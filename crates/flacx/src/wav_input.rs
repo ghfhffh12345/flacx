@@ -27,7 +27,9 @@ const W64_CHUNK_GUID_SUFFIX: [u8; 12] = [
 /// Reader options for RIFF/WAVE-family encode-side parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WavReaderOptions {
+    /// Preserve private `fxmd` chunks in captured metadata when present.
     pub capture_fxmd: bool,
+    /// Reject malformed or duplicate `fxmd` chunks during metadata capture.
     pub strict_fxmd_validation: bool,
 }
 
@@ -62,10 +64,12 @@ pub struct WavReader<R> {
 }
 
 impl<R: Read + Seek> WavReader<R> {
+    /// Parse a WAV, RF64, or Wave64 reader with the default metadata policy.
     pub fn new(reader: R) -> Result<Self> {
         Self::with_reader_options(reader, WavReaderOptions::default())
     }
 
+    /// Parse a WAV-family reader with explicit `fxmd` capture toggles.
     pub fn with_options(
         reader: R,
         capture_fxmd: bool,
@@ -80,6 +84,7 @@ impl<R: Read + Seek> WavReader<R> {
         )
     }
 
+    /// Parse a WAV-family reader with explicit reader options.
     pub fn with_reader_options(mut reader: R, options: WavReaderOptions) -> Result<Self> {
         let layout = parse_wav_layout(
             &mut reader,
@@ -114,11 +119,13 @@ impl<R: Read + Seek> WavReader<R> {
         })
     }
 
+    /// Return the parsed PCM stream specification.
     #[must_use]
     pub fn spec(&self) -> WavSpec {
         self.spec
     }
 
+    /// Return the metadata recovered during container parsing.
     #[must_use]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -203,6 +210,7 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
     }
 }
 
+/// Read and materialize an entire WAV-family input into memory.
 pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
     let reader = WavReader::with_reader_options(
         &mut reader,

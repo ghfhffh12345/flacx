@@ -6,7 +6,9 @@ use crate::{
 /// Phase marker for recompress progress reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecompressPhase {
+    /// The source FLAC is being decoded and verified.
     Decode,
+    /// The verified PCM is being encoded back to FLAC.
     Encode,
 }
 

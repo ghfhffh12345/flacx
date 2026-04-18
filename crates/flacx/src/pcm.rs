@@ -1,32 +1,54 @@
 use crate::error::{Error, Result};
 
+/// Immutable description of a PCM stream.
+///
+/// This value is shared across reader, source, and summary surfaces so callers
+/// can reason about sample rate, channel layout, sample depth, and total sample
+/// counts without reading the full stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PcmSpec {
+    /// Samples per second.
     pub sample_rate: u32,
+    /// Number of interleaved channels.
     pub channels: u8,
+    /// Valid bits per sample.
     pub bits_per_sample: u8,
+    /// Total samples per channel.
     pub total_samples: u64,
+    /// Stored container bits per sample expressed in bytes.
     pub bytes_per_sample: u16,
+    /// RFC 9639-style channel mask when one is known.
     pub channel_mask: u32,
 }
 
+/// Fully materialized interleaved PCM samples plus their [`PcmSpec`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PcmStream {
+    /// Stream specification shared by the sample buffer.
     pub spec: PcmSpec,
+    /// Interleaved samples stored as signed 32-bit values.
     pub samples: Vec<i32>,
 }
 
 const MAX_RFC9639_CHANNEL_MASK: u32 = 0x0003_FFFF;
 
+/// Output container family for decode and PCM writing operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PcmContainer {
+    /// Choose the crate default for the active operation.
     #[default]
     Auto,
+    /// RIFF/WAVE output.
     Wave,
+    /// RF64 output.
     Rf64,
+    /// Sony Wave64 output.
     Wave64,
+    /// AIFF output.
     Aiff,
+    /// AIFC output.
     Aifc,
+    /// CAF output.
     Caf,
 }
 

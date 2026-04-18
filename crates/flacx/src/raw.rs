@@ -9,21 +9,30 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Byte order for explicit raw signed-integer PCM descriptors.
 pub enum RawPcmByteOrder {
+    /// Least-significant byte first.
     LittleEndian,
+    /// Most-significant byte first.
     BigEndian,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Explicit descriptor for raw signed-integer PCM inputs.
 pub struct RawPcmDescriptor {
+    /// Samples per second.
     pub sample_rate: u32,
+    /// Number of interleaved channels.
     pub channels: u8,
+    /// Valid bits carried by each sample.
     pub valid_bits_per_sample: u8,
+    /// Stored container width for each sample.
     pub container_bits_per_sample: u8,
+    /// Sample byte order in the raw stream.
     pub byte_order: RawPcmByteOrder,
+    /// Optional RFC 9639 channel mask.
     pub channel_mask: Option<u32>,
 }
 
+/// Reader façade for explicit raw signed-integer PCM input.
 #[derive(Debug)]
 pub struct RawPcmReader<R: Read + Seek> {
     reader: R,
@@ -32,6 +41,7 @@ pub struct RawPcmReader<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> RawPcmReader<R> {
+    /// Create a raw PCM reader from a seekable byte stream and descriptor.
     pub fn new(mut reader: R, descriptor: RawPcmDescriptor) -> Result<Self> {
         let total_samples = inspect_raw_pcm_total_samples_impl(&mut reader, descriptor)?;
         Ok(Self {
@@ -48,11 +58,13 @@ impl<R: Read + Seek> RawPcmReader<R> {
         })
     }
 
+    /// Return the parsed PCM spec derived from the supplied descriptor.
     #[must_use]
     pub fn spec(&self) -> WavSpec {
         self.spec
     }
 
+    /// Consume the reader and return the corresponding single-pass PCM stream.
     pub fn into_pcm_stream(self) -> Result<RawPcmStream<R>> {
         RawPcmStream::new(self.reader, self.descriptor, self.spec.total_samples)
     }
@@ -87,6 +99,7 @@ pub(crate) fn total_samples_from_byte_len_with_descriptor(
     total_samples_from_byte_len(byte_len, validated.frame_bytes)
 }
 
+/// Single-pass raw PCM stream produced by [`RawPcmReader`].
 #[derive(Debug)]
 pub struct RawPcmStream<R> {
     reader: R,

@@ -71,23 +71,36 @@ struct SubframeHeader {
     effective_bps: u8,
 }
 
+/// Options for [`FlacReader`] parsing and validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FlacReaderOptions {
+    /// Reject malformed or non-conforming seektable metadata.
     pub strict_seektable_validation: bool,
+    /// Require explicit provenance before restoring a non-ordinary channel mask.
     pub strict_channel_mask_provenance: bool,
 }
 
+/// Single-pass FLAC decode stream consumed by [`crate::Decoder`] and recompress flows.
 pub trait DecodePcmStream: EncodePcmStream {
+    /// Return the total number of FLAC frames expected from the input.
     fn total_input_frames(&self) -> usize;
+    /// Return the number of FLAC frames decoded so far.
     fn completed_input_frames(&self) -> usize;
+    /// Return the parsed STREAMINFO block for the input stream.
     fn stream_info(&self) -> StreamInfo;
+    /// Update the worker-thread count when the implementation supports it.
     fn set_threads(&mut self, _threads: usize) {}
+    /// Optionally hand buffered decoded samples to the caller.
     fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
         Ok(None)
     }
 }
 
 /// Owned decode-side handoff that keeps metadata and the PCM stream together.
+///
+/// `DecodeSource` is the decode counterpart to [`crate::EncodeSource`]. It is
+/// usually created from [`FlacReader::into_decode_source`] and then passed to
+/// [`crate::Decoder::decode_source`].
 pub struct DecodeSource<S> {
     metadata: Metadata,
     stream: S,
@@ -132,6 +145,11 @@ impl<S: DecodePcmStream> DecodeSource<S> {
     }
 }
 
+/// Reader façade for FLAC inputs.
+///
+/// `FlacReader` parses STREAMINFO plus user-visible metadata, exposes the
+/// recovered [`WavSpec`]-shaped stream description, and can then hand ownership
+/// to either a decode or recompress source.
 #[derive(Debug)]
 pub struct FlacReader<R> {
     reader: R,
@@ -142,20 +160,24 @@ pub struct FlacReader<R> {
 }
 
 impl<R: Read + Seek> FlacReader<R> {
+    /// Parse a FLAC stream with the default validation policy.
     pub fn new(reader: R) -> Result<Self> {
         read_flac_reader_with_options(reader, FlacReaderOptions::default())
     }
 
+    /// Return the decoded PCM-facing stream description.
     #[must_use]
     pub fn spec(&self) -> WavSpec {
         self.spec
     }
 
+    /// Return the metadata recovered from FLAC metadata blocks.
     #[must_use]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
+    /// Return the parsed STREAMINFO block.
     #[must_use]
     pub fn stream_info(&self) -> StreamInfo {
         self.stream_info
@@ -409,10 +431,12 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
     }
 }
 
+/// Parse a FLAC stream into a reusable [`FlacReader`].
 pub fn read_flac_reader<R: Read + Seek>(reader: R) -> Result<FlacReader<R>> {
     read_flac_reader_with_options(reader, FlacReaderOptions::default())
 }
 
+/// Parse a FLAC stream into a reusable [`FlacReader`] with explicit validation options.
 pub fn read_flac_reader_with_options<R: Read + Seek>(
     mut reader: R,
     options: FlacReaderOptions,

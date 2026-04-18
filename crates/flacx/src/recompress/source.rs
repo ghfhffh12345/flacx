@@ -10,6 +10,9 @@ use crate::{
 use super::verify::VerifyingPcmStream;
 
 /// Reader-to-session handoff for explicit FLAC recompression.
+///
+/// This type keeps the parsed metadata and the verifying decode stream together
+/// until a [`super::session::Recompressor`] consumes them.
 pub struct FlacRecompressSource<S> {
     metadata: Metadata,
     stream: VerifyingPcmStream<S>,

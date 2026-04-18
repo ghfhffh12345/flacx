@@ -53,6 +53,7 @@ pub struct AiffReader<R> {
 }
 
 impl<R: Read + Seek> AiffReader<R> {
+    /// Parse an AIFF or supported AIFC reader.
     pub fn new(mut reader: R) -> Result<Self> {
         let layout = parse_aiff_layout(&mut reader)?;
         reader.seek(SeekFrom::Start(layout.data_offset))?;
@@ -72,11 +73,13 @@ impl<R: Read + Seek> AiffReader<R> {
         })
     }
 
+    /// Return the parsed PCM stream specification.
     #[must_use]
     pub fn spec(&self) -> WavSpec {
         self.spec
     }
 
+    /// Return metadata staged for encode-side preservation.
     #[must_use]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata

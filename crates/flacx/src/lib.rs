@@ -1,118 +1,127 @@
-//! High-performance PCM-container/FLAC conversion and recompression for Rust.
+//! Convert supported PCM containers to FLAC, decode FLAC back to PCM
+//! containers, and recompress existing FLAC streams.
 //!
-//! `flacx` is the reusable library crate in this workspace. The public surface
-//! is intentionally layered so callers — and maintainers reading the exported
-//! API — can distinguish the explicit codec pipeline from the thin built-in
-//! wrappers layered on top of it.
+//! `flacx` exposes two complementary ways to work:
 //!
-//! This crate-level documentation is architecture-first. It is meant to answer
-//! “what does the public API expose, and how is it organized?” rather than to
-//! serve as a beginner tutorial.
+//! - the explicit API built around readers, sources, configs, and
+//!   writer-owning sessions
+//! - the convenience [`builtin`] helpers for one-shot file and byte workflows
 //!
-//! ## Public API interface map
+//! Most applications should start with the explicit API when they want control
+//! over metadata, output configuration, or progress reporting, and use
+//! [`builtin`] when a single function call is enough.
 //!
-//! ```text
-//! flacx
-//! ├─ core
-//! │  ├─ config/builders
-//! │  │  ├─ EncoderConfig / EncoderBuilder
-//! │  │  ├─ DecodeConfig / DecodeBuilder
-//! │  │  └─ RecompressConfig / RecompressBuilder
-//! │  ├─ reader / source / session façades
-//! │  │  ├─ EncodeSource / Encoder / EncodeSummary
-//! │  │  ├─ FlacReader / DecodeSource / Decoder / DecodeSummary
-//! │  │  └─ FlacRecompressSource / Recompressor / RecompressSummary / RecompressProgress / RecompressPhase
-//! │  ├─ typed PCM boundary
-//! │  │  ├─ PcmReader / PcmStream / PcmStreamSpec / PcmContainer
-//! │  │  ├─ explicit family readers + `into_source()` handoff
-//! │  │  └─ inspect_pcm_total_samples / inspect_raw_pcm_total_samples
-//! │  └─ support surfaces
-//! │     ├─ Metadata / RawPcmDescriptor / RawPcmByteOrder
-//! │     └─ level
-//! ├─ inspectors
-//! │  ├─ inspect_wav_total_samples
-//! │  └─ inspect_flac_total_samples
-//! ├─ builtin
-//! │  ├─ builtin::encode_file / builtin::encode_bytes
-//! │  ├─ builtin::decode_file / builtin::decode_bytes
-//! │  ├─ builtin::recompress_file / builtin::recompress_bytes
-//! │  └─ re-exported inspection helpers
-//! └─ progress (feature = "progress")
-//!    ├─ ProgressSnapshot
-//!    ├─ EncodeProgress / DecodeProgress
-//!    └─ progress-enabled encode/decode/recompress methods
+//! ## Getting started
+//!
+//! Encode a supported PCM container to FLAC:
+//!
+//! ```no_run
+//! use flacx::{EncoderConfig, WavReader};
+//! use std::{
+//!     fs::File,
+//!     io::{BufReader, BufWriter},
+//! };
+//!
+//! let input = BufReader::new(File::open("input.wav")?);
+//! let source = WavReader::new(input)?.into_source();
+//!
+//! let output = BufWriter::new(File::create("output.flac")?);
+//! let mut encoder = EncoderConfig::default().into_encoder(output);
+//! let summary = encoder.encode_source(source)?;
+//!
+//! println!("encoded {} samples", summary.total_samples);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! ## Layer contract
+//! Decode a FLAC stream to a PCM container:
 //!
-//! | Layer | Public surface | Responsibility |
+//! ```no_run
+//! use flacx::{DecodeConfig, FlacReader};
+//! use std::{
+//!     fs::File,
+//!     io::{BufReader, BufWriter},
+//! };
+//!
+//! let input = BufReader::new(File::open("input.flac")?);
+//! let source = FlacReader::new(input)?.into_decode_source();
+//!
+//! let output = BufWriter::new(File::create("output.wav")?);
+//! let mut decoder = DecodeConfig::default().into_decoder(output);
+//! decoder.decode_source(source)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Recompress an existing FLAC stream:
+//!
+//! ```no_run
+//! use flacx::{FlacReader, RecompressConfig};
+//! use std::{
+//!     fs::File,
+//!     io::{BufReader, BufWriter},
+//! };
+//!
+//! let input = BufReader::new(File::open("input.flac")?);
+//! let source = FlacReader::new(input)?.into_recompress_source();
+//!
+//! let output = BufWriter::new(File::create("recompressed.flac")?);
+//! let mut recompressor = RecompressConfig::default().into_recompressor(output);
+//! recompressor.recompress(source)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! If you prefer a one-shot path, start with [`builtin::encode_file`],
+//! [`builtin::decode_file`], or [`builtin::recompress_file`].
+//!
+//! ## Choosing an API layer
+//!
+//! | Surface | Use it when | Main entry points |
 //! | --- | --- | --- |
-//! | Explicit core | [`core`], [`EncodeSource`], [`Encoder`], [`FlacReader`], [`DecodeSource`], [`Decoder`], [`FlacRecompressSource`], [`Recompressor`], config/builders, reader/source/session helpers | Owns codec configuration, owned source handoff, summary reporting, and explicit encode/decode/recompress entry points. |
-//! | Builtin/orchestration | [`builtin`] | Owns one-shot file/byte routing and extension-driven ergonomics without becoming a second policy engine. |
-//! | Support surfaces | [`level`], raw PCM helpers, inspector helpers, optional progress types | Exposes stable supporting concepts that sit beside the core pipeline. |
+//! | Explicit pipeline | You want direct control over readers, metadata, configs, output containers, or progress callbacks. | [`core`], [`EncoderConfig`], [`DecodeConfig`], [`RecompressConfig`], [`WavReader`], [`FlacReader`], [`Encoder`], [`Decoder`], [`Recompressor`] |
+//! | Convenience helpers | You want file-path or byte-slice conversions with minimal setup. | [`builtin`] |
+//! | Supporting types | You need presets, metadata editing, raw PCM descriptors, or preflight inspection helpers. | [`level`], [`Metadata`], [`RawPcmDescriptor`], [`inspect_wav_total_samples`], [`inspect_flac_total_samples`] |
 //!
-//! ## Source structure snapshot
+//! ## Main building blocks
 //!
-//! The current crate layout is intentionally readable from the public surface
-//! inward:
+//! The public API is organized around a few reusable concepts:
 //!
-//! ```text
-//! crates/flacx/src/
-//! ├─ lib.rs                 # public re-exports and crate contract
-//! ├─ config.rs              # encode/decode config + builders
-//! ├─ convenience.rs         # implementation backing the public `builtin` module
-//! ├─ encoder.rs             # encode façade
-//! ├─ decode.rs              # decode façade
-//! ├─ recompress.rs          # public recompress surface + exports
-//! │  ├─ config.rs           # recompress policy + builder
-//! │  ├─ source.rs           # reader-to-session handoff
-//! │  ├─ session.rs          # writer-owning recompress execution
-//! │  ├─ progress.rs         # recompress progress types/adapters
-//! │  └─ verify.rs           # recompress MD5 verification glue
-//! ├─ pcm.rs                 # typed PCM values shared with decode/write-side APIs
-//! ├─ input.rs               # encode-side reader/stream contracts + dispatch
-//! ├─ wav_input.rs           # WAV/RF64/Wave64 reader family
-//! ├─ wav_output.rs          # WAV-family writer family
-//! ├─ decode_output.rs       # decode-side temp output + commit helpers
-//! ├─ encode_pipeline.rs     # encode planning helpers
-//! ├─ metadata.rs            # public metadata-facing helpers
-//! ├─ metadata/
-//! │  ├─ blocks.rs           # FLAC metadata block model
-//! │  └─ draft.rs            # metadata drafting/translation helpers
-//! ├─ read.rs                # FLAC read orchestration
-//! │  ├─ frame.rs            # FLAC frame parsing/decoding
-//! │  └─ metadata.rs         # FLAC metadata parsing + inspection
-//! ├─ write.rs               # FLAC write orchestration
-//! │  └─ frame.rs            # frame/subframe serialization
-//! └─ progress.rs            # optional callback-oriented progress reporting
-//! ```
+//! - **Readers** parse an input format and expose its recovered stream spec and
+//!   metadata, such as [`WavReader`], [`AiffReader`], [`CafReader`], and
+//!   [`FlacReader`].
+//! - **Sources** carry parsed metadata and a single-pass PCM stream into the
+//!   next stage, such as [`EncodeSource`], [`DecodeSource`], and
+//!   [`FlacRecompressSource`].
+//! - **Configs and builders** choose output policy and codec tuning, such as
+//!   [`EncoderConfig`], [`DecodeConfig`], and [`RecompressConfig`].
+//! - **Sessions** own the output writer and perform the actual encode, decode,
+//!   or recompress operation through [`Encoder`], [`Decoder`], and
+//!   [`Recompressor`].
 //!
-//! ## Feature-gated surface
+//! The [`core`] module re-exports the explicit pipeline in one place if you
+//! prefer a narrower import surface.
 //!
-//! Format families are coarse feature gates:
+//! ## Feature flags
 //!
-//! - `wav` => RIFF/WAVE, RF64, Wave64
-//! - `aiff` => AIFF, AIFC
-//! - `caf` => CAF
-//! - `progress` => callback-friendly progress reporting
+//! `flacx` uses coarse feature flags for container families and optional
+//! progress callbacks:
 //!
-//! ## Reading guide
+//! - `wav` enables WAV, RF64, and Wave64 support
+//! - `aiff` enables AIFF and AIFC support
+//! - `caf` enables CAF support
+//! - `progress` enables callback-based progress reporting via
+//!   [`ProgressSnapshot`], [`EncodeProgress`], [`DecodeProgress`], and
+//!   recompress progress helpers
 //!
-//! - Start with [`core`] when you want the explicit architecture story.
-//! - Use [`builtin`] when you specifically want the one-shot orchestration
-//!   wrappers.
-//! - Use [`level`] for compression presets, [`RawPcmDescriptor`] for explicit
-//!   raw PCM ingest, and [`FlacReader`] / explicit family readers for explicit
-//!   decode-side and encode-side control.
-//! - In the repository, `crates/flacx/README.md` mirrors this crate contract,
-//!   and `docs/flacx-public-api-architecture.md` expands the public API into a
-//!   maintainer-oriented architecture guide with structural artifacts.
+//! ## Navigating the docs
 //!
-//! ## Scope of this rustdoc
+//! - Start with [`core`] for the explicit pipeline.
+//! - Use [`builtin`] for the shortest file/byte workflows.
+//! - Visit [`level`] for compression presets and [`PcmContainer`] for decode
+//!   output-family selection.
+//! - Visit [`Metadata`] and [`RawPcmDescriptor`] when you need to control
+//!   preservation or raw PCM ingest.
 //!
-//! The crate docs intentionally stop at the architectural layer map and the
-//! exported interface. They do not attempt to narrate the full internal
-//! execution path of encode, decode, or recompress operations.
+//! The repository `README.md` gives a short workspace overview, while this
+//! rustdoc is the authoritative library reference.
 //!
 #[cfg(feature = "aiff")]
 mod aiff;

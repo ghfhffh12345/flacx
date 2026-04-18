@@ -20,15 +20,25 @@ use super::{
 /// Summary of the FLAC stream produced by a recompress operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecompressSummary {
+    /// Number of FLAC frames written to the recompressed output.
     pub frame_count: usize,
+    /// Total samples per channel written to the recompressed output.
     pub total_samples: u64,
+    /// Block size used by the recompressed stream.
     pub block_size: u16,
+    /// Minimum encoded frame size in bytes.
     pub min_frame_size: u32,
+    /// Maximum encoded frame size in bytes.
     pub max_frame_size: u32,
+    /// Minimum encoded block size in samples.
     pub min_block_size: u16,
+    /// Maximum encoded block size in samples.
     pub max_block_size: u16,
+    /// Output sample rate.
     pub sample_rate: u32,
+    /// Output channel count.
     pub channels: u8,
+    /// Output bits per sample.
     pub bits_per_sample: u8,
 }
 
