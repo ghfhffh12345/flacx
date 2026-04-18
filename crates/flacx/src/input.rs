@@ -8,7 +8,7 @@ pub(crate) use crate::pcm::{
     container_bits_from_valid_bits, ordinary_channel_mask,
 };
 pub use crate::pcm::{PcmSpec, PcmStream};
-pub type PcmReaderOptions = crate::wav_input::WavReaderOptions;
+pub(crate) type PcmReaderOptions = crate::wav_input::WavReaderOptions;
 
 /// Single-pass PCM sample source consumed by the encode session.
 pub trait EncodePcmStream {
@@ -29,6 +29,51 @@ pub trait EncodePcmStream {
     }
 }
 
+/// Owned encode-side handoff that keeps metadata and the PCM stream together.
+pub struct EncodeSource<S> {
+    metadata: EncodeMetadata,
+    stream: S,
+}
+
+impl<S> EncodeSource<S> {
+    /// Create a new encode source from staged metadata and a PCM stream.
+    #[must_use]
+    pub fn new(metadata: EncodeMetadata, stream: S) -> Self {
+        Self { metadata, stream }
+    }
+
+    /// Return the staged encode metadata.
+    #[must_use]
+    pub fn metadata(&self) -> &EncodeMetadata {
+        &self.metadata
+    }
+
+    /// Return mutable access to the staged encode metadata.
+    pub fn metadata_mut(&mut self) -> &mut EncodeMetadata {
+        &mut self.metadata
+    }
+
+    /// Replace the staged metadata and return the updated source.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: EncodeMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Consume the source and return the metadata and stream.
+    pub fn into_parts(self) -> (EncodeMetadata, S) {
+        (self.metadata, self.stream)
+    }
+}
+
+impl<S: EncodePcmStream> EncodeSource<S> {
+    /// Return the PCM spec that will drive encode planning.
+    #[must_use]
+    pub fn spec(&self) -> PcmSpec {
+        self.stream.spec()
+    }
+}
+
 /// Family-dispatched PCM reader for the explicit encode workflow.
 pub enum PcmReader<R: Read + Seek> {
     Wav(crate::wav_input::WavReader<R>),
@@ -39,6 +84,20 @@ pub enum PcmReader<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> PcmReader<R> {
+    /// Parse a supported PCM container using explicit constructor-driven dispatch.
+    pub fn new(reader: R) -> Result<Self> {
+        Self::with_options(reader, PcmReaderOptions::default())
+    }
+
+    /// Parse a supported PCM container while applying RIFF/WAVE-family reader options.
+    ///
+    /// The options only affect WAV/RF64/Wave64 inputs. AIFF/AIFC and CAF
+    /// inputs ignore them because their reader families do not share that
+    /// policy surface.
+    pub fn with_reader_options(reader: R, options: crate::WavReaderOptions) -> Result<Self> {
+        Self::with_options(reader, options)
+    }
+
     /// Return the parsed PCM specification without consuming the sample stream.
     #[must_use]
     pub fn spec(&self) -> PcmSpec {
@@ -63,9 +122,19 @@ impl<R: Read + Seek> PcmReader<R> {
         }
     }
 
-    /// Convert the parsed reader into its single-pass PCM stream.
-    pub fn into_pcm_stream(self) -> AnyPcmStream<R> {
+    /// Convert the parsed reader into an owned encode source.
+    pub fn into_source(self) -> EncodeSource<impl EncodePcmStream> {
+        let (metadata, stream) = self.into_session_parts();
+        EncodeSource::new(metadata, stream)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn into_pcm_stream(self) -> AnyPcmStream<R> {
         self.into_session_parts().1
+    }
+
+    pub(crate) fn with_options(reader: R, options: PcmReaderOptions) -> Result<Self> {
+        read_pcm_reader_with_options(reader, options)
     }
 
     pub(crate) fn into_session_parts(self) -> (EncodeMetadata, AnyPcmStream<R>) {
@@ -89,7 +158,7 @@ impl<R: Read + Seek> PcmReader<R> {
 }
 
 /// Family-dispatched single-pass PCM stream.
-pub enum AnyPcmStream<R: Read + Seek> {
+pub(crate) enum AnyPcmStream<R: Read + Seek> {
     Wav(crate::wav_input::WavPcmStream<R>),
     #[cfg(feature = "aiff")]
     Aiff(crate::aiff::AiffPcmStream<R>),
@@ -135,7 +204,8 @@ impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
 
 /// Parse a supported PCM container and return a family-specific reader for the
 /// explicit encode workflow.
-pub fn read_pcm_reader<R: Read + Seek>(reader: R) -> Result<PcmReader<R>> {
+#[allow(dead_code)]
+pub(crate) fn read_pcm_reader<R: Read + Seek>(reader: R) -> Result<PcmReader<R>> {
     read_pcm_reader_with_options(reader, PcmReaderOptions::default())
 }
 
@@ -177,7 +247,7 @@ pub(crate) fn inspect_pcm_total_samples<R: Read + Seek>(reader: &mut R) -> Resul
     }
 }
 
-pub fn read_pcm_reader_with_options<R: Read + Seek>(
+pub(crate) fn read_pcm_reader_with_options<R: Read + Seek>(
     mut reader: R,
     options: PcmReaderOptions,
 ) -> Result<PcmReader<R>> {

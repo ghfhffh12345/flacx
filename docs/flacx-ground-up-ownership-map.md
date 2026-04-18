@@ -15,7 +15,7 @@ The intended reading order is:
 family readers / FLAC reader
             │
             ▼
-     spec + metadata handoff
+      owned source handoff
             │
             ▼
        typed PCM stream seam
@@ -31,7 +31,7 @@ Encoder / Decoder / Recompressor
 ```
 
 This keeps the crate **same-crate**, makes **encode + decode** the center, and
-keeps **recompress** downstream of the same reader/session substrate instead of
+keeps **recompress** downstream of the same reader/source/session substrate instead of
 giving it a parallel architecture.
 
 ## Current ownership map
@@ -39,7 +39,7 @@ giving it a parallel architecture.
 | Area | Primary files | Current ownership |
 | --- | --- | --- |
 | Public contract | `crates/flacx/src/lib.rs`, `crates/flacx/README.md`, `docs/flacx-public-api-architecture.md` | Public layering, exports, and architecture story. |
-| Shared typed substrate | `crates/flacx/src/input.rs`, `crates/flacx/src/pcm.rs`, `crates/flacx/src/metadata.rs` | Reader/session handoff, typed PCM seam, and metadata handoff. |
+| Shared typed substrate | `crates/flacx/src/input.rs`, `crates/flacx/src/pcm.rs`, `crates/flacx/src/metadata.rs` | Reader/source handoff, typed PCM seam, and metadata ownership. |
 | Encode spine | `crates/flacx/src/encoder.rs`, `crates/flacx/src/encode_pipeline.rs`, `crates/flacx/src/write/*` | Explicit encode sessions, planning, and FLAC write orchestration. |
 | Decode spine | `crates/flacx/src/decode.rs`, `crates/flacx/src/read/*`, `crates/flacx/src/decode_output.rs` | Explicit decode sessions, FLAC read orchestration, and output commit flow. |
 | Recompress adapter | `crates/flacx/src/recompress/*` | FLAC-reader-driven recompression that reuses the shared PCM/encode substrate while keeping config, source, session, progress, and verification ownership explicit. |

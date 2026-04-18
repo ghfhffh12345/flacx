@@ -16,11 +16,10 @@ It is a review artifact, not a user tutorial.
 
 Shared entry points that must stay family-neutral where possible:
 
-- `read_pcm_reader(...)`
-- `read_pcm_reader_with_options(...)`
+- `PcmReader::new(...)` when format choice is truly dynamic
+- explicit family readers plus `into_source()` conversions
 - `write_pcm_stream(...)`
 - `PcmContainer`
-- `PcmReader` / `AnyPcmStream`
 - `DecodeConfig::with_output_container(...)`
 
 ## Evidence that parity exists today

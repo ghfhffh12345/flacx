@@ -6,16 +6,16 @@ use std::{
 };
 
 use flacx::{
-    DecodePcmStream, DecodeSummary, EncodePcmStream, EncoderConfig, FlacReaderOptions,
-    FlacRecompressSource, PcmSpec, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig,
+    DecodePcmStream, DecodeSource, DecodeSummary, EncodePcmStream, EncodeSource, EncoderConfig,
+    FlacReaderOptions, PcmReader, PcmSpec, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig,
     RecompressMode, WavReader, builtin, inspect_raw_pcm_total_samples, level::Level,
-    read_flac_reader, read_flac_reader_with_options, read_pcm_reader, write_pcm_stream,
+    read_flac_reader, read_flac_reader_with_options, write_pcm_stream,
 };
 
 mod support;
 
 #[cfg(all(feature = "aiff", feature = "caf"))]
-use flacx::{PcmContainer, PcmReader};
+use flacx::PcmContainer;
 use support::TestDecoder;
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, parse_first_flac_frame_header,
@@ -45,12 +45,9 @@ fn builtin_encode_bytes_matches_explicit_reader_session_flow() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let via_builtin = builtin::encode_bytes(&wav).unwrap();
 
-    let reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(&wav)).unwrap();
     let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    let summary = encoder.encode(stream).unwrap();
+    let summary = encoder.encode_source(reader.into_source()).unwrap();
     let via_session = encoder.into_inner().into_inner();
 
     assert_eq!(summary.total_samples, 2_048);
@@ -64,16 +61,13 @@ fn reader_session_flow_uses_configured_options() {
     let output_path = unique_temp_path("flac");
     fs::write(&input_path, &wav).unwrap();
 
-    let reader = read_pcm_reader(fs::File::open(&input_path).unwrap()).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(fs::File::open(&input_path).unwrap()).unwrap();
     let mut encoder = EncoderConfig::default()
         .with_level(Level::Level0)
         .with_threads(1)
         .with_block_size(576)
         .into_encoder(fs::File::create(&output_path).unwrap());
-    encoder.set_metadata(metadata);
-    let summary = encoder.encode(stream).unwrap();
+    let summary = encoder.encode_source(reader.into_source()).unwrap();
 
     assert_eq!(summary.block_size, 576);
     assert_eq!(summary.channels, 2);
@@ -93,12 +87,9 @@ fn builtin_encode_file_matches_explicit_reader_session_output() {
     let summary = builtin::encode_file(&input_path, &output_path).unwrap();
     let bytes_from_file = fs::read(&output_path).unwrap();
 
-    let reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(&wav)).unwrap();
     let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    encoder.encode(stream).unwrap();
+    encoder.encode_source(reader.into_source()).unwrap();
     let bytes_from_memory = encoder.into_inner().into_inner();
 
     assert_eq!(summary.total_samples, 2_048);
@@ -116,10 +107,7 @@ fn builtin_convenience_no_longer_uses_legacy_helpers() {
     assert!(!source.contains("decode_flac_to_pcm_with_config"));
     assert!(!source.contains("can_use_wav_family_encode_fastpath"));
     assert!(source.contains("fn recompress_reader_session_with_config_and_progress"));
-    assert_eq!(
-        source.matches("FlacRecompressSource::from_reader").count(),
-        1
-    );
+    assert_eq!(source.matches("into_recompress_source()").count(), 1);
     assert_eq!(
         source
             .matches("recompress_with_sink(source, progress)")
@@ -136,6 +124,33 @@ fn recompress_public_exports_remain_stable() {
     assert!(source.contains("pub use recompress::{"));
     assert!(source.contains("FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,"));
     assert!(source.contains("RecompressProgress, RecompressSummary, Recompressor,"));
+}
+
+#[test]
+fn source_api_exports_replace_split_metadata_surface() {
+    let lib_source = include_str!("../src/lib.rs");
+    let encoder_source = include_str!("../src/encoder.rs");
+    let decode_source = include_str!("../src/decode.rs");
+    let input_source = include_str!("../src/input.rs");
+
+    assert!(!lib_source.contains("AnyPcmStream,"));
+    assert!(!lib_source.contains("PcmReaderOptions,"));
+    assert!(!lib_source.contains("read_pcm_reader,"));
+    assert!(!lib_source.contains("read_pcm_reader_with_options,"));
+    assert!(lib_source.contains("EncodeSource"));
+    assert!(lib_source.contains("DecodeSource"));
+
+    assert!(encoder_source.contains("pub fn encode_source<"));
+    assert!(!encoder_source.contains("pub fn set_metadata("));
+    assert!(!encoder_source.contains("pub fn with_metadata("));
+
+    assert!(decode_source.contains("pub fn decode_source<"));
+    assert!(!decode_source.contains("pub fn set_metadata("));
+    assert!(!decode_source.contains("pub fn with_metadata("));
+
+    assert!(input_source.contains("pub fn new(reader: R) -> Result<Self>"));
+    assert!(!input_source.contains("pub fn read_pcm_reader<"));
+    assert!(!input_source.contains("pub fn read_pcm_reader_with_options<"));
 }
 
 #[cfg(feature = "aiff")]
@@ -160,12 +175,9 @@ fn explicit_reader_session_flow_accepts_aiff_inputs() {
     let aiff = aiff_pcm_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
     let via_builtin = builtin::encode_bytes(&aiff).unwrap();
 
-    let reader = read_pcm_reader(Cursor::new(&aiff)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(&aiff)).unwrap();
     let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    let summary = encoder.encode(stream).unwrap();
+    let summary = encoder.encode_source(reader.into_source()).unwrap();
     let via_session = encoder.into_inner().into_inner();
 
     assert_eq!(summary.total_samples, 1_024);
@@ -186,12 +198,9 @@ fn explicit_reader_session_flow_accepts_caf_inputs() {
     let caf = caf_lpcm_bytes(16, 16, 2, 44_100, true, &sample_fixture(2, 1_024));
     let via_builtin = builtin::encode_bytes(&caf).unwrap();
 
-    let reader = read_pcm_reader(Cursor::new(&caf)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(&caf)).unwrap();
     let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    let summary = encoder.encode(stream).unwrap();
+    let summary = encoder.encode_source(reader.into_source()).unwrap();
     let via_session = encoder.into_inner().into_inner();
 
     assert_eq!(summary.total_samples, 1_024);
@@ -201,15 +210,12 @@ fn explicit_reader_session_flow_accepts_caf_inputs() {
 #[test]
 fn api_accepts_seekable_readers_and_writer_bound_sessions() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
-    let reader = read_pcm_reader(Cursor::new(wav)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(wav)).unwrap();
     let mut output = Cursor::new(Vec::new());
     let mut encoder = EncoderConfig::default()
         .with_threads(2)
         .into_encoder(&mut output);
-    encoder.set_metadata(metadata);
-    let summary = encoder.encode(stream).unwrap();
+    let summary = encoder.encode_source(reader.into_source()).unwrap();
 
     assert!(summary.frame_count >= 1);
     assert!(output.get_ref().starts_with(b"fLaC"));
@@ -236,11 +242,8 @@ fn decode_api_accepts_seekable_readers_and_returns_summary() {
     let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 3_000));
     let flac = builtin::encode_bytes(&wav).unwrap();
     let reader = read_flac_reader(Cursor::new(flac)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
     let mut decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
-    decoder.set_metadata(metadata);
-    let summary = decoder.decode(stream).unwrap();
+    let summary = decoder.decode_source(reader.into_decode_source()).unwrap();
 
     assert_eq!(
         summary,
@@ -276,7 +279,7 @@ fn explicit_recompress_reader_session_flow_preserves_audio() {
         read_flac_reader_with_options(Cursor::new(flac), recompress_reader_options(config))
             .unwrap();
     let spec = reader.spec();
-    let source = FlacRecompressSource::from_reader(reader);
+    let source = reader.into_recompress_source();
     let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
 
     assert_eq!(source.total_samples(), 1_536);
@@ -306,7 +309,7 @@ fn builtin_recompress_file_matches_explicit_reader_session_output() {
     let reader =
         read_flac_reader_with_options(Cursor::new(flac), recompress_reader_options(config))
             .unwrap();
-    let source = FlacRecompressSource::from_reader(reader);
+    let source = reader.into_recompress_source();
     let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
     let explicit_summary = recompressor.recompress(source).unwrap();
     let explicit_bytes = recompressor.into_inner().into_inner();
@@ -321,18 +324,15 @@ fn builtin_recompress_file_matches_explicit_reader_session_output() {
 #[test]
 fn flac_reader_stream_starts_before_all_frames_are_decoded() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 16_384));
-    let reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(&wav)).unwrap();
     let mut encoder = EncoderConfig::default()
         .with_block_size(576)
         .into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    encoder.encode(stream).unwrap();
+    encoder.encode_source(reader.into_source()).unwrap();
     let flac = encoder.into_inner().into_inner();
 
     let reader = read_flac_reader(Cursor::new(flac)).unwrap();
-    let mut stream = reader.into_pcm_stream();
+    let (_, mut stream) = reader.into_decode_source().into_parts();
     assert_eq!(stream.completed_input_frames(), 0);
 
     let mut first_chunk = Vec::new();
@@ -342,11 +342,8 @@ fn flac_reader_stream_starts_before_all_frames_are_decoded() {
     assert!(stream.completed_input_frames() > 0);
 
     let reader = read_flac_reader(Cursor::new(builtin::encode_bytes(&wav).unwrap())).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
     let mut decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
-    decoder.set_metadata(metadata);
-    let summary = decoder.decode(stream).unwrap();
+    let summary = decoder.decode_source(reader.into_decode_source()).unwrap();
     assert_eq!(summary.total_samples, 16_384);
 }
 
@@ -354,18 +351,15 @@ fn flac_reader_stream_starts_before_all_frames_are_decoded() {
 fn flac_reader_stream_single_thread_chunk_decode_round_trips_full_stream() {
     let expected_samples = sample_fixture(2, 16_384);
     let wav = pcm_wav_bytes(16, 2, 44_100, &expected_samples);
-    let reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(&wav)).unwrap();
     let mut encoder = EncoderConfig::default()
         .with_block_size(576)
         .into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    encoder.encode(stream).unwrap();
+    encoder.encode_source(reader.into_source()).unwrap();
     let flac = encoder.into_inner().into_inner();
 
     let reader = read_flac_reader(Cursor::new(flac)).unwrap();
-    let mut stream = reader.into_pcm_stream();
+    let (_, mut stream) = reader.into_decode_source().into_parts();
     stream.set_threads(1);
 
     let mut decoded_samples = Vec::new();
@@ -384,7 +378,7 @@ fn wav_reader_exposes_spec_before_stream_consumption() {
     let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 256));
     let reader = WavReader::new(Cursor::new(&wav)).unwrap();
     let spec: PcmSpec = reader.spec();
-    let mut stream = reader.into_pcm_stream();
+    let (_, mut stream) = reader.into_source().into_parts();
     let mut samples = Vec::new();
     let frames = stream.read_chunk(256, &mut samples).unwrap();
 
@@ -400,7 +394,7 @@ fn wav_reader_stream_appends_into_existing_output_buffer() {
     let expected_samples = sample_fixture(2, 4);
     let wav = pcm_wav_bytes(16, 2, 44_100, &expected_samples);
     let reader = WavReader::new(Cursor::new(&wav)).unwrap();
-    let mut stream = reader.into_pcm_stream();
+    let (_, mut stream) = reader.into_source().into_parts();
     let mut output = vec![-999];
 
     assert_eq!(stream.read_chunk(2, &mut output).unwrap(), 2);
@@ -439,15 +433,12 @@ fn raw_reader_stream_appends_into_existing_output_buffer() {
 fn explicit_reader_session_pipeline_round_trips_without_builtin_inference() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
     let reader = WavReader::new(Cursor::new(&wav)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
 
     let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    let encode_summary = encoder.encode(stream).unwrap();
+    let encode_summary = encoder.encode_source(reader.into_source()).unwrap();
     let decoded_reader = read_flac_reader(Cursor::new(encoder.into_inner().into_inner())).unwrap();
     let decoded_spec = decoded_reader.spec();
-    let mut decoded_stream = decoded_reader.into_pcm_stream();
+    let (_, mut decoded_stream) = decoded_reader.into_decode_source().into_parts();
     let mut decoded_samples = Vec::new();
     while decoded_stream
         .read_chunk(4_096, &mut decoded_samples)
@@ -475,15 +466,12 @@ fn explicit_reader_session_pipeline_round_trips_without_builtin_inference() {
 fn explicit_reader_session_supports_variable_block_schedule_semantics() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_352));
     let reader = WavReader::new(Cursor::new(&wav)).unwrap();
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
     let mut encoder = EncoderConfig::default()
         .with_threads(2)
         .with_block_schedule(vec![576, 1_152, 576, 2_048])
         .into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
 
-    let summary = encoder.encode(stream).unwrap();
+    let summary = encoder.encode_source(reader.into_source()).unwrap();
     let flac = encoder.into_inner().into_inner();
     let decoded = builtin::decode_bytes(&flac).unwrap();
     let header = parse_first_flac_frame_header(&flac);
@@ -503,6 +491,23 @@ fn explicit_reader_session_supports_variable_block_schedule_semantics() {
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
+#[test]
+fn encode_source_constructor_preserves_explicit_metadata_and_stream_composition() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
+    let (metadata, stream) = WavReader::new(Cursor::new(&wav))
+        .unwrap()
+        .into_source()
+        .into_parts();
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    let summary = encoder
+        .encode_source(EncodeSource::new(metadata, stream))
+        .unwrap();
+    let decoded = builtin::decode_bytes(&encoder.into_inner().into_inner()).unwrap();
+
+    assert_eq!(summary.total_samples, 1_024);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+}
+
 #[cfg(feature = "progress")]
 #[test]
 fn explicit_reader_session_progress_matches_default_output_for_variable_schedule() {
@@ -511,23 +516,19 @@ fn explicit_reader_session_progress_matches_default_output_for_variable_schedule
         .with_threads(2)
         .with_block_schedule(vec![576, 1_152, 576, 2_048]);
 
-    let baseline_reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
-    let baseline_metadata = baseline_reader.metadata().clone();
-    let baseline_stream = baseline_reader.into_pcm_stream();
+    let baseline_reader = PcmReader::new(Cursor::new(&wav)).unwrap();
     let mut baseline_encoder = config.clone().into_encoder(Cursor::new(Vec::new()));
-    baseline_encoder.set_metadata(baseline_metadata);
-    let expected_summary = baseline_encoder.encode(baseline_stream).unwrap();
+    let expected_summary = baseline_encoder
+        .encode_source(baseline_reader.into_source())
+        .unwrap();
     let expected_output = baseline_encoder.into_inner().into_inner();
 
-    let progress_reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
-    let progress_metadata = progress_reader.metadata().clone();
-    let progress_stream = progress_reader.into_pcm_stream();
+    let progress_reader = PcmReader::new(Cursor::new(&wav)).unwrap();
     let mut progress_encoder = config.into_encoder(Cursor::new(Vec::new()));
-    progress_encoder.set_metadata(progress_metadata);
 
     let mut updates = Vec::new();
     let summary = progress_encoder
-        .encode_with_progress(progress_stream, |progress| {
+        .encode_source_with_progress(progress_reader.into_source(), |progress| {
             updates.push(progress);
             Ok(())
         })
@@ -558,6 +559,24 @@ fn explicit_reader_session_progress_matches_default_output_for_variable_schedule
             .windows(2)
             .all(|pair| pair[0].completed_frames <= pair[1].completed_frames)
     );
+}
+
+#[test]
+fn decode_source_constructor_preserves_explicit_metadata_and_stream_composition() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+    let (metadata, stream) = read_flac_reader(Cursor::new(&flac))
+        .unwrap()
+        .into_decode_source()
+        .into_parts();
+    let mut decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
+    let summary = decoder
+        .decode_source(DecodeSource::new(metadata, stream))
+        .unwrap();
+    let decoded = decoder.into_inner().into_inner();
+
+    assert_eq!(summary.total_samples, 1_024);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
 #[test]
@@ -615,9 +634,9 @@ fn read_pcm_reader_dispatches_family_peers_without_wav_bias() {
     let aiff = aiff_pcm_bytes(16, 1, 44_100, &sample_fixture(1, 64));
     let caf = caf_lpcm_bytes(16, 16, 1, 44_100, true, &sample_fixture(1, 64));
 
-    let wav_reader = read_pcm_reader(Cursor::new(&wav)).unwrap();
-    let aiff_reader = read_pcm_reader(Cursor::new(&aiff)).unwrap();
-    let caf_reader = read_pcm_reader(Cursor::new(&caf)).unwrap();
+    let wav_reader = PcmReader::new(Cursor::new(&wav)).unwrap();
+    let aiff_reader = PcmReader::new(Cursor::new(&aiff)).unwrap();
+    let caf_reader = PcmReader::new(Cursor::new(&caf)).unwrap();
 
     assert!(matches!(wav_reader, PcmReader::Wav(_)));
     assert!(matches!(aiff_reader, PcmReader::Aiff(_)));
@@ -639,13 +658,10 @@ fn explicit_decode_sessions_can_emit_peer_family_outputs() {
 
     for &(container, detector, label) in cases {
         let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
-        let metadata = reader.metadata().clone();
-        let stream = reader.into_pcm_stream();
         let mut decoder = flacx::DecodeConfig::default()
             .with_output_container(container)
             .into_decoder(Cursor::new(Vec::new()));
-        decoder.set_metadata(metadata);
-        let summary = decoder.decode(stream).unwrap();
+        let summary = decoder.decode_source(reader.into_decode_source()).unwrap();
         let decoded = decoder.into_inner().into_inner();
 
         assert_eq!(
@@ -709,16 +725,13 @@ fn encoder_session_starts_before_full_payload_consumption() {
         "reader construction should not consume the full payload"
     );
 
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
     let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
     assert!(
         *bytes_read.borrow() < wav_len,
         "binding the writer-owning encoder session should not consume the full payload"
     );
 
-    encoder.encode(stream).unwrap();
+    encoder.encode_source(reader.into_source()).unwrap();
     assert_eq!(
         *bytes_read.borrow(),
         wav_len,
@@ -739,16 +752,13 @@ fn decoder_session_starts_before_full_flac_payload_consumption() {
         "flac reader construction should not consume the full input payload"
     );
 
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
     let mut decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
-    decoder.set_metadata(metadata);
     assert!(
         *bytes_read.borrow() < flac_len,
         "binding the writer-owning decoder session should not consume the full input payload"
     );
 
-    decoder.decode(stream).unwrap();
+    decoder.decode_source(reader.into_decode_source()).unwrap();
     assert_eq!(
         *bytes_read.borrow(),
         flac_len,

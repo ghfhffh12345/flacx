@@ -5,8 +5,8 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, EncoderConfig, FlacReaderOptions, FlacRecompressSource, RecompressConfig,
-    RecompressMode, builtin::decode_bytes, level::Level, read_flac_reader_with_options,
+    DecodeConfig, EncoderConfig, FlacReaderOptions, RecompressConfig, RecompressMode,
+    builtin::decode_bytes, level::Level, read_flac_reader_with_options,
 };
 use flacx_cli::{
     DecodeCommand, EncodeCommand, RecompressCommand, decode_command, encode_command,
@@ -316,7 +316,7 @@ fn recompress_command_matches_library_output() {
         },
     )
     .unwrap();
-    let source = FlacRecompressSource::from_reader(reader);
+    let source = reader.into_recompress_source();
     let mut recompressor = config.into_recompressor(std::io::Cursor::new(Vec::new()));
     recompressor.recompress(source).unwrap();
     let library_bytes = recompressor.into_inner().into_inner();

@@ -121,8 +121,13 @@ impl<R: Read + Seek> WavReader<R> {
         &self.metadata
     }
 
-    #[must_use]
-    pub fn into_pcm_stream(self) -> WavPcmStream<R> {
+    /// Convert this reader into an owned encode source.
+    pub fn into_source(self) -> crate::input::EncodeSource<impl crate::input::EncodePcmStream> {
+        let (metadata, stream) = self.into_session_parts();
+        crate::input::EncodeSource::new(metadata, stream)
+    }
+
+    pub(crate) fn into_pcm_stream(self) -> WavPcmStream<R> {
         self.into_session_parts().1
     }
 
@@ -789,8 +794,9 @@ mod tests {
     use std::io::Cursor;
 
     use crate::{
-        config::EncoderConfig, input::EncodePcmStream, metadata::FlacMetadataBlock,
-        read_pcm_reader_with_options,
+        config::EncoderConfig,
+        input::{EncodePcmStream, PcmReaderOptions, read_pcm_reader_with_options},
+        metadata::FlacMetadataBlock,
     };
 
     use super::{WavData, WavSpec, ordinary_channel_mask, read_wav};
@@ -803,7 +809,7 @@ mod tests {
     fn parse_wav_for_encode_with_config(wav: Vec<u8>, config: &EncoderConfig) -> ParsedForEncode {
         let reader = read_pcm_reader_with_options(
             Cursor::new(wav),
-            crate::PcmReaderOptions {
+            PcmReaderOptions {
                 capture_fxmd: config.capture_fxmd,
                 strict_fxmd_validation: config.strict_fxmd_validation,
             },
@@ -1288,7 +1294,7 @@ mod tests {
 
         let result = read_pcm_reader_with_options(
             Cursor::new(wav),
-            crate::PcmReaderOptions {
+            PcmReaderOptions {
                 capture_fxmd: true,
                 strict_fxmd_validation: true,
             },

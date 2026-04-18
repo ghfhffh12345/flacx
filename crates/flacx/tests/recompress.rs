@@ -1,8 +1,8 @@
 use std::{fs, io::Cursor};
 
 use flacx::{
-    FlacReaderOptions, FlacRecompressSource, RecompressConfig, RecompressMode, RecompressSummary,
-    builtin, read_flac_reader_with_options,
+    FlacReaderOptions, RecompressConfig, RecompressMode, RecompressSummary, builtin,
+    read_flac_reader_with_options,
 };
 
 #[cfg(feature = "progress")]
@@ -36,7 +36,7 @@ fn recompress_with_config(
     input: &[u8],
 ) -> flacx::Result<(Vec<u8>, RecompressSummary)> {
     let reader = read_flac_reader_with_options(Cursor::new(input), reader_options(config))?;
-    let source = FlacRecompressSource::from_reader(reader);
+    let source = reader.into_recompress_source();
     let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
     let summary = recompressor.recompress(source)?;
     Ok((recompressor.into_inner().into_inner(), summary))
@@ -63,7 +63,7 @@ fn recompress_api_accepts_reader_first_sources_and_preserves_audio() {
         .with_threads(1)
         .with_block_size(576);
     let reader = read_flac_reader_with_options(Cursor::new(flac), reader_options(config)).unwrap();
-    let source = FlacRecompressSource::from_reader(reader);
+    let source = reader.into_recompress_source();
     let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
 
     let summary = recompressor.recompress(source).unwrap();
@@ -238,7 +238,7 @@ fn recompress_progress_reports_decode_then_encode_phases() {
     let flac = Encoder::default().encode_bytes(&wav).unwrap();
     let config = RecompressConfig::default().with_threads(1);
     let reader = read_flac_reader_with_options(Cursor::new(flac), reader_options(config)).unwrap();
-    let source = FlacRecompressSource::from_reader(reader);
+    let source = reader.into_recompress_source();
     let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
     let mut updates = Vec::<RecompressProgress>::new();
 

@@ -41,7 +41,7 @@ flacx = { version = "0.8.2", default-features = false, features = ["wav", "progr
 Canonical example:
 
 ```rust
-use flacx::{read_pcm_reader, EncoderConfig};
+use flacx::{EncoderConfig, WavReader};
 use std::{
     fs::File,
     io::{BufReader, BufWriter},
@@ -49,14 +49,12 @@ use std::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = BufReader::new(File::open("input.wav")?);
-    let reader = read_pcm_reader(input)?;
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = WavReader::new(input)?;
+    let source = reader.into_source();
 
     let output = BufWriter::new(File::create("output.flac")?);
     let mut encoder = EncoderConfig::default().into_encoder(output);
-    encoder.set_metadata(metadata);
-    encoder.encode(stream)?;
+    encoder.encode_source(source)?;
 
     Ok(())
 }
@@ -74,12 +72,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+If you are migrating from the older split metadata/stream flow, see
+[`docs/flacx-api-migration.md`](docs/flacx-api-migration.md).
+
 ### Decode FLAC to a PCM container
 
 Canonical example:
 
 ```rust
-use flacx::{read_flac_reader, DecodeConfig};
+use flacx::{DecodeConfig, FlacReader};
 use std::{
     fs::File,
     io::{BufReader, BufWriter},
@@ -87,14 +88,12 @@ use std::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = BufReader::new(File::open("input.flac")?);
-    let reader = read_flac_reader(input)?;
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = FlacReader::new(input)?;
+    let source = reader.into_decode_source();
 
     let output = BufWriter::new(File::create("output.wav")?);
     let mut decoder = DecodeConfig::default().into_decoder(output);
-    decoder.set_metadata(metadata);
-    decoder.decode(stream)?;
+    decoder.decode_source(source)?;
 
     Ok(())
 }
@@ -117,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Canonical example:
 
 ```rust
-use flacx::{read_flac_reader, FlacRecompressSource, RecompressConfig};
+use flacx::{FlacReader, RecompressConfig};
 use std::{
     fs::File,
     io::{BufReader, BufWriter},
@@ -125,8 +124,8 @@ use std::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = BufReader::new(File::open("input.flac")?);
-    let reader = read_flac_reader(input)?;
-    let source = FlacRecompressSource::from_reader(reader);
+    let reader = FlacReader::new(input)?;
+    let source = reader.into_recompress_source();
 
     let output = BufWriter::new(File::create("recompressed.flac")?);
     let mut recompressor = RecompressConfig::default().into_recompressor(output);

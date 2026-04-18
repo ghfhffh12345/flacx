@@ -2,7 +2,7 @@
 #![allow(unexpected_cfgs)]
 use flacx::{
     DecodeConfig, DecodeSummary, EncodeSummary, EncoderConfig, FlacReaderOptions, PcmContainer,
-    RawPcmByteOrder, RawPcmDescriptor, read_flac_reader_with_options, read_pcm_reader,
+    PcmReader, RawPcmByteOrder, RawPcmDescriptor, read_flac_reader_with_options,
 };
 use std::{
     env, fs,
@@ -41,12 +41,9 @@ pub fn try_encode_flac_bytes_with_config(
     config: EncoderConfig,
     input: &[u8],
 ) -> flacx::Result<Vec<u8>> {
-    let reader = read_pcm_reader(Cursor::new(input))?;
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(input))?;
     let mut encoder = config.into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    encoder.encode(stream)?;
+    encoder.encode_source(reader.into_source())?;
     Ok(encoder.into_inner().into_inner())
 }
 
@@ -60,12 +57,9 @@ pub fn try_encode_file_with_config(
     output_path: impl AsRef<std::path::Path>,
 ) -> flacx::Result<EncodeSummary> {
     let input = fs::read(input_path)?;
-    let reader = read_pcm_reader(Cursor::new(&input))?;
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = PcmReader::new(Cursor::new(&input))?;
     let mut encoder = config.into_encoder(fs::File::create(output_path)?);
-    encoder.set_metadata(metadata);
-    encoder.encode(stream)
+    encoder.encode_source(reader.into_source())
 }
 
 pub fn encode_file_with_config(
@@ -103,11 +97,8 @@ impl TestDecoder {
                 strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
             },
         )?;
-        let metadata = reader.metadata().clone();
-        let stream = reader.into_pcm_stream();
         let mut decoder = self.config.into_decoder(Cursor::new(Vec::new()));
-        decoder.set_metadata(metadata);
-        decoder.decode(stream)?;
+        decoder.decode_source(reader.into_decode_source())?;
         Ok(decoder.into_inner().into_inner())
     }
 
@@ -149,14 +140,11 @@ impl TestDecoder {
                     strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
                 },
             )?;
-            let metadata = reader.metadata().clone();
-            let stream = reader.into_pcm_stream();
             let mut decoder = self
                 .config
                 .with_output_container(output_container)
                 .into_decoder(fs::File::create(&temp_path)?);
-            decoder.set_metadata(metadata);
-            decoder.decode(stream)
+            decoder.decode_source(reader.into_decode_source())
         })();
         match result {
             Ok(summary) => {
@@ -182,11 +170,8 @@ impl TestDecoder {
                 strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
             },
         )?;
-        let metadata = reader.metadata().clone();
-        let stream = reader.into_pcm_stream();
         let mut decoder = self.config.into_decoder(output);
-        decoder.set_metadata(metadata);
-        decoder.decode(stream)
+        decoder.decode_source(reader.into_decode_source())
     }
 }
 
@@ -216,12 +201,9 @@ impl TestEncoder {
         R: Read + Seek,
         W: Write + Seek,
     {
-        let reader = read_pcm_reader(input)?;
-        let metadata = reader.metadata().clone();
-        let stream = reader.into_pcm_stream();
+        let reader = PcmReader::new(input)?;
         let mut encoder = self.config.clone().into_encoder(output);
-        encoder.set_metadata(metadata);
-        encoder.encode(stream)
+        encoder.encode_source(reader.into_source())
     }
 
     #[cfg(feature = "progress")]
@@ -236,12 +218,9 @@ impl TestEncoder {
         W: Write + Seek,
         F: FnMut(flacx::ProgressSnapshot) -> flacx::Result<()>,
     {
-        let reader = read_pcm_reader(input)?;
-        let metadata = reader.metadata().clone();
-        let stream = reader.into_pcm_stream();
+        let reader = PcmReader::new(input)?;
         let mut encoder = self.config.clone().into_encoder(output);
-        encoder.set_metadata(metadata);
-        encoder.encode_with_progress(stream, on_progress)
+        encoder.encode_source_with_progress(reader.into_source(), on_progress)
     }
 }
 

@@ -50,11 +50,10 @@ use std::{
 };
 
 use flacx::{
-    DecodeConfig, EncoderConfig, Error, FlacReaderOptions, FlacRecompressSource, PcmReaderOptions,
-    ProgressSnapshot, RawPcmDescriptor, RawPcmReader, RecompressConfig, RecompressMode,
-    RecompressPhase, RecompressProgress, Result, inspect_flac_total_samples,
+    DecodeConfig, EncoderConfig, Error, FlacReaderOptions, PcmReader, ProgressSnapshot,
+    RawPcmDescriptor, RawPcmReader, RecompressConfig, RecompressMode, RecompressPhase,
+    RecompressProgress, Result, WavReader, WavReaderOptions, inspect_flac_total_samples,
     inspect_raw_pcm_total_samples, inspect_wav_total_samples, read_flac_reader_with_options,
-    read_pcm_reader_with_options,
 };
 use walkdir::WalkDir;
 
@@ -64,6 +63,14 @@ const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const CLI_READ_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
 const CLI_WRITE_BUFFER_CAPACITY: usize = 10 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncodeInputFamily {
+    WavLike,
+    AiffLike,
+    Caf,
+    Dynamic,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeCommand {
@@ -457,29 +464,55 @@ fn run_encode_work_item(
             })
             .map(|_| ())
     } else {
-        let reader = read_pcm_reader_with_options(
-            open_buffered_reader(&item.input)?,
-            PcmReaderOptions {
-                capture_fxmd: config.capture_fxmd,
-                strict_fxmd_validation: config.strict_fxmd_validation,
-            },
-        )?;
-        let metadata = reader.metadata().clone();
-        let stream = reader.into_pcm_stream();
+        let wav_reader_options = WavReaderOptions {
+            capture_fxmd: config.capture_fxmd,
+            strict_fxmd_validation: config.strict_fxmd_validation,
+        };
         let mut encoder = config.into_encoder(create_buffered_writer(&item.output)?);
-        encoder.set_metadata(metadata);
-        encoder
-            .encode_with_progress(stream, |update| {
-                send_progress_event(
-                    sender,
-                    ProgressEvent::Progress {
-                        file_id,
-                        progress: update,
-                    },
-                )?;
-                Ok(())
-            })
-            .map(|_| ())
+        let on_progress = |update| {
+            send_progress_event(
+                sender,
+                ProgressEvent::Progress {
+                    file_id,
+                    progress: update,
+                },
+            )?;
+            Ok(())
+        };
+        match encode_input_family(&item.input) {
+            EncodeInputFamily::WavLike => encoder
+                .encode_source_with_progress(
+                    WavReader::with_reader_options(
+                        open_buffered_reader(&item.input)?,
+                        wav_reader_options,
+                    )?
+                    .into_source(),
+                    on_progress,
+                )
+                .map(|_| ()),
+            EncodeInputFamily::AiffLike => encoder
+                .encode_source_with_progress(
+                    flacx::AiffReader::new(open_buffered_reader(&item.input)?)?.into_source(),
+                    on_progress,
+                )
+                .map(|_| ()),
+            EncodeInputFamily::Caf => encoder
+                .encode_source_with_progress(
+                    flacx::CafReader::new(open_buffered_reader(&item.input)?)?.into_source(),
+                    on_progress,
+                )
+                .map(|_| ()),
+            EncodeInputFamily::Dynamic => encoder
+                .encode_source_with_progress(
+                    PcmReader::with_reader_options(
+                        open_buffered_reader(&item.input)?,
+                        wav_reader_options,
+                    )?
+                    .into_source(),
+                    on_progress,
+                )
+                .map(|_| ()),
+        }
     };
 
     result?;
@@ -527,13 +560,10 @@ pub fn decode_command(
                         strict_channel_mask_provenance: config.strict_channel_mask_provenance,
                     },
                 )?;
-                let metadata = reader.metadata().clone();
-                let stream = reader.into_pcm_stream();
                 let mut decoder = config
                     .with_output_container(output_container)
                     .into_decoder(create_buffered_writer(&item.output)?);
-                decoder.set_metadata(metadata);
-                decoder.decode_with_progress(stream, |update| {
+                decoder.decode_source_with_progress(reader.into_decode_source(), |update| {
                     send_progress_event(
                         &sender,
                         ProgressEvent::Progress {
@@ -645,7 +675,7 @@ pub fn recompress_command(
                     open_buffered_reader(&item.input)?,
                     recompress_reader_options(config),
                 )?;
-                let source = FlacRecompressSource::from_reader(reader);
+                let source = reader.into_recompress_source();
                 let mut recompressor =
                     config.into_recompressor(create_buffered_writer(&temp_output)?);
                 let result = recompressor.recompress_with_progress(source, |update| {
@@ -674,6 +704,24 @@ pub fn recompress_command(
             Ok(())
         },
     )
+}
+
+fn encode_input_family(path: &Path) -> EncodeInputFamily {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext)
+            if ext.eq_ignore_ascii_case("wav")
+                || ext.eq_ignore_ascii_case("rf64")
+                || ext.eq_ignore_ascii_case("w64") =>
+        {
+            EncodeInputFamily::WavLike
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("aif") || ext.eq_ignore_ascii_case("aiff") => {
+            EncodeInputFamily::AiffLike
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("aifc") => EncodeInputFamily::AiffLike,
+        Some(ext) if ext.eq_ignore_ascii_case("caf") => EncodeInputFamily::Caf,
+        _ => EncodeInputFamily::Dynamic,
+    }
 }
 
 fn plan_encode_worklist(command: &EncodeCommand) -> Result<PlannedWorklist> {

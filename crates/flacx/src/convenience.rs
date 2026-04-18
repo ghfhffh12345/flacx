@@ -13,7 +13,7 @@ use crate::{
     input::PcmReaderOptions,
     pcm::PcmContainer,
     read::{FlacReader, FlacReaderOptions, read_flac_reader_with_options},
-    recompress::{FlacRecompressSource, RecompressProgressSink, RecompressSummary},
+    recompress::{RecompressProgressSink, RecompressSummary},
 };
 
 pub use crate::{
@@ -59,25 +59,23 @@ where
 {
     let input_path = input_path.as_ref();
     let output_path = output_path.as_ref();
-    let (metadata, stream) = read_pcm_session_parts(
+    let reader = crate::input::PcmReader::with_options(
         open_buffered_reader(input_path)?,
         pcm_reader_options(config),
     )?;
     let mut encoder = config
         .clone()
         .into_encoder(create_buffered_writer(output_path)?);
-    encoder.set_metadata(metadata);
-    encoder.encode(stream)
+    encoder.encode_source(reader.into_source())
 }
 
 pub(crate) fn encode_bytes_with_config(config: &EncoderConfig, input: &[u8]) -> Result<Vec<u8>> {
-    let (metadata, stream) =
-        read_pcm_session_parts(Cursor::new(input), pcm_reader_options(config))?;
+    let reader =
+        crate::input::PcmReader::with_options(Cursor::new(input), pcm_reader_options(config))?;
     let mut encoder = config
         .clone()
         .into_encoder(Cursor::new(Vec::with_capacity(input.len())));
-    encoder.set_metadata(metadata);
-    encoder.encode(stream)?;
+    encoder.encode_source(reader.into_source())?;
     Ok(encoder.into_inner().into_inner())
 }
 
@@ -166,11 +164,9 @@ pub fn decode_bytes(input: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn decode_bytes_with_config(config: &DecodeConfig, input: &[u8]) -> Result<Vec<u8>> {
-    let (metadata, stream) =
-        read_flac_session_parts(Cursor::new(input), flac_reader_options(config))?;
+    let reader = read_flac_reader_with_options(Cursor::new(input), flac_reader_options(config))?;
     let mut decoder = (*config).into_decoder(Cursor::new(Vec::with_capacity(input.len())));
-    decoder.set_metadata(metadata);
-    decoder.decode(stream)?;
+    decoder.decode_source(reader.into_decode_source())?;
     Ok(decoder.into_inner().into_inner())
 }
 
@@ -206,15 +202,14 @@ where
 
     let result =
         (|| {
-            let (metadata, stream) = read_flac_session_parts(
+            let reader = read_flac_reader_with_options(
                 open_buffered_reader(input_path)?,
                 flac_reader_options(config),
             )?;
             let mut decoder = config.with_output_container(output_container).into_decoder(
                 BufWriter::with_capacity(FILE_WRITE_BUFFER_CAPACITY, temp_file),
             );
-            decoder.set_metadata(metadata);
-            let summary = decoder.decode_with_sink(stream, progress)?;
+            let summary = decoder.decode_source_with_sink(reader.into_decode_source(), progress)?;
             decoder.into_inner().flush()?;
             Ok(summary)
         })();
@@ -244,7 +239,7 @@ where
     W: Write + Seek,
     P: RecompressProgressSink,
 {
-    let source = FlacRecompressSource::from_reader(reader);
+    let source = reader.into_recompress_source();
     let mut recompressor = (*config).into_recompressor(writer);
     let summary = recompressor.recompress_with_sink(source, progress)?;
     Ok((recompressor.into_inner(), summary))
@@ -262,28 +257,6 @@ fn flac_reader_options(config: &DecodeConfig) -> FlacReaderOptions {
         strict_seektable_validation: config.strict_seektable_validation,
         strict_channel_mask_provenance: config.strict_channel_mask_provenance,
     }
-}
-
-fn read_pcm_session_parts<R: Read + Seek>(
-    reader: R,
-    options: PcmReaderOptions,
-) -> Result<(
-    crate::metadata::EncodeMetadata,
-    crate::input::AnyPcmStream<R>,
-)> {
-    Ok(crate::read_pcm_reader_with_options(reader, options)?.into_session_parts())
-}
-
-fn read_flac_session_parts<R: Read + Seek>(
-    reader: R,
-    options: FlacReaderOptions,
-) -> Result<(
-    crate::metadata::DecodeMetadata,
-    crate::read::FlacPcmStream<R>,
-)> {
-    let (metadata, _, _, stream) =
-        read_flac_reader_with_options(reader, options)?.into_session_parts();
-    Ok((metadata, stream))
 }
 
 fn open_buffered_reader(path: &Path) -> Result<BufReader<File>> {

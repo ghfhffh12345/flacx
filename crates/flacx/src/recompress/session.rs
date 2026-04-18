@@ -178,8 +178,8 @@ where
             total_samples,
         };
         let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
-        encoder.set_metadata(metadata);
         let summary = encoder.encode_buffered_pcm_with_sink(
+            metadata,
             pcm_stream,
             streaminfo_md5,
             &mut encode_progress,

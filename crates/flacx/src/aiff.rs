@@ -82,8 +82,14 @@ impl<R: Read + Seek> AiffReader<R> {
         &self.metadata
     }
 
-    #[must_use]
-    pub fn into_pcm_stream(self) -> AiffPcmStream<R> {
+    /// Convert this reader into an owned encode source.
+    pub fn into_source(self) -> crate::input::EncodeSource<impl crate::input::EncodePcmStream> {
+        let (metadata, stream) = self.into_session_parts();
+        crate::input::EncodeSource::new(metadata, stream)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn into_pcm_stream(self) -> AiffPcmStream<R> {
         self.into_session_parts().1
     }
 

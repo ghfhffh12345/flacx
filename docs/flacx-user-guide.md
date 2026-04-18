@@ -45,15 +45,15 @@ your workflow.
 | Convert one file with defaults | `builtin::encode_file`, `builtin::decode_file`, `builtin::recompress_file` |
 | Convert in-memory data | `builtin::encode_bytes`, `builtin::decode_bytes`, `builtin::recompress_bytes` |
 | Reuse settings across many jobs | `EncoderConfig::into_encoder(...)`, `DecodeConfig::into_decoder(...)`, `RecompressConfig::into_recompressor(...)` |
-| Inspect spec/metadata before encoding | `read_pcm_reader`, family readers such as `WavReader` |
+| Inspect spec/metadata before encoding | explicit family readers such as `WavReader`, or `PcmReader::new(...)` when format choice is dynamic |
 | Work with decoded samples directly | `read_flac_reader`, `write_pcm_stream` |
 | Show progress in your own UI | `*_with_progress` methods with the `progress` feature |
 
 A practical rule of thumb:
 
 - use `builtin::*` for quick one-shot conversions
-- use reader -> spec/metadata -> stream -> session when you need explicit control
-- for recompress specifically, prefer `read_flac_reader(...) -> FlacRecompressSource::from_reader(...) -> RecompressConfig::into_recompressor(...)`
+- use explicit reader -> owned source -> session when you need explicit control
+- for recompress specifically, prefer `FlacReader::new(...) -> into_recompress_source() -> RecompressConfig::into_recompressor(...)`
 - use `DecodeConfig::into_decoder(...)` or `RecompressConfig::into_recompressor(...)` when you need reusable decode/recompress sessions
 
 ## Encode PCM containers to FLAC
@@ -86,15 +86,13 @@ memory.
 ### Encode from custom readers and writers
 
 ```rust
-use flacx::{EncoderConfig, read_pcm_reader};
+use flacx::{EncoderConfig, WavReader};
 use std::fs::File;
 
-let reader = read_pcm_reader(File::open("input.wav")?)?;
-let metadata = reader.metadata().clone();
-let stream = reader.into_pcm_stream();
+let reader = WavReader::new(File::open("input.wav")?)?;
+let source = reader.into_source();
 let mut encoder = EncoderConfig::default().into_encoder(File::create("output.flac")?);
-encoder.set_metadata(metadata);
-encoder.encode(stream)?;
+encoder.encode_source(source)?;
 ```
 
 Use this style when your application already works with `Read + Seek` and
@@ -103,7 +101,7 @@ Use this style when your application already works with `Read + Seek` and
 ### Reuse one configured encoder
 
 ```rust
-use flacx::{EncoderConfig, read_pcm_reader, level::Level};
+use flacx::{EncoderConfig, WavReader, level::Level};
 use std::fs::File;
 
 let config = EncoderConfig::builder()
@@ -112,12 +110,10 @@ let config = EncoderConfig::builder()
     .build();
 
 for (input_path, output_path) in [("take01.wav", "take01.flac"), ("take02.wav", "take02.flac")] {
-    let reader = read_pcm_reader(File::open(input_path)?)?;
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
+    let reader = WavReader::new(File::open(input_path)?)?;
+    let source = reader.into_source();
     let mut encoder = config.clone().into_encoder(File::create(output_path)?);
-    encoder.set_metadata(metadata);
-    encoder.encode(stream)?;
+    encoder.encode_source(source)?;
 }
 ```
 
@@ -215,17 +211,15 @@ code instead of the filename, configure it explicitly:
 
 ```rust
 use std::io::Cursor;
-use flacx::{DecodeConfig, PcmContainer, read_flac_reader};
+use flacx::{DecodeConfig, FlacReader, PcmContainer};
 
 let flac = std::fs::read("input.flac")?;
-let reader = read_flac_reader(Cursor::new(flac))?;
-let metadata = reader.metadata().clone();
-let stream = reader.into_pcm_stream();
+let reader = FlacReader::new(Cursor::new(flac))?;
+let source = reader.into_decode_source();
 let mut decoder = DecodeConfig::default()
     .with_output_container(PcmContainer::Wave64)
     .into_decoder(Cursor::new(Vec::new()));
-decoder.set_metadata(metadata);
-decoder.decode(stream)?;
+decoder.decode_source(source)?;
 ```
 
 ### Tune decoding behavior
@@ -251,28 +245,24 @@ let config = DecodeConfig::default()
 ## Inspect spec and metadata before streaming
 
 If you want to inspect or control both sides explicitly, use the family
-reader/session flow on encode and the FLAC reader/session flow on decode.
+reader/source/session flow on encode and the FLAC reader/source/session flow on decode.
 
 ```rust
 use std::{fs::File, io::Cursor};
-use flacx::{DecodeConfig, EncoderConfig, read_flac_reader, read_pcm_reader};
+use flacx::{DecodeConfig, EncoderConfig, FlacReader, WavReader};
 
-let reader = read_pcm_reader(File::open("input.wav")?)?;
+let reader = WavReader::new(File::open("input.wav")?)?;
 let spec = reader.spec();
-let metadata = reader.metadata().clone();
-let stream = reader.into_pcm_stream();
+let source = reader.into_source();
 
 let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
-encoder.set_metadata(metadata);
-encoder.encode(stream)?;
+encoder.encode_source(source)?;
 
-let flac_reader = read_flac_reader(Cursor::new(encoder.into_inner().into_inner()))?;
+let flac_reader = FlacReader::new(Cursor::new(encoder.into_inner().into_inner()))?;
 let decoded_spec = flac_reader.spec();
-let decoded_metadata = flac_reader.metadata().clone();
-let decoded_stream = flac_reader.into_pcm_stream();
+let decoded_source = flac_reader.into_decode_source();
 let mut decoder = DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
-decoder.set_metadata(decoded_metadata);
-decoder.decode(decoded_stream)?;
+decoder.decode_source(decoded_source)?;
 
 assert!(spec.sample_rate > 0);
 assert_eq!(decoded_spec.sample_rate, spec.sample_rate);
@@ -281,7 +271,7 @@ assert_eq!(decoded_spec.sample_rate, spec.sample_rate);
 Use this path when you need to:
 
 - inspect `sample_rate`, `channels`, or `bits_per_sample` before encode or decode streaming starts
-- inspect or preserve metadata before the session starts
+- inspect or preserve metadata on the owned source before the session starts
 - choose when the sample stream begins flowing on either side
 - avoid relying on extension-based behavior
 
@@ -319,15 +309,13 @@ Then use the progress-aware methods.
 ### Encode progress
 
 ```rust
-use flacx::{EncoderConfig, ProgressSnapshot, read_pcm_reader};
+use flacx::{EncoderConfig, ProgressSnapshot, WavReader};
 use std::fs::File;
 
-let reader = read_pcm_reader(File::open("input.wav")?)?;
-let metadata = reader.metadata().clone();
-let stream = reader.into_pcm_stream();
+let reader = WavReader::new(File::open("input.wav")?)?;
+let source = reader.into_source();
 let mut encoder = EncoderConfig::default().into_encoder(File::create("output.flac")?);
-encoder.set_metadata(metadata);
-encoder.encode_with_progress(stream, |snapshot: ProgressSnapshot| {
+encoder.encode_source_with_progress(source, |snapshot: ProgressSnapshot| {
     println!(
         "encoded {} / {} samples",
         snapshot.processed_samples,
@@ -340,15 +328,13 @@ encoder.encode_with_progress(stream, |snapshot: ProgressSnapshot| {
 ### Decode progress
 
 ```rust
-use flacx::{DecodeConfig, ProgressSnapshot, read_flac_reader};
+use flacx::{DecodeConfig, FlacReader, ProgressSnapshot};
 
-let reader = read_flac_reader(std::fs::File::open("input.flac")?)?;
-let metadata = reader.metadata().clone();
-let stream = reader.into_pcm_stream();
+let reader = FlacReader::new(std::fs::File::open("input.flac")?)?;
+let source = reader.into_decode_source();
 let mut decoder = DecodeConfig::default()
     .into_decoder(std::fs::File::create("output.wav")?);
-decoder.set_metadata(metadata);
-decoder.decode_with_progress(stream, |snapshot: ProgressSnapshot| {
+decoder.decode_source_with_progress(source, |snapshot: ProgressSnapshot| {
     println!("decoded {} / {} frames", snapshot.completed_frames, snapshot.total_frames);
     Ok(())
 })?;
@@ -357,12 +343,10 @@ decoder.decode_with_progress(stream, |snapshot: ProgressSnapshot| {
 ### Recompress progress
 
 ```rust
-use flacx::{
-    FlacRecompressSource, RecompressConfig, RecompressProgress, read_flac_reader,
-};
+use flacx::{FlacReader, RecompressConfig, RecompressProgress};
 
-let reader = read_flac_reader(std::fs::File::open("input.flac")?)?;
-let source = FlacRecompressSource::from_reader(reader);
+let reader = FlacReader::new(std::fs::File::open("input.flac")?)?;
+let source = reader.into_recompress_source();
 let mut recompressor = RecompressConfig::default()
     .into_recompressor(std::fs::File::create("output.flac")?);
 recompressor.recompress_with_progress(source, |progress: RecompressProgress| {
@@ -380,16 +364,14 @@ recompressor.recompress_with_progress(source, |progress: RecompressProgress| {
 
 Use recompression when the input is already FLAC and you want a new FLAC output
 with different settings. The builtin helpers remain thin wrappers, but the
-explicit recompress story is intentionally the inspect-first reader/session
+explicit recompress story is intentionally the explicit reader/source/session
 path.
 
 ```rust
-use flacx::{
-    FlacRecompressSource, RecompressConfig, level::Level, read_flac_reader,
-};
+use flacx::{FlacReader, RecompressConfig, level::Level};
 
-let reader = read_flac_reader(std::fs::File::open("input.flac")?)?;
-let source = FlacRecompressSource::from_reader(reader);
+let reader = FlacReader::new(std::fs::File::open("input.flac")?)?;
+let source = reader.into_recompress_source();
 let mut recompressor = RecompressConfig::builder()
     .level(Level::Level5)
     .threads(4)

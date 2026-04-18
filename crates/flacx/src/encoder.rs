@@ -19,7 +19,7 @@ use crate::{
     config::{EncoderBuilder, EncoderConfig},
     encode_pipeline::{EncodedChunk, encode_frame_batch, encode_stream, write_encoded_chunk},
     error::{Error, Result},
-    input::{EncodePcmStream, PcmStream},
+    input::{EncodePcmStream, EncodeSource, PcmStream},
     metadata::EncodeMetadata,
     plan::{EncodePlan, summary_from_stream_info},
     progress::{NoProgress, ProgressSink},
@@ -49,7 +49,6 @@ pub struct EncodeSummary {
 pub struct Encoder<W> {
     config: EncoderConfig,
     writer: W,
-    metadata: EncodeMetadata,
 }
 
 impl EncoderConfig {
@@ -85,35 +84,13 @@ where
     /// Construct a writer-owning encode session from a writer and config.
     #[must_use]
     pub fn new(writer: W, config: EncoderConfig) -> Self {
-        Self {
-            config,
-            writer,
-            metadata: EncodeMetadata::default(),
-        }
+        Self { config, writer }
     }
 
     /// Return a clone of the session configuration.
     #[must_use]
     pub fn config(&self) -> EncoderConfig {
         self.config.clone()
-    }
-
-    /// Return the metadata currently staged onto the encode session.
-    #[must_use]
-    pub fn metadata(&self) -> &EncodeMetadata {
-        &self.metadata
-    }
-
-    /// Replace the staged encode metadata.
-    pub fn set_metadata(&mut self, metadata: EncodeMetadata) {
-        self.metadata = metadata;
-    }
-
-    /// Return a new session with different staged metadata.
-    #[must_use]
-    pub fn with_metadata(mut self, metadata: EncodeMetadata) -> Self {
-        self.metadata = metadata;
-        self
     }
 
     /// Return a new session with a different compression level preset.
@@ -162,6 +139,15 @@ where
         self.encode_with_sink(stream, &mut progress)
     }
 
+    /// Encode an owned source that keeps metadata and the PCM stream together.
+    pub fn encode_source<S>(&mut self, source: EncodeSource<S>) -> Result<EncodeSummary>
+    where
+        S: EncodePcmStream,
+    {
+        let mut progress = NoProgress;
+        self.encode_source_with_sink(source, &mut progress)
+    }
+
     #[cfg(feature = "progress")]
     /// Encode a single-pass PCM stream while reporting frame-level progress.
     pub fn encode_with_progress<S, F>(
@@ -177,6 +163,21 @@ where
         self.encode_with_sink(stream, &mut progress)
     }
 
+    #[cfg(feature = "progress")]
+    /// Encode an owned source while reporting frame-level progress.
+    pub fn encode_source_with_progress<S, F>(
+        &mut self,
+        source: EncodeSource<S>,
+        mut on_progress: F,
+    ) -> Result<EncodeSummary>
+    where
+        S: EncodePcmStream,
+        F: FnMut(ProgressSnapshot) -> Result<()>,
+    {
+        let mut progress = crate::progress::CallbackProgress::new(&mut on_progress);
+        self.encode_source_with_sink(source, &mut progress)
+    }
+
     pub(crate) fn encode_with_sink<S, P>(
         &mut self,
         stream: S,
@@ -186,17 +187,28 @@ where
         S: EncodePcmStream,
         P: ProgressSink,
     {
-        encode_stream(
-            &self.config,
-            self.metadata.clone(),
-            stream,
-            &mut self.writer,
+        self.encode_source_with_sink(
+            EncodeSource::new(EncodeMetadata::default(), stream),
             progress,
         )
     }
 
+    pub(crate) fn encode_source_with_sink<S, P>(
+        &mut self,
+        source: EncodeSource<S>,
+        progress: &mut P,
+    ) -> Result<EncodeSummary>
+    where
+        S: EncodePcmStream,
+        P: ProgressSink,
+    {
+        let (metadata, stream) = source.into_parts();
+        encode_stream(&self.config, metadata, stream, &mut self.writer, progress)
+    }
+
     pub(crate) fn encode_buffered_pcm_with_sink<P>(
         &mut self,
+        metadata: EncodeMetadata,
         pcm: PcmStream,
         streaminfo_md5: [u8; 16],
         progress: &mut P,
@@ -208,8 +220,8 @@ where
         let plan = EncodePlan::new(spec, self.config.clone())?;
         let mut stream_info = plan.stream_info();
         stream_info.md5 = streaminfo_md5;
-        let has_preserved_bundle = self.metadata.has_preserved_bundle();
-        let metadata_blocks = self.metadata.flac_blocks();
+        let has_preserved_bundle = metadata.has_preserved_bundle();
+        let metadata_blocks = metadata.flac_blocks();
         let mut writer = FlacWriter::new(
             &mut self.writer,
             stream_info,

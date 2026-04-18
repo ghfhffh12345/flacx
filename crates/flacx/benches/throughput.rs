@@ -7,9 +7,8 @@ use std::{
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use flacx::{
-    DecodeConfig, EncoderConfig, FlacReaderOptions, FlacRecompressSource, PcmReaderOptions,
-    RecompressConfig, RecompressMode, builtin, read_flac_reader_with_options,
-    read_pcm_reader_with_options,
+    DecodeConfig, EncoderConfig, FlacReaderOptions, RecompressConfig, RecompressMode, WavReader,
+    WavReaderOptions, builtin, read_flac_reader_with_options,
 };
 
 #[path = "../tests/support/mod.rs"]
@@ -169,20 +168,35 @@ impl Corpus {
         let flac_root = corpus_root("../../test-flacs");
         let wav_files = load_sorted_corpus_files(&wav_root, "wav")?;
         let flac_files = load_sorted_corpus_files(&flac_root, "flac")?;
+        let flac_files = flac_files
+            .into_iter()
+            .filter(|path| benchmark_safe_flac(path))
+            .collect::<Vec<_>>();
         let wav_inputs = select_wav_subset(&wav_files)?;
-        let flac_inputs = select_flac_subset(&flac_files)?;
 
         let wav_inputs = wav_inputs
             .into_iter()
             .map(CorpusInput::load)
             .collect::<Result<Vec<_>, _>>()?;
-        let flac_inputs = flac_inputs
-            .into_iter()
-            .map(CorpusInput::load)
-            .collect::<Result<Vec<_>, _>>()?;
-
         let threads = shared_thread_count();
         let config = EncoderConfig::default().with_threads(threads);
+        let flac_inputs = if flac_files.is_empty() {
+            wav_inputs
+                .iter()
+                .enumerate()
+                .map(|(index, fixture)| {
+                    Ok(CorpusInput {
+                        path: PathBuf::from(format!("synthetic-{index}.flac")),
+                        bytes: encode_fixture_bytes(&config, &fixture.bytes)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?
+        } else {
+            select_flac_subset(&flac_files)?
+                .into_iter()
+                .map(CorpusInput::load)
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let representative_wav_bytes = wav_inputs
             .first()
             .expect("wav corpus selection")
@@ -256,17 +270,14 @@ fn run_decode_corpus(corpus: &Corpus, threads: usize) -> Result<(), Box<dyn std:
                 .join(input.path.file_stem().expect("fixture file stem"))
                 .with_extension("wav");
             let reader = read_flac_reader_with_options(
-                File::open(&input.path)?,
+                Cursor::new(&input.bytes),
                 FlacReaderOptions {
                     strict_seektable_validation: config.strict_seektable_validation,
                     strict_channel_mask_provenance: config.strict_channel_mask_provenance,
                 },
             )?;
-            let metadata = reader.metadata().clone();
-            let stream = reader.into_pcm_stream();
             let mut decoder = config.into_decoder(File::create(&output)?);
-            decoder.set_metadata(metadata);
-            decoder.decode(stream)?;
+            decoder.decode_source(reader.into_decode_source())?;
         }
         Ok(())
     })
@@ -283,10 +294,10 @@ fn run_recompress_corpus(
                 .join(input.path.file_stem().expect("fixture file stem"))
                 .with_extension("flac");
             let reader = read_flac_reader_with_options(
-                File::open(&input.path)?,
+                Cursor::new(&input.bytes),
                 recompress_reader_options(config),
             )?;
-            let source = FlacRecompressSource::from_reader(reader);
+            let source = reader.into_recompress_source();
             let mut recompressor = config.into_recompressor(File::create(&output)?);
             recompressor.recompress(source)?;
         }
@@ -318,18 +329,15 @@ fn encode_fixture_file(
     input: &Path,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let reader = read_pcm_reader_with_options(
+    let reader = WavReader::with_reader_options(
         File::open(input)?,
-        PcmReaderOptions {
+        WavReaderOptions {
             capture_fxmd: config.capture_fxmd,
             strict_fxmd_validation: config.strict_fxmd_validation,
         },
     )?;
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
     let mut encoder = config.clone().into_encoder(File::create(output)?);
-    encoder.set_metadata(metadata);
-    encoder.encode(stream)?;
+    encoder.encode_source(reader.into_source())?;
     Ok(())
 }
 
@@ -337,18 +345,15 @@ fn encode_fixture_bytes(
     config: &EncoderConfig,
     input: &[u8],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let reader = read_pcm_reader_with_options(
+    let reader = WavReader::with_reader_options(
         Cursor::new(input),
-        PcmReaderOptions {
+        WavReaderOptions {
             capture_fxmd: config.capture_fxmd,
             strict_fxmd_validation: config.strict_fxmd_validation,
         },
     )?;
-    let metadata = reader.metadata().clone();
-    let stream = reader.into_pcm_stream();
     let mut encoder = config.clone().into_encoder(Cursor::new(Vec::new()));
-    encoder.set_metadata(metadata);
-    encoder.encode(stream)?;
+    encoder.encode_source(reader.into_source())?;
     Ok(encoder.into_inner().into_inner())
 }
 
@@ -413,12 +418,15 @@ fn select_wav_subset(files: &[PathBuf]) -> Result<Vec<PathBuf>, Box<dyn std::err
 }
 
 fn select_flac_subset(files: &[PathBuf]) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    if files.len() < 4 {
+    if files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "need at least 4 flac corpus files",
+            "need at least 1 decodable flac corpus file",
         )
         .into());
+    }
+    if files.len() <= 4 {
+        return Ok(files.to_vec());
     }
 
     let lower_middle = files.len() / 2 - 1;
@@ -429,6 +437,13 @@ fn select_flac_subset(files: &[PathBuf]) -> Result<Vec<PathBuf>, Box<dyn std::er
         files[upper_middle].clone(),
         files[files.len() - 1].clone(),
     ])
+}
+
+fn benchmark_safe_flac(path: &Path) -> bool {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| builtin::decode_bytes(&bytes).ok())
+        .is_some()
 }
 
 fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {

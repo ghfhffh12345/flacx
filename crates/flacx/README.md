@@ -49,12 +49,13 @@ flacx
 │  ├─ EncoderConfig / EncoderBuilder
 │  ├─ DecodeConfig / DecodeBuilder
 │  ├─ RecompressConfig / RecompressBuilder
-│  ├─ Encoder / EncodeSummary
-│  ├─ FlacReader / DecodePcmStream / Decoder / DecodeSummary
+│  ├─ EncodeSource / Encoder / EncodeSummary
+│  ├─ FlacReader / DecodeSource / Decoder / DecodeSummary
 │  ├─ FlacRecompressSource / Recompressor / RecompressSummary
 │  └─ RecompressMode / RecompressPhase / RecompressProgress
-│  ├─ PcmReader / AnyPcmStream / PcmStream / PcmStreamSpec / PcmContainer
-│  ├─ read_pcm_reader / write_pcm_stream
+│  ├─ PcmReader / PcmStream / PcmStreamSpec / PcmContainer
+│  ├─ explicit family readers + owned source conversions
+│  ├─ write_pcm_stream
 │  └─ RawPcmDescriptor / RawPcmByteOrder / inspect_raw_pcm_total_samples
 ├─ inspectors
 │  ├─ inspect_pcm_total_samples
@@ -90,8 +91,9 @@ crate root
 │  ├─ Decoder / DecodeSummary
 │  └─ FlacRecompressSource / Recompressor / RecompressSummary / RecompressMode / RecompressPhase / RecompressProgress
 ├─ typed PCM + raw PCM boundary
-│  ├─ PcmStream / PcmStreamSpec / PcmContainer
-│  ├─ read_pcm_reader / write_pcm_stream
+│  ├─ PcmReader / PcmStream / PcmStreamSpec / PcmContainer
+│  ├─ explicit family readers + `into_source()` / `into_decode_source()` / `into_recompress_source()`
+│  ├─ write_pcm_stream
 │  └─ RawPcmDescriptor / RawPcmByteOrder
 ├─ inspectors
 │  ├─ inspect_wav_total_samples
@@ -108,7 +110,7 @@ crate root
 
 | Layer | Public API surface | Ownership |
 | --- | --- | --- |
-| Explicit core | `flacx::core`, config/builders, codec façades, reader/session helpers, typed PCM helpers | The source of truth for codec configuration, reader-driven handoff, explicit encode/decode/recompress operations, and summary reporting. |
+| Explicit core | `flacx::core`, config/builders, codec façades, reader/source/session helpers, typed PCM helpers | The source of truth for codec configuration, owned source handoff, explicit encode/decode/recompress operations, and summary reporting. |
 | Builtin/orchestration | `flacx::builtin` | One-shot file and byte workflows, extension inference, and lightweight routing into the core. |
 | Support surfaces | `level`, raw PCM helpers, inspectors, progress types | Supporting concepts that remain public without becoming the main architecture story. |
 
@@ -168,7 +170,7 @@ supported PCM container family / raw PCM / FLAC
    family readers / FLAC reader
                 │
                 ▼
-     spec + metadata handoff
+      owned source handoff
                 │
                 ▼
         typed PCM boundary
@@ -206,22 +208,24 @@ These are the first place to look when the question is “what knobs does the
 public API intentionally expose?”
 
 ### Codec façades
+- `EncodeSource`
 - `Encoder`
+- `DecodeSource`
 - `Decoder`
 - `FlacRecompressSource`
 - `Recompressor`
 - `RecompressSummary`
 
-These are the stable façade/session types that express the main explicit workflows. Recompress remains public and distinct, but now follows the same inspect-first reader/session story as encode and decode.
+These are the stable façade/source/session types that express the main explicit workflows. Recompress remains public and distinct, but now follows the same explicit reader-to-source story as encode and decode.
 
 ### Typed PCM boundary
 - `PcmStream`
 - `PcmStreamSpec`
 - `PcmContainer`
-- `read_pcm_reader`
+- explicit family readers plus `PcmReader::new(...)` when format choice is truly dynamic
 - `write_pcm_stream`
 
-This is the seam between container adapters and the FLAC codec pipeline.
+This is the seam between container adapters and the FLAC codec pipeline. The preferred path is explicit reader construction followed by an owned source handoff.
 
 ### Builtin/orchestration surface
 - `builtin::encode_file`, `builtin::encode_bytes`
@@ -230,6 +234,9 @@ This is the seam between container adapters and the FLAC codec pipeline.
 
 These helpers are important, but they are wrappers around the same explicit
 surfaces above rather than a separate architectural center.
+
+For a concrete old-to-new API mapping, see
+[`docs/flacx-api-migration.md`](../../docs/flacx-api-migration.md).
 
 ## Metadata and preservation note
 

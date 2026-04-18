@@ -87,6 +87,51 @@ pub trait DecodePcmStream: EncodePcmStream {
     }
 }
 
+/// Owned decode-side handoff that keeps metadata and the PCM stream together.
+pub struct DecodeSource<S> {
+    metadata: DecodeMetadata,
+    stream: S,
+}
+
+impl<S> DecodeSource<S> {
+    /// Create a new decode source from staged metadata and a PCM stream.
+    #[must_use]
+    pub fn new(metadata: DecodeMetadata, stream: S) -> Self {
+        Self { metadata, stream }
+    }
+
+    /// Return the staged decode metadata.
+    #[must_use]
+    pub fn metadata(&self) -> &DecodeMetadata {
+        &self.metadata
+    }
+
+    /// Return mutable access to the staged decode metadata.
+    pub fn metadata_mut(&mut self) -> &mut DecodeMetadata {
+        &mut self.metadata
+    }
+
+    /// Replace the staged metadata and return the updated source.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: DecodeMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Consume the source and return the metadata and stream.
+    pub fn into_parts(self) -> (DecodeMetadata, S) {
+        (self.metadata, self.stream)
+    }
+}
+
+impl<S: DecodePcmStream> DecodeSource<S> {
+    /// Return the PCM spec that will be decoded into an output container.
+    #[must_use]
+    pub fn spec(&self) -> WavSpec {
+        self.stream.spec()
+    }
+}
+
 #[derive(Debug)]
 pub struct FlacReader<R> {
     reader: R,
@@ -116,7 +161,19 @@ impl<R: Read + Seek> FlacReader<R> {
         self.stream_info
     }
 
-    pub fn into_pcm_stream(self) -> FlacPcmStream<R> {
+    /// Convert this reader into an owned decode source.
+    pub fn into_decode_source(self) -> DecodeSource<impl DecodePcmStream> {
+        let (metadata, _, _, stream) = self.into_session_parts();
+        DecodeSource::new(metadata, stream)
+    }
+
+    /// Convert this reader into the owned FLAC recompress source.
+    pub fn into_recompress_source(self) -> crate::recompress::FlacRecompressSource<R> {
+        crate::recompress::FlacRecompressSource::from_reader(self)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn into_pcm_stream(self) -> FlacPcmStream<R> {
         self.into_session_parts().3
     }
 

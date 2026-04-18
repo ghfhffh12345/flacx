@@ -1,5 +1,5 @@
 #[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
-use flacx::{DecodeConfig, PcmContainer};
+use flacx::{DecodeConfig, PcmContainer, PcmReader};
 
 mod support;
 #[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
@@ -26,11 +26,31 @@ fn encode_rejects_aiff_family_inputs_when_feature_is_disabled() {
     }
 }
 
+#[cfg(not(feature = "aiff"))]
+#[test]
+fn pcm_reader_new_rejects_aiff_family_inputs_when_feature_is_disabled() {
+    for input in [
+        aiff_pcm_bytes(16, 1, 44_100, &sample_fixture(1, 128)),
+        aifc_pcm_bytes(*b"NONE", 16, 1, 44_100, &sample_fixture(1, 128)),
+    ] {
+        let error = PcmReader::new(std::io::Cursor::new(input)).unwrap_err();
+        assert!(error.to_string().contains("`aiff` cargo feature"));
+    }
+}
+
 #[cfg(not(feature = "caf"))]
 #[test]
 fn encode_rejects_caf_inputs_when_feature_is_disabled() {
     let input = caf_lpcm_bytes(16, 16, 2, 44_100, false, &sample_fixture(2, 128));
     let error = Encoder::default().encode_bytes(&input).unwrap_err();
+    assert!(error.to_string().contains("`caf` cargo feature"));
+}
+
+#[cfg(not(feature = "caf"))]
+#[test]
+fn pcm_reader_new_rejects_caf_inputs_when_feature_is_disabled() {
+    let input = caf_lpcm_bytes(16, 16, 2, 44_100, false, &sample_fixture(2, 128));
+    let error = PcmReader::new(std::io::Cursor::new(input)).unwrap_err();
     assert!(error.to_string().contains("`caf` cargo feature"));
 }
 

@@ -1,8 +1,9 @@
 //! FLAC-to-PCM-container decoding session primitives used by the `flacx` crate.
 //!
-//! The public decode flow is reader-driven: parse a FLAC reader, inspect its
-//! spec/metadata, bind an output writer through [`DecodeConfig::into_decoder`],
-//! then feed the resulting single-pass PCM stream into [`Decoder::decode`].
+//! The public decode flow is reader-driven: parse a FLAC reader, convert it
+//! into an owned decode source, bind an output writer through
+//! [`DecodeConfig::into_decoder`], then feed that source into
+//! [`Decoder::decode_source`].
 
 use std::io::{Seek, Write};
 
@@ -12,7 +13,7 @@ use crate::{
     error::Result,
     metadata::DecodeMetadata,
     progress::{NoProgress, ProgressSink},
-    read::DecodePcmStream,
+    read::{DecodePcmStream, DecodeSource},
 };
 
 #[cfg(feature = "progress")]
@@ -50,7 +51,6 @@ pub struct DecodeSummary {
 pub struct Decoder<W> {
     config: DecodeConfig,
     writer: W,
-    metadata: DecodeMetadata,
 }
 
 impl DecodeConfig {
@@ -86,35 +86,13 @@ where
     /// Construct a writer-owning decode session from a writer and config.
     #[must_use]
     pub fn new(writer: W, config: DecodeConfig) -> Self {
-        Self {
-            config,
-            writer,
-            metadata: DecodeMetadata::default(),
-        }
+        Self { config, writer }
     }
 
     /// Return the configuration currently stored in the decode session.
     #[must_use]
     pub fn config(&self) -> DecodeConfig {
         self.config
-    }
-
-    /// Return the metadata currently staged onto the decode session.
-    #[must_use]
-    pub fn metadata(&self) -> &DecodeMetadata {
-        &self.metadata
-    }
-
-    /// Replace the staged decode metadata.
-    pub fn set_metadata(&mut self, metadata: DecodeMetadata) {
-        self.metadata = metadata;
-    }
-
-    /// Return a new session with different staged metadata.
-    #[must_use]
-    pub fn with_metadata(mut self, metadata: DecodeMetadata) -> Self {
-        self.metadata = metadata;
-        self
     }
 
     /// Return a new decoder with a different worker thread count.
@@ -141,15 +119,13 @@ where
     /// # Example
     ///
     /// ```no_run
-    /// use flacx::{DecodeConfig, read_flac_reader};
+    /// use flacx::{DecodeConfig, FlacReader};
     ///
-    /// let reader = read_flac_reader(std::fs::File::open("input.flac").unwrap()).unwrap();
-    /// let metadata = reader.metadata().clone();
-    /// let stream = reader.into_pcm_stream();
+    /// let reader = FlacReader::new(std::fs::File::open("input.flac").unwrap()).unwrap();
+    /// let source = reader.into_decode_source();
     /// let mut decoder = DecodeConfig::default()
     ///     .into_decoder(std::io::Cursor::new(Vec::new()));
-    /// decoder.set_metadata(metadata);
-    /// decoder.decode(stream).unwrap();
+    /// decoder.decode_source(source).unwrap();
     /// ```
     pub fn decode<S>(&mut self, mut stream: S) -> Result<DecodeSummary>
     where
@@ -158,6 +134,15 @@ where
         let mut progress = NoProgress;
         stream.set_threads(self.config.threads);
         self.decode_with_sink(stream, &mut progress)
+    }
+
+    /// Decode an owned source into the owned writer.
+    pub fn decode_source<S>(&mut self, source: DecodeSource<S>) -> Result<DecodeSummary>
+    where
+        S: DecodePcmStream,
+    {
+        let mut progress = NoProgress;
+        self.decode_source_with_sink(source, &mut progress)
     }
 
     #[cfg(feature = "progress")]
@@ -176,6 +161,21 @@ where
         self.decode_with_sink(stream, &mut progress)
     }
 
+    #[cfg(feature = "progress")]
+    /// Decode an owned source into the owned writer while reporting progress.
+    pub fn decode_source_with_progress<S, F>(
+        &mut self,
+        source: DecodeSource<S>,
+        mut on_progress: F,
+    ) -> Result<DecodeSummary>
+    where
+        S: DecodePcmStream,
+        F: FnMut(ProgressSnapshot) -> Result<()>,
+    {
+        let mut progress = CallbackProgress::new(&mut on_progress);
+        self.decode_source_with_sink(source, &mut progress)
+    }
+
     pub(crate) fn decode_with_sink<S, P>(
         &mut self,
         stream: S,
@@ -185,13 +185,24 @@ where
         S: DecodePcmStream,
         P: ProgressSink,
     {
-        decode_stream_to_container(
-            stream,
-            &mut self.writer,
-            self.metadata.clone(),
-            self.config,
+        self.decode_source_with_sink(
+            DecodeSource::new(DecodeMetadata::default(), stream),
             progress,
         )
+    }
+
+    pub(crate) fn decode_source_with_sink<S, P>(
+        &mut self,
+        source: DecodeSource<S>,
+        progress: &mut P,
+    ) -> Result<DecodeSummary>
+    where
+        S: DecodePcmStream,
+        P: ProgressSink,
+    {
+        let (metadata, mut stream) = source.into_parts();
+        stream.set_threads(self.config.threads);
+        decode_stream_to_container(stream, &mut self.writer, metadata, self.config, progress)
     }
 }
 
@@ -222,12 +233,10 @@ mod tests {
 
         let result = (|| {
             let reader = read_flac_reader(fs::File::open(&input_path)?)?;
-            let metadata = reader.metadata().clone();
-            let stream = reader.into_pcm_stream();
+            let source = reader.into_decode_source();
             let mut decoder =
                 crate::DecodeConfig::default().into_decoder(fs::File::create(&output_path)?);
-            decoder.set_metadata(metadata);
-            decoder.decode(stream)
+            decoder.decode_source(source)
         })();
         assert!(result.is_err());
         assert!(!output_path.exists());

@@ -19,7 +19,7 @@ It complements:
 family readers / FLAC reader
             │
             ▼
-     spec + metadata handoff
+      owned source handoff
             │
             ▼
       typed PCM stream seam
@@ -54,12 +54,13 @@ flacx
 │  ├─ DecodeConfig / DecodeBuilder
 │  └─ RecompressConfig / RecompressBuilder
 ├─ codec façades
-│  ├─ Encoder / EncodeSummary
-│  ├─ FlacReader / DecodePcmStream / Decoder / DecodeSummary
+│  ├─ EncodeSource / Encoder / EncodeSummary
+│  ├─ FlacReader / DecodeSource / Decoder / DecodeSummary
 │  └─ FlacRecompressSource / Recompressor / RecompressSummary / RecompressMode / RecompressPhase / RecompressProgress
 ├─ typed boundary
-│  ├─ PcmStream / PcmStreamSpec / PcmContainer
-│  ├─ read_pcm_reader / write_pcm_stream
+│  ├─ PcmReader / PcmStream / PcmStreamSpec / PcmContainer
+│  ├─ explicit family readers + owned source conversions
+│  ├─ write_pcm_stream
 │  └─ RawPcmDescriptor / RawPcmByteOrder
 ├─ inspectors
 │  ├─ inspect_wav_total_samples
@@ -76,7 +77,7 @@ flacx
 
 | Layer | Public entry points | What it owns | What it should not become |
 | --- | --- | --- | --- |
-| Encode/decode spine | `core`, configs/builders, `Encoder`, `FlacReader`, `Decoder`, `FlacRecompressSource`, `Recompressor`, reader/session helpers | configuration, reader-driven handoff, typed PCM seam, explicit encode/decode/recompress operations, summaries | a path-oriented builtin story |
+| Encode/decode spine | `core`, configs/builders, `EncodeSource`, `Encoder`, `FlacReader`, `DecodeSource`, `Decoder`, `FlacRecompressSource`, `Recompressor`, reader/source/session helpers | configuration, owned source handoff, typed PCM seam, explicit encode/decode/recompress operations, summaries | a path-oriented builtin story |
 | Family peers | public typed boundary plus WAV/AIFF/CAF behavior behind the scenes | container parsing/writing and family-specific translation | a hidden WAV-default compatibility layer |
 | Builtin/orchestration | `builtin`, namespaced `*_file` / `*_bytes` helpers | one-shot path/byte routing and extension-driven ergonomics | a duplicate policy engine |
 | Support surfaces | `level`, inspector helpers, raw PCM helpers, progress types | supporting concepts adjacent to the spine | the primary conceptual center |

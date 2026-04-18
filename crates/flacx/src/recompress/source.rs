@@ -19,7 +19,7 @@ pub struct FlacRecompressSource<R> {
 impl<R: Read + Seek> FlacRecompressSource<R> {
     /// Convert an inspected [`FlacReader`] into the single-pass recompress source.
     #[must_use]
-    pub fn from_reader(reader: FlacReader<R>) -> Self {
+    pub(crate) fn from_reader(reader: FlacReader<R>) -> Self {
         let (metadata, stream_info, spec, stream) = reader.into_session_parts();
         Self {
             metadata: metadata.into_encode_metadata(),
