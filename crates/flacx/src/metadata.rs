@@ -9,8 +9,8 @@ pub(crate) use blocks::{
 #[cfg(test)]
 pub(crate) use draft::parse_cuesheet_tracks;
 pub(crate) use draft::{
-    MetadataDraft, WavInfoEntry, append_chunk_payload, append_u32_le,
-    cue_points_from_cuesheet_payload, format_channel_mask, parse_channel_layout_provenance_comment,
+    MetadataDraft, append_chunk_payload, append_u32_le, cue_points_from_cuesheet_payload,
+    format_channel_mask, normalize_cuesheet, parse_channel_layout_provenance_comment,
     parse_channel_mask_comment, raw_vorbis_comment_entry, split_vorbis_comment_entry,
     wav_info_chunk_id_for_vorbis_key,
 };
@@ -50,21 +50,154 @@ impl FxmdChunkPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct EncodeMetadata {
-    preserved: Option<PreservedMetadataBundle>,
+pub struct Metadata {
+    preserved: PreservedMetadataBundle,
     vorbis_comment: Option<VorbisCommentBlock>,
-    cuesheet: Option<CueSheetBlock>,
+    cue_points: Vec<u32>,
     channel_mask: Option<u32>,
     channel_layout_provenance: bool,
 }
 
-impl EncodeMetadata {
-    pub(crate) fn has_preserved_bundle(&self) -> bool {
-        self.preserved.is_some()
+impl Metadata {
+    /// Create an empty semantic metadata value for direct source construction.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub(crate) fn set_channel_mask(&mut self, channels: u16, mask: u32) {
-        if self.preserved.is_some() {
+    /// Return the normalized comment entries currently stored on this metadata.
+    #[must_use]
+    pub fn comments(&self) -> Vec<(&str, &str)> {
+        self.vorbis_comment
+            .as_ref()
+            .map(|block| {
+                block
+                    .entries()
+                    .iter()
+                    .filter_map(|entry| split_vorbis_comment_entry(entry))
+                    .filter(|(key, _)| {
+                        !key.eq_ignore_ascii_case(WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY)
+                            && !key.eq_ignore_ascii_case(FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Append one semantic comment entry.
+    pub fn add_comment<K, V>(&mut self, key: K, value: V)
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        self.ensure_semantic_editable();
+        self.vorbis_comment_mut()
+            .push_entry(raw_vorbis_comment_entry(key.as_ref(), value.as_ref()));
+    }
+
+    /// Replace all comment values for one key.
+    pub fn set_comments<I, S>(&mut self, key: &str, values: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.ensure_semantic_editable();
+        let preserved = self
+            .comments()
+            .into_iter()
+            .filter(|(existing_key, _)| !existing_key.eq_ignore_ascii_case(key))
+            .map(|(existing_key, value)| raw_vorbis_comment_entry(existing_key, value))
+            .collect::<Vec<_>>();
+        let mut block = VorbisCommentBlock::new(
+            format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            preserved,
+        );
+        for value in values {
+            block.push_entry(raw_vorbis_comment_entry(key, value.as_ref()));
+        }
+        self.vorbis_comment = if block.entries().is_empty() {
+            None
+        } else {
+            Some(block)
+        };
+    }
+
+    /// Remove all comment values for one key and return the number removed.
+    pub fn remove_comments(&mut self, key: &str) -> usize {
+        let removed = self
+            .comments()
+            .into_iter()
+            .filter(|(existing_key, _)| existing_key.eq_ignore_ascii_case(key))
+            .count();
+        if removed == 0 {
+            return 0;
+        }
+        self.set_comments::<Vec<&str>, &str>(key, Vec::new());
+        removed
+    }
+
+    /// Return the representable cue-point view currently stored on this metadata.
+    #[must_use]
+    pub fn cue_points(&self) -> &[u32] {
+        &self.cue_points
+    }
+
+    /// Replace the semantic cue-point list.
+    pub fn set_cue_points<I>(&mut self, cue_points: I)
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        self.ensure_semantic_editable();
+        self.cue_points = cue_points.into_iter().collect();
+    }
+
+    /// Clear the semantic cue-point list.
+    pub fn clear_cue_points(&mut self) {
+        self.ensure_semantic_editable();
+        self.cue_points.clear();
+    }
+
+    /// Return the explicit semantic channel mask when present.
+    #[must_use]
+    pub fn channel_mask(&self) -> Option<u32> {
+        self.channel_mask
+    }
+
+    /// Set an explicit semantic channel mask.
+    pub fn set_channel_mask(&mut self, mask: u32) {
+        self.ensure_semantic_editable();
+        self.channel_mask = Some(mask);
+        self.channel_layout_provenance = true;
+    }
+
+    /// Clear any explicit semantic channel mask.
+    pub fn clear_channel_mask(&mut self) {
+        self.ensure_semantic_editable();
+        self.channel_mask = None;
+    }
+
+    /// Return whether the metadata records explicit channel-layout provenance.
+    #[must_use]
+    pub fn has_channel_layout_provenance(&self) -> bool {
+        self.channel_layout_provenance
+    }
+
+    /// Control the semantic channel-layout provenance flag.
+    pub fn set_channel_layout_provenance(&mut self, value: bool) {
+        self.ensure_semantic_editable();
+        self.channel_layout_provenance = value;
+    }
+
+    pub(crate) fn has_preserved_bundle(&self) -> bool {
+        !self.preserved.is_empty()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.preserved.is_empty() && self.vorbis_comment.is_none() && self.cue_points.is_empty()
+    }
+
+    pub(crate) fn set_channel_mask_for_channels(&mut self, channels: u16, mask: u32) {
+        if self.has_preserved_bundle() {
             return;
         }
         if ordinary_channel_mask(channels).is_some_and(|ordinary| ordinary == mask) {
@@ -74,9 +207,9 @@ impl EncodeMetadata {
         self.channel_layout_provenance = true;
     }
 
-    pub(crate) fn flac_blocks(&self) -> Vec<FlacMetadataBlock> {
-        if let Some(bundle) = &self.preserved {
-            return bundle.flac_blocks();
+    pub(crate) fn flac_blocks(&self, total_samples: u64) -> Vec<FlacMetadataBlock> {
+        if !self.preserved.is_empty() {
+            return self.preserved.flac_blocks();
         }
         let mut blocks = Vec::new();
         let mut vorbis_comment = self.vorbis_comment.clone();
@@ -115,44 +248,15 @@ impl EncodeMetadata {
         if let Some(block) = vorbis_comment {
             blocks.push(FlacMetadataBlock::VorbisComment(block));
         }
-        if let Some(cuesheet) = &self.cuesheet {
-            blocks.push(FlacMetadataBlock::CueSheet(cuesheet.clone()));
+        if let Some(cuesheet) = normalize_cuesheet(
+            self.cue_points.iter().copied().map(u64::from).collect(),
+            total_samples,
+        ) {
+            blocks.push(FlacMetadataBlock::CueSheet(CueSheetBlock::from_projection(
+                &cuesheet,
+            )));
         }
         blocks
-    }
-}
-
-/// Decode-side metadata recovered from FLAC and staged for container writers.
-///
-/// The shared decode substrate uses this family-neutral model to preserve the
-/// `Reader -> spec/metadata -> PCM stream -> writer` handoff without making a
-/// specific container family the conceptual center.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DecodeMetadata {
-    preserved: PreservedMetadataBundle,
-    vorbis_comment: Option<VorbisCommentBlock>,
-    cuesheet: Option<CueSheetBlock>,
-    info_entries: Vec<WavInfoEntry>,
-    cue_points: Vec<u32>,
-    channel_mask: Option<u32>,
-    channel_layout_provenance: bool,
-}
-
-impl DecodeMetadata {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.preserved.is_empty()
-            && self.vorbis_comment.is_none()
-            && self.cuesheet.is_none()
-            && self.info_entries.is_empty()
-            && self.cue_points.is_empty()
-    }
-
-    pub(crate) fn channel_mask(&self) -> Option<u32> {
-        self.channel_mask
-    }
-
-    pub(crate) fn has_channel_layout_provenance(&self) -> bool {
-        self.channel_layout_provenance
     }
 
     pub(crate) fn ingest_flac_metadata_block(
@@ -180,15 +284,24 @@ impl DecodeMetadata {
     }
 
     pub(crate) fn list_info_chunk_payload(&self) -> Option<Vec<u8>> {
-        if self.info_entries.is_empty() {
-            return None;
-        }
-
         let mut payload = b"INFO".to_vec();
-        for entry in &self.info_entries {
-            append_chunk_payload(&mut payload, &entry.chunk_id, entry.value.as_bytes());
+        let mut count = 0usize;
+        if let Some(block) = &self.vorbis_comment {
+            for entry in block.entries() {
+                let Some((key, value)) = split_vorbis_comment_entry(entry) else {
+                    continue;
+                };
+                let Some(chunk_id) = wav_info_chunk_id_for_vorbis_key(key) else {
+                    continue;
+                };
+                if value.is_empty() {
+                    continue;
+                }
+                append_chunk_payload(&mut payload, &chunk_id, value.as_bytes());
+                count += 1;
+            }
         }
-        Some(payload)
+        (count > 0).then_some(payload)
     }
 
     pub(crate) fn cue_chunk_payload(&self) -> Option<Vec<u8>> {
@@ -209,26 +322,6 @@ impl DecodeMetadata {
         Some(payload)
     }
 
-    pub(crate) fn into_encode_metadata(self) -> EncodeMetadata {
-        if !self.preserved.is_empty() {
-            return EncodeMetadata {
-                preserved: Some(self.preserved),
-                vorbis_comment: None,
-                cuesheet: None,
-                channel_mask: None,
-                channel_layout_provenance: false,
-            };
-        }
-
-        EncodeMetadata {
-            preserved: None,
-            vorbis_comment: self.vorbis_comment,
-            cuesheet: self.cuesheet,
-            channel_mask: self.channel_mask,
-            channel_layout_provenance: self.channel_layout_provenance,
-        }
-    }
-
     fn ingest_vorbis_comment_payload(
         &mut self,
         payload: &[u8],
@@ -237,7 +330,6 @@ impl DecodeMetadata {
         let Some(block) = VorbisCommentBlock::from_flac_payload(payload) else {
             return Ok(());
         };
-        self.info_entries.clear();
         self.vorbis_comment = Some(block.clone());
         for entry in block.entries() {
             let Some((key, value)) = split_vorbis_comment_entry(entry) else {
@@ -249,34 +341,32 @@ impl DecodeMetadata {
             }
             if key.eq_ignore_ascii_case(FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY) {
                 self.channel_layout_provenance = parse_channel_layout_provenance_comment(value)?;
-                continue;
             }
-            let Some(chunk_id) = wav_info_chunk_id_for_vorbis_key(key) else {
-                continue;
-            };
-            if value.is_empty() {
-                continue;
-            }
-            self.info_entries.push(WavInfoEntry {
-                chunk_id,
-                value: value.to_owned(),
-            });
         }
         Ok(())
     }
 
     fn ingest_cuesheet_payload(&mut self, payload: &[u8], total_samples: u64) {
-        self.cuesheet = Some(CueSheetBlock::from_raw_payload(payload));
         self.cue_points = cue_points_from_cuesheet_payload(payload, total_samples);
+    }
+
+    fn ensure_semantic_editable(&mut self) {
+        if !self.preserved.is_empty() {
+            self.preserved = PreservedMetadataBundle::default();
+        }
+    }
+
+    fn vorbis_comment_mut(&mut self) -> &mut VorbisCommentBlock {
+        self.vorbis_comment.get_or_insert_with(|| {
+            VorbisCommentBlock::new(
+                format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+                Vec::new(),
+            )
+        })
     }
 }
 
-/// Backward-compatible alias for the historical decode metadata name.
-///
-/// The shared architecture now centers the neutral [`DecodeMetadata`] name, but
-/// this alias remains available so container-family modules and downstream code
-/// can migrate incrementally.
-pub type WavMetadata = DecodeMetadata;
+pub(crate) type WavMetadata = Metadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SeekPoint {
@@ -471,7 +561,7 @@ mod tests {
             )
             .unwrap();
 
-        let blocks = draft.finish(8_000).flac_blocks();
+        let blocks = draft.finish(8_000).flac_blocks(8_000);
         let FlacMetadataBlock::VorbisComment(block) = &blocks[0] else {
             panic!("expected vorbis comments");
         };
@@ -498,7 +588,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(draft.finish(8_000).flac_blocks().is_empty());
+        assert!(draft.finish(8_000).flac_blocks(8_000).is_empty());
     }
 
     #[test]
@@ -512,7 +602,7 @@ mod tests {
             )
             .unwrap();
 
-        let blocks = draft.finish(6_000).flac_blocks();
+        let blocks = draft.finish(6_000).flac_blocks(6_000);
         let FlacMetadataBlock::CueSheet(cuesheet) = &blocks[0] else {
             panic!("expected cuesheet block");
         };
@@ -530,7 +620,7 @@ mod tests {
             .ingest_chunk(*b"cue ", &cue_chunk(&[4_000]), FxmdChunkPolicy::IGNORE)
             .unwrap();
 
-        assert!(draft.finish(4_000).flac_blocks().is_empty());
+        assert!(draft.finish(4_000).flac_blocks(4_000).is_empty());
     }
 
     #[test]
@@ -601,9 +691,9 @@ mod tests {
             )
             .unwrap();
         let mut metadata = draft.finish(4_096);
-        metadata.set_channel_mask(4, 0x0001_2104);
+        metadata.set_channel_mask_for_channels(4, 0x0001_2104);
 
-        let blocks = metadata.flac_blocks();
+        let blocks = metadata.flac_blocks(4_096);
         let FlacMetadataBlock::VorbisComment(block) = &blocks[0] else {
             panic!("expected vorbis comments");
         };
@@ -674,9 +764,9 @@ mod tests {
     #[test]
     fn skips_channel_mask_comment_for_ordinary_layouts() {
         let mut metadata = MetadataDraft::default().finish(4_096);
-        metadata.set_channel_mask(4, 0x0033);
+        metadata.set_channel_mask_for_channels(4, 0x0033);
 
-        assert!(metadata.flac_blocks().is_empty());
+        assert!(metadata.flac_blocks(4_096).is_empty());
     }
 
     #[test]
@@ -731,7 +821,7 @@ mod tests {
             .ingest_flac_metadata_block(2, &application_payload(b"opaque-app"), 8_000, 1)
             .unwrap();
 
-        let blocks = metadata.into_encode_metadata().flac_blocks();
+        let blocks = metadata.flac_blocks(8_000);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_type(), 2);
         assert_eq!(blocks[0].payload(), application_payload(b"opaque-app"));

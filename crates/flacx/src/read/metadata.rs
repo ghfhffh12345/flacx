@@ -2,7 +2,7 @@ use super::{Error, FLAC_MAGIC, Result, STREAMINFO_BLOCK_TYPE, StreamInfo};
 use crate::{
     input::ordinary_channel_mask,
     metadata::{
-        DecodeMetadata, FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, SEEKTABLE_BLOCK_TYPE,
+        FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, Metadata, SEEKTABLE_BLOCK_TYPE,
         validate_seektable_payload,
     },
 };
@@ -10,7 +10,7 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom};
 
 pub(super) fn resolve_channel_mask(
     channels: u8,
-    metadata: &DecodeMetadata,
+    metadata: &Metadata,
     strict_channel_mask_provenance: bool,
 ) -> Result<u32> {
     let ordinary_mask = ordinary_channel_mask(u16::from(channels))
@@ -75,7 +75,7 @@ pub fn inspect_flac_total_samples<R: Read>(mut reader: R) -> Result<u64> {
 pub(super) fn parse_metadata(
     bytes: &[u8],
     strict_seektable_validation: bool,
-) -> Result<(StreamInfo, DecodeMetadata, usize)> {
+) -> Result<(StreamInfo, Metadata, usize)> {
     if bytes.len() < 8 {
         return Err(Error::InvalidFlac("file is too short"));
     }
@@ -86,7 +86,7 @@ pub(super) fn parse_metadata(
     let mut offset = 4usize;
     let mut saw_streaminfo = false;
     let mut stream_info = None;
-    let mut metadata = DecodeMetadata::default();
+    let mut metadata = Metadata::default();
     let mut saw_seektable = false;
     loop {
         if offset + 4 > bytes.len() {
@@ -166,7 +166,7 @@ pub(super) fn parse_metadata(
 pub(super) fn parse_metadata_from_reader<R: Read + Seek>(
     reader: &mut R,
     strict_seektable_validation: bool,
-) -> Result<(StreamInfo, DecodeMetadata, u64)> {
+) -> Result<(StreamInfo, Metadata, u64)> {
     let start = reader.stream_position()?;
     let mut magic = [0u8; 4];
     read_exact_or_invalid(reader, &mut magic, "file is too short")?;
@@ -176,7 +176,7 @@ pub(super) fn parse_metadata_from_reader<R: Read + Seek>(
 
     let mut saw_streaminfo = false;
     let mut stream_info = None;
-    let mut metadata = DecodeMetadata::default();
+    let mut metadata = Metadata::default();
     let mut saw_seektable = false;
     loop {
         let mut header = [0u8; 4];

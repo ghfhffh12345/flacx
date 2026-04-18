@@ -1,7 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{Error, Result};
-use crate::metadata::EncodeMetadata;
+use crate::metadata::Metadata;
 
 pub(crate) use crate::pcm::{
     PcmEnvelope, PcmSpec as WavSpec, PcmStream as WavData, append_encoded_sample,
@@ -31,37 +31,37 @@ pub trait EncodePcmStream {
 
 /// Owned encode-side handoff that keeps metadata and the PCM stream together.
 pub struct EncodeSource<S> {
-    metadata: EncodeMetadata,
+    metadata: Metadata,
     stream: S,
 }
 
 impl<S> EncodeSource<S> {
     /// Create a new encode source from staged metadata and a PCM stream.
     #[must_use]
-    pub fn new(metadata: EncodeMetadata, stream: S) -> Self {
+    pub fn new(metadata: Metadata, stream: S) -> Self {
         Self { metadata, stream }
     }
 
     /// Return the staged encode metadata.
     #[must_use]
-    pub fn metadata(&self) -> &EncodeMetadata {
+    pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
     /// Return mutable access to the staged encode metadata.
-    pub fn metadata_mut(&mut self) -> &mut EncodeMetadata {
+    pub fn metadata_mut(&mut self) -> &mut Metadata {
         &mut self.metadata
     }
 
     /// Replace the staged metadata and return the updated source.
     #[must_use]
-    pub fn with_metadata(mut self, metadata: EncodeMetadata) -> Self {
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
         self
     }
 
     /// Consume the source and return the metadata and stream.
-    pub fn into_parts(self) -> (EncodeMetadata, S) {
+    pub fn into_parts(self) -> (Metadata, S) {
         (self.metadata, self.stream)
     }
 }
@@ -112,7 +112,7 @@ impl<R: Read + Seek> PcmReader<R> {
 
     /// Return the parsed encode-side metadata captured from the input.
     #[must_use]
-    pub fn metadata(&self) -> &EncodeMetadata {
+    pub fn metadata(&self) -> &Metadata {
         match self {
             Self::Wav(reader) => reader.metadata(),
             #[cfg(feature = "aiff")]
@@ -137,7 +137,7 @@ impl<R: Read + Seek> PcmReader<R> {
         read_pcm_reader_with_options(reader, options)
     }
 
-    pub(crate) fn into_session_parts(self) -> (EncodeMetadata, AnyPcmStream<R>) {
+    pub(crate) fn into_session_parts(self) -> (Metadata, AnyPcmStream<R>) {
         match self {
             Self::Wav(reader) => {
                 let (metadata, stream) = reader.into_session_parts();

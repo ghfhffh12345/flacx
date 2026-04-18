@@ -11,7 +11,7 @@ use crate::{
     config::{DecodeBuilder, DecodeConfig},
     decode_output::decode_stream_to_container,
     error::Result,
-    metadata::DecodeMetadata,
+    metadata::Metadata,
     progress::{NoProgress, ProgressSink},
     read::{DecodePcmStream, DecodeSource},
 };
@@ -185,10 +185,7 @@ where
         S: DecodePcmStream,
         P: ProgressSink,
     {
-        self.decode_source_with_sink(
-            DecodeSource::new(DecodeMetadata::default(), stream),
-            progress,
-        )
+        self.decode_source_with_sink(DecodeSource::new(Metadata::default(), stream), progress)
     }
 
     pub(crate) fn decode_source_with_sink<S, P>(

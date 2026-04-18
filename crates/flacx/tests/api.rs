@@ -7,9 +7,9 @@ use std::{
 
 use flacx::{
     DecodePcmStream, DecodeSource, DecodeSummary, EncodePcmStream, EncodeSource, EncoderConfig,
-    FlacReaderOptions, PcmReader, PcmSpec, RawPcmByteOrder, RawPcmDescriptor, RecompressConfig,
-    RecompressMode, WavReader, builtin, inspect_raw_pcm_total_samples, level::Level,
-    read_flac_reader, read_flac_reader_with_options, write_pcm_stream,
+    FlacReaderOptions, Metadata, PcmReader, PcmSpec, RawPcmByteOrder, RawPcmDescriptor,
+    RecompressConfig, RecompressMode, WavReader, builtin, inspect_raw_pcm_total_samples,
+    level::Level, read_flac_reader, read_flac_reader_with_options, write_pcm_stream,
 };
 
 mod support;
@@ -18,9 +18,10 @@ mod support;
 use flacx::PcmContainer;
 use support::TestDecoder;
 use support::{
-    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, parse_first_flac_frame_header,
-    parse_wav_format, pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path,
-    wav_data_bytes,
+    ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, flac_metadata_blocks,
+    info_list_chunk, parse_first_flac_frame_header, parse_vorbis_comment_entries, parse_wav_format,
+    pcm_wav_bytes, raw_pcm_fixture, sample_fixture, unique_temp_path, wav_chunk_payloads,
+    wav_cue_points, wav_data_bytes, wav_with_chunks,
 };
 #[cfg(feature = "aiff")]
 use support::{aiff_pcm_bytes, is_aifc_bytes, is_aiff_bytes};
@@ -139,6 +140,11 @@ fn source_api_exports_replace_split_metadata_surface() {
     assert!(!lib_source.contains("read_pcm_reader_with_options,"));
     assert!(lib_source.contains("EncodeSource"));
     assert!(lib_source.contains("DecodeSource"));
+    assert!(lib_source.contains("pub use metadata::Metadata;"));
+    assert!(lib_source.contains("Metadata,"));
+    assert!(
+        !lib_source.contains("pub use metadata::{DecodeMetadata, EncodeMetadata, WavMetadata};")
+    );
 
     assert!(encoder_source.contains("pub fn encode_source<"));
     assert!(!encoder_source.contains("pub fn set_metadata("));
@@ -508,6 +514,49 @@ fn encode_source_constructor_preserves_explicit_metadata_and_stream_composition(
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
+#[test]
+fn encode_source_new_with_scratch_metadata_emits_expected_flac_and_summary() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
+    let (_, stream) = WavReader::new(Cursor::new(&wav))
+        .unwrap()
+        .into_source()
+        .into_parts();
+    let mut metadata = Metadata::new();
+    metadata.add_comment("TITLE", "Scratch Title");
+    metadata.set_cue_points([0, 512]);
+
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    let summary = encoder
+        .encode_source(EncodeSource::new(metadata, stream))
+        .unwrap();
+    let flac = encoder.into_inner().into_inner();
+    let blocks = flac_metadata_blocks(&flac);
+    let vorbis = blocks.iter().find(|block| block.block_type == 4).unwrap();
+
+    assert_eq!(summary.total_samples, 1_024);
+    assert!(blocks.iter().any(|block| block.block_type == 5));
+    assert!(
+        parse_vorbis_comment_entries(&vorbis.payload)
+            .iter()
+            .any(|(key, value)| key == "TITLE" && value == "Scratch Title")
+    );
+}
+
+#[test]
+fn shared_metadata_api_replaces_public_split_metadata_and_exposes_no_raw_authoring_surface() {
+    let lib_source = include_str!("../src/lib.rs");
+    let metadata_source = include_str!("../src/metadata.rs");
+
+    assert!(lib_source.contains("pub use metadata::Metadata;"));
+    assert!(!lib_source.contains("EncodeMetadata"));
+    assert!(!lib_source.contains("DecodeMetadata"));
+    assert!(metadata_source.contains("pub struct Metadata"));
+    assert!(!metadata_source.contains("pub struct EncodeMetadata"));
+    assert!(!metadata_source.contains("pub struct DecodeMetadata"));
+    assert!(!metadata_source.contains("pub fn from_fxmd"));
+    assert!(!metadata_source.contains("pub fn raw_"));
+}
+
 #[cfg(feature = "progress")]
 #[test]
 fn explicit_reader_session_progress_matches_default_output_for_variable_schedule() {
@@ -577,6 +626,88 @@ fn decode_source_constructor_preserves_explicit_metadata_and_stream_composition(
 
     assert_eq!(summary.total_samples, 1_024);
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+}
+
+#[test]
+fn decode_source_new_with_scratch_metadata_emits_expected_container_bytes() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+    let (_, stream) = read_flac_reader(Cursor::new(&flac))
+        .unwrap()
+        .into_decode_source()
+        .into_parts();
+    let mut metadata = Metadata::new();
+    metadata.add_comment("ARTIST", "Scratch Artist");
+    metadata.set_cue_points([128, 512]);
+
+    let mut decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
+    let summary = decoder
+        .decode_source(DecodeSource::new(metadata, stream))
+        .unwrap();
+    let decoded = decoder.into_inner().into_inner();
+    let list_chunks = wav_chunk_payloads(&decoded, *b"LIST");
+
+    assert_eq!(summary.total_samples, 1_024);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+    assert_eq!(wav_cue_points(&decoded), vec![128, 512]);
+    assert_eq!(list_chunks.len(), 1);
+    assert!(list_chunks[0].windows(4).any(|window| window == b"IART"));
+}
+
+#[test]
+fn reader_metadata_reused_via_encode_source_new_matches_reader_into_source_bytes() {
+    let wav = wav_with_chunks(
+        pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024)),
+        &[
+            (*b"LIST", info_list_chunk(&[(*b"INAM", b"Reuse Title")])),
+            (*b"cue ", cue_chunk(&[0, 512])),
+        ],
+    );
+
+    let baseline_reader = WavReader::new(Cursor::new(&wav)).unwrap();
+    let mut baseline_encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    let baseline_summary = baseline_encoder
+        .encode_source(baseline_reader.into_source())
+        .unwrap();
+    let baseline_flac = baseline_encoder.into_inner().into_inner();
+
+    let reader = WavReader::new(Cursor::new(&wav)).unwrap();
+    let metadata = reader.metadata().clone();
+    let (_, stream) = reader.into_source().into_parts();
+    let mut candidate_encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    let candidate_summary = candidate_encoder
+        .encode_source(EncodeSource::new(metadata, stream))
+        .unwrap();
+    let candidate_flac = candidate_encoder.into_inner().into_inner();
+
+    assert_eq!(candidate_summary, baseline_summary);
+    assert_eq!(candidate_flac, baseline_flac);
+}
+
+#[test]
+fn reader_metadata_reused_via_decode_source_new_matches_reader_into_decode_source_bytes() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+
+    let baseline_reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let mut baseline_decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
+    let baseline_summary = baseline_decoder
+        .decode_source(baseline_reader.into_decode_source())
+        .unwrap();
+    let baseline_output = baseline_decoder.into_inner().into_inner();
+
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let metadata = reader.metadata().clone();
+    let (_, stream) = reader.into_decode_source().into_parts();
+    let mut candidate_decoder =
+        flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
+    let candidate_summary = candidate_decoder
+        .decode_source(DecodeSource::new(metadata, stream))
+        .unwrap();
+    let candidate_output = candidate_decoder.into_inner().into_inner();
+
+    assert_eq!(candidate_summary, baseline_summary);
+    assert_eq!(candidate_output, baseline_output);
 }
 
 #[test]

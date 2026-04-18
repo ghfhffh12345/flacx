@@ -11,7 +11,7 @@ use crate::{
     config::DecodeConfig,
     error::{Error, Result},
     input::{EncodePcmStream, WavSpec},
-    metadata::DecodeMetadata,
+    metadata::Metadata,
     model::ChannelAssignment,
     progress::NoProgress,
     stream_info::StreamInfo,
@@ -89,37 +89,37 @@ pub trait DecodePcmStream: EncodePcmStream {
 
 /// Owned decode-side handoff that keeps metadata and the PCM stream together.
 pub struct DecodeSource<S> {
-    metadata: DecodeMetadata,
+    metadata: Metadata,
     stream: S,
 }
 
 impl<S> DecodeSource<S> {
     /// Create a new decode source from staged metadata and a PCM stream.
     #[must_use]
-    pub fn new(metadata: DecodeMetadata, stream: S) -> Self {
+    pub fn new(metadata: Metadata, stream: S) -> Self {
         Self { metadata, stream }
     }
 
     /// Return the staged decode metadata.
     #[must_use]
-    pub fn metadata(&self) -> &DecodeMetadata {
+    pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
     /// Return mutable access to the staged decode metadata.
-    pub fn metadata_mut(&mut self) -> &mut DecodeMetadata {
+    pub fn metadata_mut(&mut self) -> &mut Metadata {
         &mut self.metadata
     }
 
     /// Replace the staged metadata and return the updated source.
     #[must_use]
-    pub fn with_metadata(mut self, metadata: DecodeMetadata) -> Self {
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
         self
     }
 
     /// Consume the source and return the metadata and stream.
-    pub fn into_parts(self) -> (DecodeMetadata, S) {
+    pub fn into_parts(self) -> (Metadata, S) {
         (self.metadata, self.stream)
     }
 }
@@ -137,7 +137,7 @@ pub struct FlacReader<R> {
     reader: R,
     frame_offset: u64,
     stream_info: StreamInfo,
-    metadata: DecodeMetadata,
+    metadata: Metadata,
     spec: WavSpec,
 }
 
@@ -152,7 +152,7 @@ impl<R: Read + Seek> FlacReader<R> {
     }
 
     #[must_use]
-    pub fn metadata(&self) -> &DecodeMetadata {
+    pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
@@ -168,7 +168,9 @@ impl<R: Read + Seek> FlacReader<R> {
     }
 
     /// Convert this reader into the owned FLAC recompress source.
-    pub fn into_recompress_source(self) -> crate::recompress::FlacRecompressSource<R> {
+    pub fn into_recompress_source(
+        self,
+    ) -> crate::recompress::FlacRecompressSource<impl DecodePcmStream> {
         crate::recompress::FlacRecompressSource::from_reader(self)
     }
 
@@ -179,7 +181,7 @@ impl<R: Read + Seek> FlacReader<R> {
 
     pub(crate) fn into_session_parts(
         mut self,
-    ) -> (DecodeMetadata, StreamInfo, WavSpec, FlacPcmStream<R>) {
+    ) -> (Metadata, StreamInfo, WavSpec, FlacPcmStream<R>) {
         self.reader
             .seek(std::io::SeekFrom::Start(self.frame_offset))
             .expect("flac reader remains seekable through stream conversion");
@@ -456,7 +458,7 @@ fn validate_stream_info(stream_info: StreamInfo) -> Result<()> {
 
 fn spec_from_stream_info(
     stream_info: StreamInfo,
-    metadata: &DecodeMetadata,
+    metadata: &Metadata,
     strict_channel_mask_provenance: bool,
 ) -> Result<WavSpec> {
     let channel_mask = resolve_channel_mask(

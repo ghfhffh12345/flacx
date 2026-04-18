@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::{
     error::{Error, Result},
     input::WavSpec,
-    metadata::EncodeMetadata,
+    metadata::Metadata,
     pcm::{PcmEnvelope, container_bits_from_valid_bits, ordinary_channel_mask},
 };
 
@@ -47,7 +47,7 @@ struct CommonChunk {
 pub struct AiffReader<R> {
     reader: R,
     spec: WavSpec,
-    metadata: EncodeMetadata,
+    metadata: Metadata,
     envelope: PcmEnvelope,
     endianness: SampleEndianness,
 }
@@ -66,7 +66,7 @@ impl<R: Read + Seek> AiffReader<R> {
                 bytes_per_sample: layout.envelope.container_bits_per_sample / 8,
                 channel_mask: layout.envelope.channel_mask,
             },
-            metadata: EncodeMetadata::default(),
+            metadata: Metadata::default(),
             envelope: layout.envelope,
             endianness: layout.endianness,
         })
@@ -78,7 +78,7 @@ impl<R: Read + Seek> AiffReader<R> {
     }
 
     #[must_use]
-    pub fn metadata(&self) -> &EncodeMetadata {
+    pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
@@ -93,7 +93,7 @@ impl<R: Read + Seek> AiffReader<R> {
         self.into_session_parts().1
     }
 
-    pub(crate) fn into_session_parts(self) -> (EncodeMetadata, AiffPcmStream<R>) {
+    pub(crate) fn into_session_parts(self) -> (Metadata, AiffPcmStream<R>) {
         let Self {
             reader,
             spec,

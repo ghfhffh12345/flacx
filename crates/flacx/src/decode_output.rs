@@ -26,7 +26,7 @@ static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn decode_stream_to_container<S, W, P>(
     mut stream: S,
     output: &mut W,
-    metadata: crate::metadata::DecodeMetadata,
+    metadata: crate::metadata::Metadata,
     config: DecodeConfig,
     progress: &mut P,
 ) -> Result<DecodeSummary>

@@ -27,7 +27,7 @@
 //! │  │  ├─ explicit family readers + `into_source()` handoff
 //! │  │  └─ inspect_pcm_total_samples / inspect_raw_pcm_total_samples
 //! │  └─ support surfaces
-//! │     ├─ EncodeMetadata / DecodeMetadata / RawPcmDescriptor / RawPcmByteOrder
+//! │     ├─ Metadata / RawPcmDescriptor / RawPcmByteOrder
 //! │     └─ level
 //! ├─ inspectors
 //! │  ├─ inspect_wav_total_samples
@@ -170,7 +170,7 @@ pub use input::{
     EncodePcmStream, EncodeSource, PcmReader, PcmSpec, PcmSpec as PcmStreamSpec, PcmStream,
     inspect_wav_total_samples as inspect_pcm_total_samples,
 };
-pub use metadata::{DecodeMetadata, EncodeMetadata, WavMetadata};
+pub use metadata::Metadata;
 pub use pcm::PcmContainer;
 pub use raw::{
     RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream, inspect_raw_pcm_total_samples,
@@ -209,7 +209,7 @@ pub fn write_pcm_stream<W: std::io::Write>(
         writer,
         stream.spec,
         &stream.samples,
-        &metadata::WavMetadata::default(),
+        &metadata::Metadata::default(),
         wav_output::WavMetadataWriteOptions {
             emit_fxmd: false,
             container,
@@ -226,12 +226,12 @@ pub mod core {
     #[cfg(feature = "caf")]
     pub use crate::{CafPcmStream, CafReader};
     pub use crate::{
-        DecodeBuilder, DecodeConfig, DecodeMetadata, DecodePcmStream, DecodeSource, DecodeSummary,
-        Decoder, EncodeMetadata, EncodePcmStream, EncodeSource, EncodeSummary, Encoder,
-        EncoderBuilder, EncoderConfig, FlacReader, FlacReaderOptions, PcmContainer, PcmReader,
-        PcmStream, PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream,
-        RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress,
-        Recompressor, inspect_pcm_total_samples, inspect_raw_pcm_total_samples, read_flac_reader,
+        DecodeBuilder, DecodeConfig, DecodePcmStream, DecodeSource, DecodeSummary, Decoder,
+        EncodePcmStream, EncodeSource, EncodeSummary, Encoder, EncoderBuilder, EncoderConfig,
+        FlacReader, FlacReaderOptions, Metadata, PcmContainer, PcmReader, PcmStream, PcmStreamSpec,
+        RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream, RecompressBuilder,
+        RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress, Recompressor,
+        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, read_flac_reader,
         read_flac_reader_with_options, write_pcm_stream,
     };
     pub use crate::{WavPcmStream, WavReader, WavReaderOptions};

@@ -53,7 +53,7 @@ A practical rule of thumb:
 
 - use `builtin::*` for quick one-shot conversions
 - use explicit reader -> owned source -> session when you need explicit control
-- for recompress specifically, prefer `FlacReader::new(...) -> into_recompress_source() -> RecompressConfig::into_recompressor(...)`
+- for recompress specifically, prefer `FlacReader::new(...) -> into_recompress_source() -> RecompressConfig::into_recompressor(...)`, or `FlacRecompressSource::new(...)` when you already own the decode stream and expected STREAMINFO MD5
 - use `DecodeConfig::into_decoder(...)` or `RecompressConfig::into_recompressor(...)` when you need reusable decode/recompress sessions
 
 ## Encode PCM containers to FLAC
@@ -97,6 +97,27 @@ encoder.encode_source(source)?;
 
 Use this style when your application already works with `Read + Seek` and
 `Write + Seek` values.
+
+### Author metadata directly for custom source construction
+
+```rust
+use flacx::{EncoderConfig, EncodeSource, Metadata, PcmStream};
+
+let stream = PcmStream {
+    spec: todo!("your PCM spec"),
+    samples: todo!("your interleaved PCM samples"),
+};
+let mut metadata = Metadata::new();
+metadata.add_comment("TITLE", "Scratch-authored title");
+metadata.set_cue_points([0, 48_000]);
+
+let mut encoder = EncoderConfig::default().into_encoder(std::io::Cursor::new(Vec::new()));
+encoder.encode_source(EncodeSource::new(metadata, stream))?;
+```
+
+Use this path when you already own the stream and want to author semantic metadata from scratch without going through a reader first.
+
+> Note: mutating reader-derived `Metadata` switches it to semantic-authoring mode. Any opaque preserved metadata carried privately for round-trip fidelity is discarded once you make semantic edits.
 
 ### Reuse one configured encoder
 

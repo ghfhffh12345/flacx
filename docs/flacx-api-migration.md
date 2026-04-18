@@ -62,11 +62,30 @@ recompressor.recompress(source)?;
 
 ## Advanced/custom streams
 
-If you previously used public metadata staging on `Encoder` / `Decoder`, move
-that composition to source construction instead:
+The shared public `Metadata` type is now the metadata authoring center for direct source construction:
 
 - `EncodeSource::new(metadata, stream)`
 - `DecodeSource::new(metadata, stream)`
+- `FlacRecompressSource::new(metadata, stream, expected_streaminfo_md5)`
+
+Example:
+
+```rust
+use flacx::{EncodeSource, EncoderConfig, Metadata, PcmStream};
+
+let mut metadata = Metadata::new();
+metadata.add_comment("TITLE", "Scratch-authored title");
+
+let stream = PcmStream {
+    spec: todo!("your PCM spec"),
+    samples: todo!("your interleaved PCM samples"),
+};
+
+let mut encoder = EncoderConfig::default().into_encoder(std::io::Cursor::new(Vec::new()));
+encoder.encode_source(EncodeSource::new(metadata, stream))?;
+```
+
+> Note: mutating reader-derived `Metadata` switches it to semantic-authoring mode. Any opaque preserved metadata carried privately for round-trip fidelity is discarded once you make semantic edits.
 
 The public expert traits remain:
 

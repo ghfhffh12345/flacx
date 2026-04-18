@@ -1,30 +1,30 @@
 use std::io::{Read, Seek};
 
 use crate::{
-    EncodeMetadata,
+    Metadata,
     error::Result,
     input::{EncodePcmStream, PcmStream, WavSpec},
-    read::FlacReader,
+    read::{DecodePcmStream, FlacReader},
 };
 
 use super::verify::VerifyingPcmStream;
 
 /// Reader-to-session handoff for explicit FLAC recompression.
-pub struct FlacRecompressSource<R> {
-    metadata: EncodeMetadata,
-    total_samples: u64,
-    stream: VerifyingPcmStream<R>,
+pub struct FlacRecompressSource<S> {
+    metadata: Metadata,
+    stream: VerifyingPcmStream<S>,
 }
 
-impl<R: Read + Seek> FlacRecompressSource<R> {
-    /// Convert an inspected [`FlacReader`] into the single-pass recompress source.
+impl<S> FlacRecompressSource<S>
+where
+    S: DecodePcmStream,
+{
+    /// Construct a recompress source directly from shared metadata, a decode stream, and the expected STREAMINFO MD5.
     #[must_use]
-    pub(crate) fn from_reader(reader: FlacReader<R>) -> Self {
-        let (metadata, stream_info, spec, stream) = reader.into_session_parts();
+    pub fn new(metadata: Metadata, stream: S, expected_streaminfo_md5: [u8; 16]) -> Self {
         Self {
-            metadata: metadata.into_encode_metadata(),
-            total_samples: spec.total_samples,
-            stream: VerifyingPcmStream::new(stream, stream_info.md5),
+            metadata,
+            stream: VerifyingPcmStream::new(stream, expected_streaminfo_md5),
         }
     }
 
@@ -36,18 +36,18 @@ impl<R: Read + Seek> FlacRecompressSource<R> {
 
     /// Return the staged encode metadata that will be preserved on recompress.
     #[must_use]
-    pub fn metadata(&self) -> &EncodeMetadata {
+    pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
     /// Replace the staged metadata before recompression begins.
-    pub fn set_metadata(&mut self, metadata: EncodeMetadata) {
+    pub fn set_metadata(&mut self, metadata: Metadata) {
         self.metadata = metadata;
     }
 
     /// Return a new source with different staged metadata.
     #[must_use]
-    pub fn with_metadata(mut self, metadata: EncodeMetadata) -> Self {
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
         self
     }
@@ -55,7 +55,7 @@ impl<R: Read + Seek> FlacRecompressSource<R> {
     /// Return the total sample count recorded on the input FLAC stream.
     #[must_use]
     pub fn total_samples(&self) -> u64 {
-        self.total_samples
+        self.stream.spec().total_samples
     }
 
     /// Set the worker-thread count used by the decode-side FLAC reader stream.
@@ -63,13 +63,25 @@ impl<R: Read + Seek> FlacRecompressSource<R> {
         self.stream.set_threads(threads);
     }
 
-    pub(super) fn into_verified_pcm_stream(self) -> Result<(EncodeMetadata, PcmStream, [u8; 16])> {
+    pub(super) fn into_verified_pcm_stream(self) -> Result<(Metadata, PcmStream, [u8; 16])> {
         let (pcm_stream, streaminfo_md5) = self.stream.into_verified_pcm_stream()?;
         Ok((self.metadata, pcm_stream, streaminfo_md5))
     }
 }
 
-impl<R: Read + Seek> EncodePcmStream for FlacRecompressSource<R> {
+impl<R: Read + Seek> FlacRecompressSource<crate::read::FlacPcmStream<R>> {
+    /// Convert an inspected [`FlacReader`] into the single-pass recompress source.
+    #[must_use]
+    pub(crate) fn from_reader(reader: FlacReader<R>) -> Self {
+        let (metadata, stream_info, _spec, stream) = reader.into_session_parts();
+        Self::new(metadata, stream, stream_info.md5)
+    }
+}
+
+impl<S> EncodePcmStream for FlacRecompressSource<S>
+where
+    S: DecodePcmStream,
+{
     fn spec(&self) -> WavSpec {
         self.stream.spec()
     }

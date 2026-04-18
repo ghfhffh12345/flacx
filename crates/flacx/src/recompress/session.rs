@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, Write};
+use std::io::{Seek, Write};
 
 use crate::{
     encoder::{EncodeSummary, Encoder},
@@ -117,9 +117,9 @@ where
     }
 
     /// Recompress a single-pass FLAC source into the owned writer.
-    pub fn recompress<R>(&mut self, source: FlacRecompressSource<R>) -> Result<RecompressSummary>
+    pub fn recompress<S>(&mut self, source: FlacRecompressSource<S>) -> Result<RecompressSummary>
     where
-        R: Read + Seek,
+        S: crate::read::DecodePcmStream,
     {
         let mut progress = NoProgress;
         self.recompress_with_sink(source, &mut progress)
@@ -127,25 +127,25 @@ where
 
     #[cfg(feature = "progress")]
     /// Recompress a single-pass FLAC source while reporting phase-aware progress.
-    pub fn recompress_with_progress<R, F>(
+    pub fn recompress_with_progress<S, F>(
         &mut self,
-        source: FlacRecompressSource<R>,
+        source: FlacRecompressSource<S>,
         mut on_progress: F,
     ) -> Result<RecompressSummary>
     where
-        R: Read + Seek,
+        S: crate::read::DecodePcmStream,
         F: FnMut(RecompressProgress) -> Result<()>,
     {
         self.recompress_with_sink(source, &mut on_progress)
     }
 
-    pub(crate) fn recompress_with_sink<R, P>(
+    pub(crate) fn recompress_with_sink<S, P>(
         &mut self,
-        mut source: FlacRecompressSource<R>,
+        mut source: FlacRecompressSource<S>,
         progress: &mut P,
     ) -> Result<RecompressSummary>
     where
-        R: Read + Seek,
+        S: crate::read::DecodePcmStream,
         P: RecompressProgressSink,
     {
         source.set_threads(self.config.threads());

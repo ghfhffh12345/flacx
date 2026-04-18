@@ -505,7 +505,7 @@ mod tests {
                 FxmdChunkPolicy::IGNORE,
             )
             .unwrap();
-        let metadata_blocks = draft.finish(64).flac_blocks();
+        let metadata_blocks = draft.finish(64).flac_blocks(64);
         let stream_info = StreamInfo::new(44_100, 2, 16, 64, [0u8; 16]);
         let writer = Cursor::new(Vec::new());
         let mut writer = FlacWriter::new(writer, stream_info, &metadata_blocks, 1, true).unwrap();
@@ -536,7 +536,7 @@ mod tests {
                 FxmdChunkPolicy::IGNORE,
             )
             .unwrap();
-        let blocks = draft.finish(32).flac_blocks();
+        let blocks = draft.finish(32).flac_blocks(32);
 
         assert!(matches!(&blocks[..], [FlacMetadataBlock::VorbisComment(_)]));
     }

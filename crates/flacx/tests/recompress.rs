@@ -1,8 +1,8 @@
 use std::{fs, io::Cursor};
 
 use flacx::{
-    FlacReaderOptions, RecompressConfig, RecompressMode, RecompressSummary, builtin,
-    read_flac_reader_with_options,
+    FlacReaderOptions, FlacRecompressSource, Metadata, RecompressConfig, RecompressMode,
+    RecompressSummary, builtin, read_flac_reader_with_options,
 };
 
 #[cfg(feature = "progress")]
@@ -77,6 +77,63 @@ fn recompress_api_accepts_reader_first_sources_and_preserves_audio() {
     assert_eq!(summary.total_samples, 4_096);
     assert!(recompressed.starts_with(b"fLaC"));
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+}
+
+#[test]
+fn recompress_source_new_with_scratch_metadata_preserves_audio_and_verifies_md5() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let config = RecompressConfig::default()
+        .with_threads(1)
+        .with_block_size(576);
+    let reader = read_flac_reader_with_options(Cursor::new(&flac), reader_options(config)).unwrap();
+    let expected_md5 = reader.stream_info().md5;
+    let (_, stream) = reader.into_decode_source().into_parts();
+    let mut metadata = Metadata::new();
+    metadata.add_comment("TITLE", "Scratch Recompress");
+    let source = FlacRecompressSource::new(metadata, stream, expected_md5);
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+
+    let summary = recompressor.recompress(source).unwrap();
+    let recompressed = recompressor.into_inner().into_inner();
+    let decoded = DecodeHarness::default()
+        .decode_bytes(&recompressed)
+        .unwrap();
+    let blocks = flac_metadata_blocks(&recompressed);
+
+    assert_eq!(summary.total_samples, 4_096);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+    assert!(blocks.iter().any(|block| block.block_type == 4));
+}
+
+#[test]
+fn reader_metadata_reused_via_recompress_source_new_matches_reader_into_recompress_source_bytes() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let config = RecompressConfig::default()
+        .with_threads(1)
+        .with_level(flacx::level::Level::Level0)
+        .with_block_size(576);
+
+    let baseline_reader =
+        read_flac_reader_with_options(Cursor::new(&flac), reader_options(config)).unwrap();
+    let mut baseline_recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+    let baseline_summary = baseline_recompressor
+        .recompress(baseline_reader.into_recompress_source())
+        .unwrap();
+    let baseline_output = baseline_recompressor.into_inner().into_inner();
+
+    let reader = read_flac_reader_with_options(Cursor::new(&flac), reader_options(config)).unwrap();
+    let expected_md5 = reader.stream_info().md5;
+    let metadata = reader.metadata().clone();
+    let (_, stream) = reader.into_decode_source().into_parts();
+    let source = FlacRecompressSource::new(metadata, stream, expected_md5);
+    let mut candidate_recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+    let candidate_summary = candidate_recompressor.recompress(source).unwrap();
+    let candidate_output = candidate_recompressor.into_inner().into_inner();
+
+    assert_eq!(candidate_summary, baseline_summary);
+    assert_eq!(candidate_output, baseline_output);
 }
 
 #[test]

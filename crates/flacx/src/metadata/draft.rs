@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
-use super::blocks::{CueSheet, CueSheetBlock, PreservedMetadataBundle, VorbisCommentBlock};
+use super::blocks::{CueSheet, PreservedMetadataBundle, VorbisCommentBlock};
 use super::{
     CUESHEET_HEADER_LEN, CUESHEET_INDEX_LEN, CUESHEET_LEADOUT_TRACK_NUMBER,
-    CUESHEET_TRACK_HEADER_LEN, EncodeMetadata, FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY,
+    CUESHEET_TRACK_HEADER_LEN, FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY,
     FLACX_CHANNEL_LAYOUT_PROVENANCE_VALUE, FXMD_CHUNK_ID, FxmdChunkPolicy,
-    MAX_RFC9639_CHANNEL_MASK, WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
+    MAX_RFC9639_CHANNEL_MASK, Metadata, WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY,
 };
 
 #[derive(Debug, Default)]
@@ -38,35 +38,39 @@ impl MetadataDraft {
         Ok(())
     }
 
-    pub(crate) fn finish(self, total_samples: u64) -> EncodeMetadata {
+    pub(crate) fn finish(self, _total_samples: u64) -> Metadata {
         if let Some(preserved) = self.preserved {
-            return EncodeMetadata {
-                preserved: Some(preserved),
+            return Metadata {
+                preserved,
                 vorbis_comment: None,
-                cuesheet: None,
+                cue_points: Vec::new(),
                 channel_mask: None,
                 channel_layout_provenance: false,
             };
         }
-        let mut vorbis_comment = None;
-        if vorbis_comment.is_none() && !self.comments_by_key.is_empty() {
+        let vorbis_comment = if self.comments_by_key.is_empty() {
+            None
+        } else {
             let mut entries = Vec::new();
             for (key, values) in self.comments_by_key {
                 for value in values {
                     entries.push(raw_vorbis_comment_entry(&key, &value));
                 }
             }
-            vorbis_comment = Some(VorbisCommentBlock::new(
+            Some(VorbisCommentBlock::new(
                 format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
                 entries,
-            ));
-        }
+            ))
+        };
 
-        EncodeMetadata {
-            preserved: None,
+        Metadata {
+            preserved: PreservedMetadataBundle::default(),
             vorbis_comment,
-            cuesheet: normalize_cuesheet(self.cue_points, total_samples)
-                .map(|cuesheet| CueSheetBlock::from_projection(&cuesheet)),
+            cue_points: self
+                .cue_points
+                .into_iter()
+                .filter_map(|point| u32::try_from(point).ok())
+                .collect(),
             channel_mask: None,
             channel_layout_provenance: false,
         }
@@ -161,12 +165,6 @@ impl MetadataDraft {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WavInfoEntry {
-    pub(crate) chunk_id: [u8; 4],
-    pub(crate) value: String,
 }
 
 fn normalize_info_entry(chunk_id: [u8; 4], payload: &[u8]) -> Option<(String, String)> {
@@ -357,7 +355,7 @@ pub(crate) fn cue_points_from_cuesheet_payload(payload: &[u8], total_samples: u6
     cue_points
 }
 
-fn normalize_cuesheet(mut cue_points: Vec<u64>, total_samples: u64) -> Option<CueSheet> {
+pub(crate) fn normalize_cuesheet(mut cue_points: Vec<u64>, total_samples: u64) -> Option<CueSheet> {
     cue_points.retain(|offset| *offset < total_samples);
     cue_points.sort_unstable();
     cue_points.dedup();

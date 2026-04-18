@@ -20,7 +20,7 @@ use crate::{
     encode_pipeline::{EncodedChunk, encode_frame_batch, encode_stream, write_encoded_chunk},
     error::{Error, Result},
     input::{EncodePcmStream, EncodeSource, PcmStream},
-    metadata::EncodeMetadata,
+    metadata::Metadata,
     plan::{EncodePlan, summary_from_stream_info},
     progress::{NoProgress, ProgressSink},
     write::FlacWriter,
@@ -187,10 +187,7 @@ where
         S: EncodePcmStream,
         P: ProgressSink,
     {
-        self.encode_source_with_sink(
-            EncodeSource::new(EncodeMetadata::default(), stream),
-            progress,
-        )
+        self.encode_source_with_sink(EncodeSource::new(Metadata::default(), stream), progress)
     }
 
     pub(crate) fn encode_source_with_sink<S, P>(
@@ -208,7 +205,7 @@ where
 
     pub(crate) fn encode_buffered_pcm_with_sink<P>(
         &mut self,
-        metadata: EncodeMetadata,
+        metadata: Metadata,
         pcm: PcmStream,
         streaminfo_md5: [u8; 16],
         progress: &mut P,
@@ -221,7 +218,7 @@ where
         let mut stream_info = plan.stream_info();
         stream_info.md5 = streaminfo_md5;
         let has_preserved_bundle = metadata.has_preserved_bundle();
-        let metadata_blocks = metadata.flac_blocks();
+        let metadata_blocks = metadata.flac_blocks(spec.total_samples);
         let mut writer = FlacWriter::new(
             &mut self.writer,
             stream_info,

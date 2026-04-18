@@ -37,7 +37,7 @@ struct CafChannelLayout {
 pub struct CafReader<R> {
     reader: R,
     spec: crate::input::PcmSpec,
-    metadata: crate::metadata::EncodeMetadata,
+    metadata: crate::metadata::Metadata,
     descriptor: RawPcmDescriptor,
 }
 
@@ -57,7 +57,7 @@ impl<R: Read + Seek> CafReader<R> {
                 bytes_per_sample: u16::from(parsed.descriptor.container_bits_per_sample) / 8,
                 channel_mask: parsed.descriptor.channel_mask.unwrap_or_default(),
             },
-            metadata: crate::metadata::EncodeMetadata::default(),
+            metadata: crate::metadata::Metadata::default(),
             descriptor: parsed.descriptor,
         })
     }
@@ -68,7 +68,7 @@ impl<R: Read + Seek> CafReader<R> {
     }
 
     #[must_use]
-    pub fn metadata(&self) -> &crate::metadata::EncodeMetadata {
+    pub fn metadata(&self) -> &crate::metadata::Metadata {
         &self.metadata
     }
 
@@ -83,7 +83,7 @@ impl<R: Read + Seek> CafReader<R> {
         self.into_session_parts().1
     }
 
-    pub(crate) fn into_session_parts(self) -> (crate::metadata::EncodeMetadata, CafPcmStream<R>) {
+    pub(crate) fn into_session_parts(self) -> (crate::metadata::Metadata, CafPcmStream<R>) {
         let Self {
             reader,
             spec,

@@ -1,7 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::input::EncodePcmStream;
-use crate::metadata::{EncodeMetadata, FXMD_CHUNK_ID, FxmdChunkPolicy, MetadataDraft};
+use crate::metadata::{FXMD_CHUNK_ID, FxmdChunkPolicy, Metadata, MetadataDraft};
 use crate::{
     error::{Error, Result},
     pcm::{
@@ -57,7 +57,7 @@ struct FormatChunk {
 pub struct WavReader<R> {
     reader: R,
     spec: WavSpec,
-    metadata: EncodeMetadata,
+    metadata: Metadata,
     envelope: PcmEnvelope,
 }
 
@@ -100,7 +100,10 @@ impl<R: Read + Seek> WavReader<R> {
         };
         let mut metadata = layout.metadata;
         if should_preserve_channel_mask(layout.format.channels, layout.envelope.channel_mask) {
-            metadata.set_channel_mask(layout.format.channels, layout.envelope.channel_mask);
+            metadata.set_channel_mask_for_channels(
+                layout.format.channels,
+                layout.envelope.channel_mask,
+            );
         }
 
         Ok(Self {
@@ -117,7 +120,7 @@ impl<R: Read + Seek> WavReader<R> {
     }
 
     #[must_use]
-    pub fn metadata(&self) -> &EncodeMetadata {
+    pub fn metadata(&self) -> &Metadata {
         &self.metadata
     }
 
@@ -131,7 +134,7 @@ impl<R: Read + Seek> WavReader<R> {
         self.into_session_parts().1
     }
 
-    pub(crate) fn into_session_parts(self) -> (EncodeMetadata, WavPcmStream<R>) {
+    pub(crate) fn into_session_parts(self) -> (Metadata, WavPcmStream<R>) {
         let Self {
             reader,
             spec,
@@ -226,7 +229,7 @@ struct ParsedWavLayout {
     data_offset: u64,
     data_size: u64,
     total_samples: u64,
-    metadata: EncodeMetadata,
+    metadata: Metadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,7 +398,7 @@ fn parse_riff_layout_from_header<R: Read + Seek>(
         metadata: if capture_metadata {
             metadata_draft.finish(total_samples)
         } else {
-            EncodeMetadata::default()
+            Metadata::default()
         },
     })
 }
@@ -492,7 +495,7 @@ fn parse_w64_layout<R: Read + Seek>(
         metadata: if capture_metadata {
             metadata_draft.finish(total_samples)
         } else {
-            EncodeMetadata::default()
+            Metadata::default()
         },
     })
 }
@@ -803,7 +806,7 @@ mod tests {
 
     struct ParsedForEncode {
         wav: WavData,
-        metadata: crate::metadata::EncodeMetadata,
+        metadata: crate::metadata::Metadata,
     }
 
     fn parse_wav_for_encode_with_config(wav: Vec<u8>, config: &EncoderConfig) -> ParsedForEncode {
@@ -1219,7 +1222,7 @@ mod tests {
         );
 
         let parsed = parse_wav_for_encode_with_config(wav, &EncoderConfig::default());
-        let blocks = parsed.metadata.flac_blocks();
+        let blocks = parsed.metadata.flac_blocks(parsed.wav.spec.total_samples);
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
         assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
@@ -1237,7 +1240,12 @@ mod tests {
         );
 
         let parsed = parse_wav_for_encode_with_config(wav, &EncoderConfig::default());
-        assert!(parsed.metadata.flac_blocks().is_empty());
+        assert!(
+            parsed
+                .metadata
+                .flac_blocks(parsed.wav.spec.total_samples)
+                .is_empty()
+        );
         assert_eq!(parsed.wav.samples, vec![0, 1, 2, 3]);
     }
 
@@ -1256,7 +1264,7 @@ mod tests {
             wav,
             &EncoderConfig::default().with_strict_fxmd_validation(false),
         );
-        let blocks = parsed.metadata.flac_blocks();
+        let blocks = parsed.metadata.flac_blocks(parsed.wav.spec.total_samples);
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
         assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
@@ -1279,7 +1287,7 @@ mod tests {
                 .with_capture_fxmd(false)
                 .with_strict_fxmd_validation(false),
         );
-        let blocks = parsed.metadata.flac_blocks();
+        let blocks = parsed.metadata.flac_blocks(parsed.wav.spec.total_samples);
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
         assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
@@ -1322,7 +1330,7 @@ mod tests {
             &EncoderConfig::default().with_strict_fxmd_validation(false),
         );
 
-        let blocks = parsed.metadata.flac_blocks();
+        let blocks = parsed.metadata.flac_blocks(parsed.wav.spec.total_samples);
         assert_eq!(blocks.len(), 1);
         assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
     }

@@ -15,7 +15,7 @@ use crate::{
     error::{Error, Result},
     input::EncodePcmStream,
     md5::StreaminfoMd5,
-    metadata::EncodeMetadata,
+    metadata::Metadata,
     model::encode_frame,
     plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
     progress::{ProgressSink, ProgressSnapshot},
@@ -31,7 +31,7 @@ pub(crate) struct EncodedChunk {
 
 pub(crate) fn encode_stream<W, S, P>(
     config: &EncoderConfig,
-    metadata: EncodeMetadata,
+    metadata: Metadata,
     mut stream: S,
     output: &mut W,
     progress: &mut P,
@@ -45,7 +45,7 @@ where
     let plan = EncodePlan::new(spec, config.clone())?;
     let stream_info = plan.stream_info();
     let has_preserved_bundle = metadata.has_preserved_bundle();
-    let metadata_blocks = metadata.flac_blocks();
+    let metadata_blocks = metadata.flac_blocks(spec.total_samples);
     let mut writer = FlacWriter::new(
         output,
         stream_info,

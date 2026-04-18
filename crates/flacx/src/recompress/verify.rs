@@ -1,22 +1,23 @@
-use std::io::{Read, Seek};
-
 use crate::{
     error::Error,
     error::Result,
     input::{EncodePcmStream, PcmStream, WavSpec},
     md5::{StreaminfoMd5, verify_streaminfo_digest},
-    read::{DecodePcmStream, FlacPcmStream},
+    read::DecodePcmStream,
 };
 
-pub(super) struct VerifyingPcmStream<R> {
-    inner: FlacPcmStream<R>,
+pub(super) struct VerifyingPcmStream<S> {
+    inner: S,
     expected_md5: [u8; 16],
     md5: Option<StreaminfoMd5>,
     verified: bool,
 }
 
-impl<R> VerifyingPcmStream<R> {
-    pub(super) fn new(inner: FlacPcmStream<R>, expected_md5: [u8; 16]) -> Self {
+impl<S> VerifyingPcmStream<S>
+where
+    S: DecodePcmStream,
+{
+    pub(super) fn new(inner: S, expected_md5: [u8; 16]) -> Self {
         Self {
             md5: Some(StreaminfoMd5::new(inner.spec())),
             expected_md5,
@@ -34,7 +35,10 @@ impl<R> VerifyingPcmStream<R> {
     }
 }
 
-impl<R: Read + Seek> VerifyingPcmStream<R> {
+impl<S> VerifyingPcmStream<S>
+where
+    S: DecodePcmStream,
+{
     pub(super) fn into_verified_pcm_stream(mut self) -> Result<(PcmStream, [u8; 16])> {
         let spec = self.spec();
         let (samples, _frame_count) = self
@@ -52,7 +56,10 @@ impl<R: Read + Seek> VerifyingPcmStream<R> {
     }
 }
 
-impl<R: Read + Seek> EncodePcmStream for VerifyingPcmStream<R> {
+impl<S> EncodePcmStream for VerifyingPcmStream<S>
+where
+    S: DecodePcmStream,
+{
     fn spec(&self) -> WavSpec {
         self.spec()
     }
