@@ -3,7 +3,7 @@ use std::io::{Read, Seek};
 use crate::{
     Metadata,
     error::Result,
-    input::{EncodePcmStream, PcmSpec, PcmStream},
+    input::{EncodePcmStream, PcmSpec},
     read::{DecodePcmStream, FlacReader},
 };
 
@@ -66,7 +66,13 @@ where
         self.stream.set_threads(threads);
     }
 
-    pub(super) fn into_verified_pcm_stream(self) -> Result<(Metadata, PcmStream, [u8; 16])> {
+    pub(super) fn into_encode_parts(self) -> (Metadata, VerifyingPcmStream<S>) {
+        (self.metadata, self.stream)
+    }
+
+    pub(super) fn into_verified_pcm_stream(
+        self,
+    ) -> Result<(Metadata, crate::input::PcmStream, [u8; 16])> {
         let (pcm_stream, streaminfo_md5) = self.stream.into_verified_pcm_stream()?;
         Ok((self.metadata, pcm_stream, streaminfo_md5))
     }

@@ -2,6 +2,8 @@ use std::{fs, io::Cursor, thread::available_parallelism};
 
 use flacx::builtin::{decode_bytes, decode_file};
 use flacx::{DecodeConfig, EncoderConfig, PcmContainer, level::Level};
+#[cfg(feature = "progress")]
+use flacx::{DecodePcmStream, EncodePcmStream, Metadata, PcmSpec, StreamInfo};
 
 mod support;
 use support::TestDecoder as DecodeHarness;
@@ -81,6 +83,75 @@ fn assert_decode_error_stable(flac: &[u8]) {
     }
 }
 
+#[cfg(feature = "progress")]
+struct StreamingOnlyDecodeStream {
+    spec: PcmSpec,
+    stream_info: StreamInfo,
+    samples: Vec<i32>,
+    chunk_frames: usize,
+    cursor: usize,
+    completed_frames: usize,
+}
+
+#[cfg(feature = "progress")]
+impl StreamingOnlyDecodeStream {
+    fn new(spec: PcmSpec, stream_info: StreamInfo, samples: Vec<i32>, chunk_frames: usize) -> Self {
+        Self {
+            spec,
+            stream_info,
+            samples,
+            chunk_frames,
+            cursor: 0,
+            completed_frames: 0,
+        }
+    }
+}
+
+#[cfg(feature = "progress")]
+impl EncodePcmStream for StreamingOnlyDecodeStream {
+    fn spec(&self) -> PcmSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> flacx::Result<usize> {
+        let channels = usize::from(self.spec.channels);
+        let remaining_frames =
+            usize::try_from(self.spec.total_samples).unwrap() - self.cursor / channels;
+        if remaining_frames == 0 {
+            return Ok(0);
+        }
+
+        let frames = remaining_frames.min(self.chunk_frames).min(max_frames);
+        let sample_count = frames * channels;
+        let next = self.cursor + sample_count;
+        output.extend_from_slice(&self.samples[self.cursor..next]);
+        self.cursor = next;
+        self.completed_frames += 1;
+        Ok(frames)
+    }
+}
+
+#[cfg(feature = "progress")]
+impl DecodePcmStream for StreamingOnlyDecodeStream {
+    fn total_input_frames(&self) -> usize {
+        usize::try_from(self.spec.total_samples)
+            .unwrap()
+            .div_ceil(self.chunk_frames)
+    }
+
+    fn completed_input_frames(&self) -> usize {
+        self.completed_frames
+    }
+
+    fn stream_info(&self) -> StreamInfo {
+        self.stream_info
+    }
+
+    fn take_decoded_samples(&mut self) -> flacx::Result<Option<(Vec<i32>, usize)>> {
+        panic!("decode should stream through read_chunk instead of take_decoded_samples")
+    }
+}
+
 #[test]
 fn decode_config_default_threads_matches_available_parallelism() {
     let expected = available_parallelism().map(usize::from).unwrap_or(1);
@@ -90,6 +161,50 @@ fn decode_config_default_threads_matches_available_parallelism() {
 #[test]
 fn decode_config_with_threads_clamps_to_one() {
     assert_eq!(DecodeConfig::default().with_threads(0).threads, 1);
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn decode_source_prefers_streaming_chunks_over_materialized_samples() {
+    let total_samples = 8_400_000usize;
+    let chunk_frames = 4_194_304usize;
+    let samples = sample_fixture(1, total_samples);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: ordinary_channel_mask(1).expect("mono channel mask"),
+    };
+    let mut stream_info = StreamInfo::new(44_100, 1, 16, total_samples as u64, streaminfo_md5(&flac));
+    stream_info.update_block_size(4_096);
+    let mut output = Cursor::new(Vec::new());
+    let mut progress = Vec::new();
+    let mut decoder = DecodeConfig::default()
+        .with_threads(1)
+        .into_decoder(&mut output);
+
+    let summary = decoder
+        .decode_source_with_progress(
+            flacx::DecodeSource::new(
+                Metadata::new(),
+                StreamingOnlyDecodeStream::new(spec, stream_info, samples, chunk_frames),
+            ),
+            |update| {
+                progress.push(update);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(summary.total_samples, total_samples as u64);
+    assert!(progress.len() > 1, "expected multi-chunk progress updates");
+    assert_eq!(progress.first().unwrap().processed_samples, chunk_frames as u64);
+    assert_eq!(progress.last().unwrap().processed_samples, total_samples as u64);
+    assert_eq!(wav_data_bytes(&output.into_inner()), wav_data_bytes(&wav));
 }
 
 #[test]

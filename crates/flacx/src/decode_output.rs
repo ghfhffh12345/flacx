@@ -1,10 +1,8 @@
 use std::{
-    env,
     fs::{self, File, OpenOptions},
     io::{Seek, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
-    time::Instant,
 };
 
 use crate::{
@@ -22,6 +20,8 @@ use crate::{
 };
 
 static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD: u64 = 8 * 1024 * 1024;
+const DECODE_CHUNK_FRAME_MULTIPLIER: usize = 1_024;
 
 pub(crate) fn decode_stream_to_container<S, W, P>(
     mut stream: S,
@@ -38,9 +38,9 @@ where
     ensure_output_container_enabled(config.output_container)?;
     let spec = stream.spec();
     let source_info = stream.stream_info();
-    let profile_path = env::var_os("FLACX_DECODE_PROFILE").map(PathBuf::from);
-    if let Some((samples, frame_count)) = stream.take_decoded_samples()? {
-        let write_start = Instant::now();
+    if spec.total_samples <= EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD
+        && let Some((samples, frame_count)) = stream.take_decoded_samples()?
+    {
         let streaminfo_md5 = write_wav_with_metadata_and_md5_with_options(
             output,
             spec,
@@ -51,15 +51,6 @@ where
                 container: config.output_container,
             },
         )?;
-        if let Some(path) = profile_path
-            && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
-        {
-            let _ = writeln!(
-                file,
-                "event=decode_phase\tphase=write_wav\telapsed_seconds={:.9}",
-                write_start.elapsed().as_secs_f64()
-            );
-        }
         progress.on_frame(ProgressSnapshot {
             processed_samples: spec.total_samples,
             total_samples: spec.total_samples,
@@ -84,10 +75,7 @@ where
 
     let mut processed_samples = 0u64;
     let mut chunk = Vec::new();
-    let chunk_frames = usize::try_from(spec.total_samples)
-        .ok()
-        .filter(|frames| *frames > 0)
-        .unwrap_or(usize::from(source_info.max_block_size.max(1)).saturating_mul(256));
+    let chunk_frames = chunk_frames_for_stream(source_info);
     loop {
         chunk.clear();
         let frames = stream.read_chunk(chunk_frames, &mut chunk)?;
@@ -110,6 +98,10 @@ where
         source_info,
         stream.completed_input_frames(),
     ))
+}
+
+fn chunk_frames_for_stream(source_info: StreamInfo) -> usize {
+    usize::from(source_info.max_block_size.max(1)).saturating_mul(DECODE_CHUNK_FRAME_MULTIPLIER)
 }
 
 pub(crate) fn open_temp_output(output_path: &Path) -> Result<(PathBuf, File)> {

@@ -26,6 +26,18 @@ pub trait EncodePcmStream {
     ) -> Result<()> {
         md5.update_samples(samples)
     }
+
+    fn finish_streaminfo_md5(&mut self, md5: crate::md5::StreaminfoMd5) -> Result<[u8; 16]> {
+        md5.finalize()
+    }
+
+    fn preferred_encode_chunk_max_frames(&self) -> Option<usize> {
+        None
+    }
+
+    fn preferred_encode_chunk_target_pcm_frames(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Owned encode-side handoff that keeps metadata and the PCM stream together.

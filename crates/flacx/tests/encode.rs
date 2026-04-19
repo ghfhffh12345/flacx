@@ -1,6 +1,12 @@
-use std::io::Cursor;
+use std::{
+    io::Cursor,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
-use flacx::{EncoderConfig, builtin::decode_bytes};
+use flacx::{EncodePcmStream, EncoderConfig, PcmSpec, builtin::decode_bytes};
 
 mod support;
 use support::TestEncoder as Encoder;
@@ -476,6 +482,213 @@ fn public_api_requires_seekable_io_but_accepts_cursor_inputs() {
 
     assert_eq!(summary.total_samples, 2_048);
     assert!(summary.frame_count >= 1);
+}
+
+struct StreamingProbeEncodeStream {
+    spec: PcmSpec,
+    samples: Vec<i32>,
+    chunk_frames: usize,
+    requested_frames: Arc<AtomicUsize>,
+    read_calls: Arc<AtomicUsize>,
+    cursor: usize,
+}
+
+impl StreamingProbeEncodeStream {
+    fn new(
+        spec: PcmSpec,
+        samples: Vec<i32>,
+        chunk_frames: usize,
+        requested_frames: Arc<AtomicUsize>,
+        read_calls: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            spec,
+            samples,
+            chunk_frames,
+            requested_frames,
+            read_calls,
+            cursor: 0,
+        }
+    }
+}
+
+impl EncodePcmStream for StreamingProbeEncodeStream {
+    fn spec(&self) -> PcmSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> flacx::Result<usize> {
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+        self.requested_frames.store(max_frames, Ordering::Relaxed);
+
+        assert!(
+            max_frames < usize::try_from(self.spec.total_samples).unwrap(),
+            "encode requested the full PCM stream in one read_chunk call"
+        );
+
+        let remaining_frames = usize::try_from(self.spec.total_samples).unwrap()
+            - self.cursor / usize::from(self.spec.channels);
+        if remaining_frames == 0 {
+            return Ok(0);
+        }
+
+        let frames = remaining_frames.min(self.chunk_frames).min(max_frames);
+        let sample_count = frames * usize::from(self.spec.channels);
+        let next = self.cursor + sample_count;
+        output.extend_from_slice(&self.samples[self.cursor..next]);
+        self.cursor = next;
+        Ok(frames)
+    }
+}
+
+struct ValidationProbeEncodeStream {
+    spec: PcmSpec,
+    samples: Vec<i32>,
+    chunk_frames: usize,
+    extra_frames_after_eof: usize,
+    cursor: usize,
+}
+
+impl ValidationProbeEncodeStream {
+    fn new(
+        spec: PcmSpec,
+        samples: Vec<i32>,
+        chunk_frames: usize,
+        extra_frames_after_eof: usize,
+    ) -> Self {
+        Self {
+            spec,
+            samples,
+            chunk_frames,
+            extra_frames_after_eof,
+            cursor: 0,
+        }
+    }
+}
+
+impl EncodePcmStream for ValidationProbeEncodeStream {
+    fn spec(&self) -> PcmSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> flacx::Result<usize> {
+        let channels = usize::from(self.spec.channels);
+        let available_frames = self.samples.len() / channels - self.cursor / channels;
+        if available_frames > 0 {
+            let frames = available_frames.min(self.chunk_frames).min(max_frames);
+            let sample_count = frames * channels;
+            let next = self.cursor + sample_count;
+            output.extend_from_slice(&self.samples[self.cursor..next]);
+            self.cursor = next;
+            return Ok(frames);
+        }
+
+        if self.extra_frames_after_eof > 0 && max_frames > 0 {
+            self.extra_frames_after_eof -= 1;
+            output.extend(std::iter::repeat_n(0, channels));
+            return Ok(1);
+        }
+
+        Ok(0)
+    }
+}
+
+#[test]
+fn encode_uses_bounded_pcm_reads_for_multi_frame_inputs() {
+    let total_samples = 576 * 300;
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let samples = sample_fixture(1, usize::try_from(spec.total_samples).unwrap());
+    let requested_frames = Arc::new(AtomicUsize::new(0));
+    let read_calls = Arc::new(AtomicUsize::new(0));
+    let stream = StreamingProbeEncodeStream::new(
+        spec,
+        samples,
+        total_samples,
+        Arc::clone(&requested_frames),
+        Arc::clone(&read_calls),
+    );
+    let mut output = Cursor::new(Vec::new());
+
+    let mut encoder = EncoderConfig::default()
+        .with_threads(1)
+        .with_block_schedule(vec![576; 300])
+        .into_encoder(&mut output);
+    let summary = encoder.encode(stream).unwrap();
+
+    assert_eq!(summary.total_samples, spec.total_samples);
+    assert!(
+        read_calls.load(Ordering::Relaxed) > 1,
+        "expected multiple bounded read_chunk calls"
+    );
+    assert!(
+        requested_frames.load(Ordering::Relaxed) < usize::try_from(spec.total_samples).unwrap(),
+        "final read request should stay below the full input length"
+    );
+}
+
+#[test]
+fn encode_rejects_early_eof_during_chunked_reads() {
+    let total_samples = 576 * 300;
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let truncated_samples = sample_fixture(1, total_samples - 576);
+    let stream = ValidationProbeEncodeStream::new(spec, truncated_samples, total_samples, 0);
+    let mut output = Cursor::new(Vec::new());
+
+    let error = EncoderConfig::default()
+        .with_threads(1)
+        .with_block_schedule(vec![576; 300])
+        .into_encoder(&mut output)
+        .encode(stream)
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("PCM stream ended early"),
+        "{error}"
+    );
+}
+
+#[test]
+fn encode_rejects_extra_input_after_chunked_reads_complete() {
+    let total_samples = 576 * 300;
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let samples = sample_fixture(1, total_samples);
+    let stream = ValidationProbeEncodeStream::new(spec, samples, total_samples, 1);
+    let mut output = Cursor::new(Vec::new());
+
+    let error = EncoderConfig::default()
+        .with_threads(1)
+        .with_block_schedule(vec![576; 300])
+        .into_encoder(&mut output)
+        .encode(stream)
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("PCM stream produced more frames than declared in the spec"),
+        "{error}"
+    );
 }
 
 #[cfg(feature = "progress")]

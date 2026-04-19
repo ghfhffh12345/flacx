@@ -166,6 +166,16 @@ fn trace_event_index(trace: &str, event: &str, filename: &str) -> usize {
         .unwrap_or_else(|| panic!("missing {event} for {filename} in trace:\n{trace}"))
 }
 
+fn trace_event_line<'a>(trace: &'a str, event: &str, filename: &str) -> &'a str {
+    trace
+        .lines()
+        .find(|line| {
+            line.contains(&format!("event={event}"))
+                && line.contains(&format!("filename={filename}"))
+        })
+        .unwrap_or_else(|| panic!("missing {event} for {filename} in trace:\n{trace}"))
+}
+
 #[test]
 fn cli_dispatch_does_not_depend_on_builtin_shortcut_routing() {
     let source = include_str!("../src/lib.rs");
@@ -475,6 +485,59 @@ fn decode_command_emits_progress_trace_when_requested() {
     );
     let trace = fs::read_to_string(&trace_path).unwrap();
     assert_progress_trace_has_startup_events(&trace, "decode", "input.flac");
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_command_emits_decode_first_progress_trace_when_requested() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("input.flac");
+    let output_path = input_dir.join("input.recompressed.flac");
+    let trace_path = input_dir.join("progress.trace");
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 8_192));
+    let flac = Encoder::new(EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
+    fs::write(&input_path, flac).unwrap();
+
+    let output = Command::new(flacx_bin())
+        .env("FLACX_PROGRESS_TRACE", &trace_path)
+        .args([
+            "recompress",
+            input_path.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "--threads",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let trace = fs::read_to_string(&trace_path).unwrap();
+    assert!(trace.contains("event=planning_start"));
+    assert!(trace.contains("event=planning_finish"));
+    assert!(trace.contains("event=command"));
+    assert!(trace.contains("event=file_begin"));
+    assert!(trace.contains("event=file_finish"));
+    assert!(trace.contains("kind=recompress"));
+    assert!(trace.contains("filename=input.flac"));
+    assert!(trace.contains("interactive=0"));
+    assert!(trace.contains("batch_mode=0"));
+
+    let begin = trace_event_index(&trace, "file_begin", "input.flac");
+    let finish = trace_event_index(&trace, "file_finish", "input.flac");
+    assert!(begin < finish);
+
+    let begin_line = trace_event_line(&trace, "file_begin", "input.flac");
+    assert!(begin_line.contains("phase_total_samples=8192"));
+    assert!(begin_line.contains("overall_total_samples=16384"));
 
     let _ = fs::remove_dir_all(input_dir);
 }

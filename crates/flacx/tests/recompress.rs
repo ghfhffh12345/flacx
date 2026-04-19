@@ -1,5 +1,7 @@
 use std::{fs, io::Cursor};
 
+#[cfg(feature = "progress")]
+use flacx::{DecodePcmStream, EncodePcmStream, PcmSpec, StreamInfo};
 use flacx::{
     FlacReaderOptions, FlacRecompressSource, Metadata, RecompressConfig, RecompressMode,
     RecompressSummary, builtin, read_flac_reader_with_options,
@@ -17,6 +19,8 @@ use support::{
     replace_flac_optional_metadata, sample_fixture, seektable_block, unique_temp_path,
     wav_data_bytes,
 };
+#[cfg(feature = "progress")]
+use support::{ordinary_channel_mask, streaminfo_md5};
 
 fn reader_options(config: RecompressConfig) -> FlacReaderOptions {
     match config.mode() {
@@ -42,6 +46,75 @@ fn recompress_with_config(
     Ok((recompressor.into_inner().into_inner(), summary))
 }
 
+#[cfg(feature = "progress")]
+struct StreamingOnlyRecompressStream {
+    spec: PcmSpec,
+    stream_info: StreamInfo,
+    samples: Vec<i32>,
+    chunk_frames: usize,
+    cursor: usize,
+    completed_frames: usize,
+}
+
+#[cfg(feature = "progress")]
+impl StreamingOnlyRecompressStream {
+    fn new(spec: PcmSpec, stream_info: StreamInfo, samples: Vec<i32>, chunk_frames: usize) -> Self {
+        Self {
+            spec,
+            stream_info,
+            samples,
+            chunk_frames,
+            cursor: 0,
+            completed_frames: 0,
+        }
+    }
+}
+
+#[cfg(feature = "progress")]
+impl EncodePcmStream for StreamingOnlyRecompressStream {
+    fn spec(&self) -> PcmSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> flacx::Result<usize> {
+        let channels = usize::from(self.spec.channels);
+        let remaining_frames =
+            usize::try_from(self.spec.total_samples).unwrap() - self.cursor / channels;
+        if remaining_frames == 0 {
+            return Ok(0);
+        }
+
+        let frames = remaining_frames.min(self.chunk_frames).min(max_frames);
+        let sample_count = frames * channels;
+        let next = self.cursor + sample_count;
+        output.extend_from_slice(&self.samples[self.cursor..next]);
+        self.cursor = next;
+        self.completed_frames += 1;
+        Ok(frames)
+    }
+}
+
+#[cfg(feature = "progress")]
+impl DecodePcmStream for StreamingOnlyRecompressStream {
+    fn total_input_frames(&self) -> usize {
+        usize::try_from(self.spec.total_samples)
+            .unwrap()
+            .div_ceil(self.chunk_frames)
+    }
+
+    fn completed_input_frames(&self) -> usize {
+        self.completed_frames
+    }
+
+    fn stream_info(&self) -> StreamInfo {
+        self.stream_info
+    }
+
+    fn take_decoded_samples(&mut self) -> flacx::Result<Option<(Vec<i32>, usize)>> {
+        panic!("recompress should verify via read_chunk instead of take_decoded_samples")
+    }
+}
+
 #[test]
 fn builtin_recompress_bytes_matches_explicit_reader_session_flow() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
@@ -58,7 +131,9 @@ fn builtin_recompress_bytes_matches_explicit_reader_session_flow() {
 #[test]
 fn recompress_api_accepts_reader_first_sources_and_preserves_audio() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
     let config = RecompressConfig::default()
         .with_threads(1)
         .with_block_size(576);
@@ -82,7 +157,9 @@ fn recompress_api_accepts_reader_first_sources_and_preserves_audio() {
 #[test]
 fn recompress_source_new_with_scratch_metadata_preserves_audio_and_verifies_md5() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
     let config = RecompressConfig::default()
         .with_threads(1)
         .with_block_size(576);
@@ -109,7 +186,9 @@ fn recompress_source_new_with_scratch_metadata_preserves_audio_and_verifies_md5(
 #[test]
 fn reader_metadata_reused_via_recompress_source_new_matches_reader_into_recompress_source_bytes() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
     let config = RecompressConfig::default()
         .with_threads(1)
         .with_level(flacx::level::Level::Level0)
@@ -160,7 +239,9 @@ fn builtin_recompress_file_matches_explicit_reader_session_output() {
 #[test]
 fn recompress_is_deterministic_for_repeat_runs() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
     let config = RecompressConfig::default()
         .with_threads(1)
         .with_level(flacx::level::Level::Level0)
@@ -176,7 +257,9 @@ fn recompress_is_deterministic_for_repeat_runs() {
 #[test]
 fn recompress_produces_identical_output_across_thread_counts() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
     let single_threaded = recompress_with_config(
         RecompressConfig::default()
             .with_threads(1)
@@ -275,17 +358,70 @@ fn recompress_builder_matches_fluent_config() {
 }
 
 #[test]
-fn recompress_verifier_keeps_the_full_decode_fast_path_available() {
-    let source = include_str!("../src/recompress/verify.rs");
-    assert!(source.contains("take_decoded_samples"));
+fn recompress_verifier_limits_take_decoded_samples_to_bounded_small_inputs() {
+    let verify_source = include_str!("../src/recompress/verify.rs");
+    let session_source = include_str!("../src/recompress/session.rs");
+    assert!(verify_source.contains("into_verified_pcm_stream"));
+    assert!(session_source.contains("EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD"));
 }
 
 #[test]
-fn recompress_session_keeps_the_buffered_encode_fast_path() {
+fn recompress_session_avoids_buffered_encode_handoff() {
     let source = include_str!("../src/recompress/session.rs");
     assert!(source.contains("into_verified_pcm_stream()?"));
+    assert!(source.contains("into_encode_parts()"));
     assert!(source.contains("encode_buffered_pcm_with_sink"));
-    assert!(!source.contains("encoder.encode(pcm_stream)"));
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn recompress_source_streams_verified_pcm_without_materializing_samples() {
+    let samples = sample_fixture(1, 2_048);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
+    let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: 2_048,
+        bytes_per_sample: 2,
+        channel_mask: ordinary_channel_mask(1).expect("mono channel mask"),
+    };
+    let mut stream_info = StreamInfo::new(44_100, 1, 16, 2_048, streaminfo_md5(&flac));
+    stream_info.update_block_size(512);
+    let mut updates = Vec::<RecompressProgress>::new();
+    let mut recompressor = RecompressConfig::default()
+        .with_threads(1)
+        .with_block_size(576)
+        .into_recompressor(Cursor::new(Vec::new()));
+
+    let summary = recompressor
+        .recompress_with_progress(
+            FlacRecompressSource::new(
+                Metadata::new(),
+                StreamingOnlyRecompressStream::new(spec, stream_info, samples, 512),
+                streaminfo_md5(&flac),
+            ),
+            |progress| {
+                updates.push(progress);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    let decoded = DecodeHarness::default()
+        .decode_bytes(&recompressor.into_inner().into_inner())
+        .unwrap();
+    assert_eq!(summary.total_samples, 2_048);
+    assert_eq!(updates.first().unwrap().phase, RecompressPhase::Decode);
+    assert!(
+        updates
+            .iter()
+            .any(|progress| progress.phase == RecompressPhase::Encode)
+    );
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
 #[cfg(feature = "progress")]

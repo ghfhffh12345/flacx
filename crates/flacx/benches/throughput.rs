@@ -104,6 +104,51 @@ fn builtin_bytes_recompress(c: &mut Criterion) {
     group.finish();
 }
 
+fn encode_multiframe_streaming_path(c: &mut Criterion) {
+    let corpus = Corpus::load().expect("benchmark corpus");
+    let config = EncoderConfig::default()
+        .with_threads(shared_thread_count())
+        .with_block_schedule(vec![576, 1_152, 576, 2_304, 4_096, 576, 1_152]);
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(
+        corpus.encode_streaming_wav_bytes.len() as u64
+    ));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("encode_multiframe_streaming_path", |b| {
+        b.iter(|| {
+            encode_fixture_bytes(&config, &corpus.encode_streaming_wav_bytes)
+                .expect("encode multiframe streaming path")
+        })
+    });
+    group.finish();
+}
+
+fn recompress_streaming_verify_handoff(c: &mut Criterion) {
+    let corpus = Corpus::load().expect("benchmark corpus");
+    let config = RecompressConfig::default().with_threads(shared_thread_count());
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(
+        corpus.recompress_streaming_flac_bytes.len() as u64,
+    ));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("recompress_streaming_verify_handoff", |b| {
+        b.iter(|| {
+            let reader = read_flac_reader_with_options(
+                Cursor::new(&corpus.recompress_streaming_flac_bytes),
+                recompress_reader_options(config),
+            )
+            .expect("streaming recompress reader");
+            let source = reader.into_recompress_source();
+            let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+            recompressor
+                .recompress(source)
+                .expect("streaming recompress verify handoff");
+            recompressor.into_inner().into_inner()
+        })
+    });
+    group.finish();
+}
+
 fn metadata_write_path(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let mut group = c.benchmark_group("flacx throughput");
@@ -143,6 +188,8 @@ criterion_group!(
     builtin_bytes_encode,
     builtin_bytes_decode,
     builtin_bytes_recompress,
+    encode_multiframe_streaming_path,
+    recompress_streaming_verify_handoff,
     metadata_write_path,
     decode_frame_materialization
 );
@@ -158,6 +205,8 @@ struct Corpus {
     flac_inputs: Vec<CorpusInput>,
     representative_wav_bytes: Vec<u8>,
     representative_flac_bytes: Vec<u8>,
+    encode_streaming_wav_bytes: Vec<u8>,
+    recompress_streaming_flac_bytes: Vec<u8>,
     metadata_flac_bytes: Vec<u8>,
     decode_materialization_flac_bytes: Vec<u8>,
 }
@@ -207,6 +256,13 @@ impl Corpus {
             .expect("flac corpus selection")
             .bytes
             .clone();
+        let encode_streaming_wav_bytes = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 10_432));
+        let recompress_streaming_flac_bytes = encode_fixture_bytes(
+            &EncoderConfig::default()
+                .with_threads(threads)
+                .with_block_schedule(vec![576, 1_152, 576, 2_304, 4_096, 576, 1_152]),
+            &encode_streaming_wav_bytes,
+        )?;
         let metadata_flac_bytes = encode_fixture_bytes(&config, &metadata_wav_fixture())?;
         let decode_materialization_flac_bytes = encode_fixture_bytes(
             &EncoderConfig::default()
@@ -220,6 +276,8 @@ impl Corpus {
             flac_inputs,
             representative_wav_bytes,
             representative_flac_bytes,
+            encode_streaming_wav_bytes,
+            recompress_streaming_flac_bytes,
             metadata_flac_bytes,
             decode_materialization_flac_bytes,
         })
@@ -377,17 +435,26 @@ fn load_sorted_corpus_files(
     root: &Path,
     extension: &str,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let mut files: Vec<PathBuf> = fs::read_dir(root)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.is_file()
                 && path
                     .extension()
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
-        })
-        .collect();
+            {
+                files.push(path);
+            }
+        }
+    }
     files.sort();
 
     if files.is_empty() {
