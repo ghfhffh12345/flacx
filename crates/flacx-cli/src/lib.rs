@@ -29,6 +29,8 @@ use flacx::{
     RecompressProgress, Result, WavReader, WavReaderOptions, inspect_flac_total_samples,
     inspect_raw_pcm_total_samples, inspect_wav_total_samples, read_flac_reader_with_options,
 };
+use terminal_size::{Width, terminal_size};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use walkdir::WalkDir;
 
 const SINGLE_PROGRESS_BAR_WIDTH: usize = 24;
@@ -37,6 +39,7 @@ const ESTIMATE_WARMUP: Duration = Duration::from_millis(250);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const CLI_READ_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
 const CLI_WRITE_BUFFER_CAPACITY: usize = 10 * 1024 * 1024;
+const DEFAULT_PROGRESS_LINE_BUDGET: usize = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EncodeInputFamily {
@@ -1650,12 +1653,13 @@ impl<W: Write> BatchProgressCoordinator<W> {
                     file_elapsed,
                 )
         });
-        let frame = format_progress_frame(
+        let frame = format_progress_frame_with_budget(
             &display,
             &overall_estimate,
             file_estimate.as_ref(),
             batch_elapsed,
             file_elapsed,
+            self.renderer.line_budget(),
         );
         self.renderer.render(frame)
     }
@@ -1749,12 +1753,13 @@ impl<W: Write> BatchProgressCoordinator<W> {
                     phase_elapsed,
                 )
         });
-        let frame = format_progress_frame(
+        let frame = format_progress_frame_with_budget(
             &display,
             &overall_estimate,
             file_estimate.as_ref(),
             batch_elapsed,
             file_elapsed,
+            self.renderer.line_budget(),
         );
         self.renderer.render(frame)
     }
@@ -2078,16 +2083,29 @@ struct ProgressRenderer<W: Write> {
     interactive: bool,
     has_drawn: bool,
     last_line_widths: Vec<usize>,
+    last_frame_rows: usize,
+    line_budget: Option<usize>,
 }
 
 impl<W: Write> ProgressRenderer<W> {
     fn new(writer: W, interactive: bool) -> Self {
+        let line_budget = interactive.then(detect_progress_line_budget).flatten();
+        Self::with_line_budget(writer, interactive, line_budget)
+    }
+
+    fn with_line_budget(writer: W, interactive: bool, line_budget: Option<usize>) -> Self {
         Self {
             writer,
             interactive,
             has_drawn: false,
             last_line_widths: Vec::new(),
+            last_frame_rows: 0,
+            line_budget,
         }
+    }
+
+    fn line_budget(&self) -> Option<usize> {
+        self.line_budget
     }
 
     #[cfg(test)]
@@ -2104,12 +2122,14 @@ impl<W: Write> ProgressRenderer<W> {
     }
 
     fn draw_frame(&mut self, frame: &ProgressFrame) -> std::io::Result<()> {
-        let previous_height = self.last_line_widths.len();
-        if self.has_drawn && previous_height > 1 {
-            write!(self.writer, "\x1b[{}A", previous_height - 1)?;
+        if self.has_drawn && self.last_frame_rows > 1 {
+            write!(self.writer, "\x1b[{}A", self.last_frame_rows - 1)?;
         }
 
+        let previous_height = self.last_line_widths.len();
         let total_lines = frame.lines.len().max(previous_height);
+        let mut current_line_widths = Vec::with_capacity(frame.lines.len());
+        let mut current_frame_rows = 0usize;
         for line_index in 0..total_lines {
             if line_index > 0 {
                 self.writer.write_all(b"\n")?;
@@ -2121,12 +2141,27 @@ impl<W: Write> ProgressRenderer<W> {
                 .get(line_index)
                 .map(String::as_str)
                 .unwrap_or("");
-            let padded_width = line.len().max(previous_width);
-            write!(self.writer, "{line:<padded_width$}")?;
+            let line_width = display_width(line);
+            let padded_width = line_width.max(previous_width);
+            self.writer.write_all(line.as_bytes())?;
+            if padded_width > line_width {
+                write!(
+                    self.writer,
+                    "{:width$}",
+                    "",
+                    width = padded_width - line_width
+                )?;
+            }
+            if line_index < frame.lines.len() {
+                current_line_widths.push(line_width);
+            }
+            current_frame_rows =
+                current_frame_rows.saturating_add(rendered_row_count(line_width, self.line_budget));
         }
 
         self.has_drawn = true;
-        self.last_line_widths = frame.lines.iter().map(String::len).collect();
+        self.last_line_widths = current_line_widths;
+        self.last_frame_rows = current_frame_rows;
         self.writer.flush()
     }
 
@@ -2211,6 +2246,7 @@ impl ProgressState {
     }
 }
 
+#[cfg(test)]
 fn format_progress_frame(
     display: &ProgressDisplay,
     overall_estimate: &ProgressEstimate,
@@ -2218,18 +2254,42 @@ fn format_progress_frame(
     batch_elapsed: Duration,
     file_elapsed: Duration,
 ) -> ProgressFrame {
+    format_progress_frame_with_budget(
+        display,
+        overall_estimate,
+        file_estimate,
+        batch_elapsed,
+        file_elapsed,
+        None,
+    )
+}
+
+fn format_progress_frame_with_budget(
+    display: &ProgressDisplay,
+    overall_estimate: &ProgressEstimate,
+    file_estimate: Option<&ProgressEstimate>,
+    batch_elapsed: Duration,
+    file_elapsed: Duration,
+    line_budget: Option<usize>,
+) -> ProgressFrame {
     if let Some(file) = display.file {
         let warming_up = ProgressEstimate::warming_up();
         let file_estimate = file_estimate.unwrap_or(&warming_up);
         return ProgressFrame {
             lines: vec![
-                format_batch_overall_line(display.overall, overall_estimate, batch_elapsed),
+                format_batch_overall_line(
+                    display.overall,
+                    overall_estimate,
+                    batch_elapsed,
+                    line_budget,
+                ),
                 format_batch_file_line(
                     &display.filename,
                     display.phase_label.unwrap_or("File"),
                     file,
                     file_estimate,
                     file_elapsed,
+                    line_budget,
                 ),
             ],
         };
@@ -2242,12 +2302,74 @@ fn format_progress_frame(
             display.overall,
             overall_estimate,
             batch_elapsed,
+            line_budget,
         )],
     }
 }
 
 fn format_progress_line(
     label: &str,
+    progress: SampleProgress,
+    estimate: &ProgressEstimate,
+    elapsed: Duration,
+    bar_width: usize,
+    line_budget: Option<usize>,
+) -> String {
+    format_label_with_progress_suffix(
+        label,
+        &format_progress_suffix(progress, estimate, elapsed, bar_width),
+        line_budget,
+    )
+}
+
+fn format_single_file_line(
+    filename: &str,
+    phase_label: Option<&str>,
+    progress: SampleProgress,
+    estimate: &ProgressEstimate,
+    elapsed: Duration,
+    line_budget: Option<usize>,
+) -> String {
+    let progress_suffix =
+        format_progress_suffix(progress, estimate, elapsed, SINGLE_PROGRESS_BAR_WIDTH);
+    let suffix = phase_label
+        .map(|phase| format!(" | {phase}{progress_suffix}"))
+        .unwrap_or(progress_suffix);
+    format_filename_with_progress_suffix(filename, &suffix, line_budget)
+}
+
+fn format_batch_overall_line(
+    progress: SampleProgress,
+    estimate: &ProgressEstimate,
+    elapsed: Duration,
+    line_budget: Option<usize>,
+) -> String {
+    format_progress_line(
+        "Batch",
+        progress,
+        estimate,
+        elapsed,
+        BATCH_PROGRESS_BAR_WIDTH,
+        line_budget,
+    )
+}
+
+fn format_batch_file_line(
+    filename: &str,
+    phase_label: &str,
+    progress: SampleProgress,
+    estimate: &ProgressEstimate,
+    elapsed: Duration,
+    line_budget: Option<usize>,
+) -> String {
+    let suffix = format!(
+        " | {phase_label}{}",
+        format_progress_suffix(progress, estimate, elapsed, BATCH_PROGRESS_BAR_WIDTH)
+    );
+    format_filename_with_progress_suffix(filename, &suffix, line_budget)
+}
+
+fn format_progress_suffix(
     progress: SampleProgress,
     estimate: &ProgressEstimate,
     elapsed: Duration,
@@ -2264,7 +2386,7 @@ fn format_progress_line(
         .unwrap_or_else(|| "warmup".to_string());
 
     format!(
-        "{label} | {} {:>5.1}% | Elapsed {} | ETA {} | Rate {}",
+        " | {} {:>5.1}% | Elapsed {} | ETA {} | Rate {}",
         format_progress_bar(progress_ratio(progress), bar_width),
         progress_ratio(progress) * 100.0,
         elapsed,
@@ -2273,56 +2395,98 @@ fn format_progress_line(
     )
 }
 
-fn format_single_file_line(
-    filename: &str,
-    phase_label: Option<&str>,
-    progress: SampleProgress,
-    estimate: &ProgressEstimate,
-    elapsed: Duration,
+fn format_label_with_progress_suffix(
+    label: &str,
+    suffix: &str,
+    line_budget: Option<usize>,
 ) -> String {
-    let label = phase_label
-        .map(|phase| format!("{filename} | {phase}"))
-        .unwrap_or_else(|| filename.to_string());
-    format_progress_line(
-        &label,
-        progress,
-        estimate,
-        elapsed,
-        SINGLE_PROGRESS_BAR_WIDTH,
-    )
+    match line_budget {
+        Some(max_width) => {
+            let suffix_width = display_width(suffix);
+            if suffix_width >= max_width {
+                return truncate_display_text(&format!("{label}{suffix}"), max_width);
+            }
+            let label_width = max_width.saturating_sub(suffix_width);
+            format!("{}{}", truncate_display_text(label, label_width), suffix)
+        }
+        None => format!("{label}{suffix}"),
+    }
 }
 
-fn format_batch_overall_line(
-    progress: SampleProgress,
-    estimate: &ProgressEstimate,
-    elapsed: Duration,
+fn format_filename_with_progress_suffix(
+    filename: &str,
+    suffix: &str,
+    line_budget: Option<usize>,
 ) -> String {
-    format_progress_line(
-        "Batch",
-        progress,
-        estimate,
-        elapsed,
-        BATCH_PROGRESS_BAR_WIDTH,
-    )
+    match line_budget {
+        Some(max_width) => {
+            let suffix_width = display_width(suffix);
+            if suffix_width >= max_width {
+                return truncate_display_text(&format!("{filename}{suffix}"), max_width);
+            }
+            let filename_width = max_width.saturating_sub(suffix_width);
+            format!(
+                "{}{}",
+                truncate_display_text(filename, filename_width),
+                suffix
+            )
+        }
+        None => format!("{filename}{suffix}"),
+    }
 }
 
-fn format_batch_file_line(
-    filename: &str,
-    phase_label: &str,
-    progress: SampleProgress,
-    estimate: &ProgressEstimate,
-    elapsed: Duration,
-) -> String {
-    format!(
-        "{filename} | {}",
-        format_progress_line(
-            phase_label,
-            progress,
-            estimate,
-            elapsed,
-            BATCH_PROGRESS_BAR_WIDTH,
-        )
-    )
+fn detect_progress_line_budget() -> Option<usize> {
+    terminal_size()
+        .map(|(Width(width), _)| usize::from(width))
+        .and_then(progress_line_budget_from_columns)
+        .or_else(|| {
+            env::var("COLUMNS")
+                .ok()
+                .and_then(|columns| columns.parse::<usize>().ok())
+                .and_then(progress_line_budget_from_columns)
+        })
+        .or(Some(DEFAULT_PROGRESS_LINE_BUDGET))
+}
+
+fn progress_line_budget_from_columns(columns: usize) -> Option<usize> {
+    (columns > 0).then_some(columns.saturating_sub(1).max(1))
+}
+
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn truncate_display_text(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let target_width = max_width - 1;
+    let mut truncated = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(char_width) > target_width {
+            break;
+        }
+        truncated.push(ch);
+        width = width.saturating_add(char_width);
+    }
+    truncated.push('…');
+    truncated
+}
+
+fn rendered_row_count(display_width: usize, line_budget: Option<usize>) -> usize {
+    match line_budget {
+        Some(line_budget) if line_budget > 0 => display_width.max(1).div_ceil(line_budget),
+        _ => 1,
+    }
 }
 
 fn time_until_next_second(elapsed: Duration) -> Duration {
@@ -2388,19 +2552,36 @@ mod tests {
 
     use super::{
         BatchProgressCoordinator, DirectoryEncodeSchedule, ProgressDisplay, ProgressEstimate,
-        ProgressFrame, ProgressRenderer, ProgressState, SampleProgress, format_progress_frame,
-        relative_display_name, time_until_next_second,
+        ProgressFrame, ProgressRenderer, ProgressState, SampleProgress, display_width,
+        format_progress_frame, format_progress_frame_with_budget, relative_display_name,
+        rendered_row_count, time_until_next_second, truncate_display_text,
     };
     use flacx::{ProgressSnapshot, RecompressPhase, RecompressProgress};
 
     fn final_frame_lines(output: &str) -> Vec<&str> {
-        output
+        let bytes = output.as_bytes();
+        let mut last_escape_end = None;
+        let mut index = 0usize;
+        while index + 2 < bytes.len() {
+            if bytes[index] == 0x1b && bytes[index + 1] == b'[' {
+                let mut cursor = index + 2;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                    cursor += 1;
+                }
+                if cursor > index + 2 && cursor < bytes.len() && bytes[cursor] == b'A' {
+                    last_escape_end = Some(cursor + 1);
+                }
+            }
+            index += 1;
+        }
+        let final_frame = last_escape_end
+            .map(|offset| &output[offset..])
+            .unwrap_or(output);
+
+        final_frame
             .trim_end_matches('\n')
-            .rsplit("\x1b[1A")
-            .next()
-            .unwrap_or(output)
             .split('\n')
-            .map(|line| line.trim_start_matches('\r'))
+            .map(|line| line.split('\r').next_back().unwrap_or(line))
             .collect()
     }
 
@@ -2520,6 +2701,77 @@ mod tests {
             .unwrap();
         assert!(warmup.len() >= final_frame.trim_end().len());
         assert!(final_frame.ends_with(' '));
+    }
+
+    #[test]
+    fn unicode_display_width_treats_full_width_characters_as_wide() {
+        assert_eq!(display_width("テ"), 2);
+        assert_eq!(display_width("【】"), 4);
+        assert!(
+            display_width("『世界の果て』　【テスト】.wav")
+                > "『世界の果て』　【テスト】.wav".chars().count()
+        );
+    }
+
+    #[test]
+    fn truncate_display_text_preserves_unicode_boundaries_with_ellipsis() {
+        let truncated = truncate_display_text("『世界の果て』　【テスト】.wav", 12);
+        assert!(display_width(&truncated) <= 12);
+        assert!(truncated.ends_with('…'));
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn progress_frame_truncates_unicode_filename_to_budget() {
+        let frame = format_progress_frame_with_budget(
+            &ProgressDisplay {
+                filename: "『世界の果て』　【テスト】.wav".into(),
+                overall: SampleProgress {
+                    processed_samples: 100,
+                    total_samples: 100,
+                },
+                file: None,
+                phase_label: None,
+            },
+            &ProgressEstimate {
+                eta: Some(Duration::from_secs(0)),
+                samples_per_second: Some(333.0),
+            },
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Some(80),
+        );
+
+        assert_eq!(frame.lines.len(), 1);
+        assert!(display_width(&frame.lines[0]) <= 80);
+        assert!(frame.lines[0].contains("Elapsed 00:01"));
+        assert!(frame.lines[0].contains("100.0%"));
+        assert!(frame.lines[0].contains('…') || frame.lines[0].contains("テスト"));
+    }
+
+    #[test]
+    fn progress_renderer_rewinds_wrapped_rows_when_budget_is_small() {
+        let mut renderer = ProgressRenderer::with_line_budget(Vec::new(), true, Some(16));
+        let long_line = "『世界の果て』　【テスト】.wav | File | [==========] 100.0% | Elapsed 00:01 | ETA 00:00 | Rate 333/s";
+        let expected_rows_up = rendered_row_count(display_width(long_line), Some(16)) - 1;
+
+        renderer
+            .observe_frame(ProgressFrame {
+                lines: vec![long_line.into()],
+            })
+            .unwrap();
+        renderer
+            .observe_frame(ProgressFrame {
+                lines: vec![
+                    "x.wav | File | [==========] 100.0% | Elapsed 00:01 | ETA 00:00 | Rate 333/s"
+                        .into(),
+                ],
+            })
+            .unwrap();
+
+        let output = String::from_utf8(renderer.writer).unwrap();
+        assert!(output.contains(&format!("\x1b[{expected_rows_up}A")));
     }
 
     #[test]

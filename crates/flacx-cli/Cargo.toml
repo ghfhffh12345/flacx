@@ -11,6 +11,8 @@ publish = false
 [dependencies]
 clap.workspace = true
 flacx = { path = "../flacx", features = ["progress"] }
+terminal_size.workspace = true
+unicode-width.workspace = true
 walkdir.workspace = true
 
 [[bench]]

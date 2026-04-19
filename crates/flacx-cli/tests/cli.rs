@@ -65,14 +65,47 @@ fn assert_wav_audio_eq(actual: &[u8], expected: &[u8]) {
 }
 
 fn final_progress_frame_lines(stderr: &str) -> Vec<&str> {
-    stderr
+    let final_frame = last_cursor_up_escape_end(stderr)
+        .map(|index| &stderr[index..])
+        .unwrap_or(stderr);
+
+    final_frame
         .trim_end_matches('\n')
-        .rsplit("\x1b[1A")
-        .next()
-        .unwrap_or(stderr)
         .split('\n')
-        .map(|line| line.trim_start_matches('\r'))
+        .map(|line| line.split('\r').next_back().unwrap_or(line))
         .collect()
+}
+
+fn last_cursor_up_escape_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut last = None;
+    let mut index = 0usize;
+    while index + 2 < bytes.len() {
+        if bytes[index] == 0x1b && bytes[index + 1] == b'[' {
+            let mut cursor = index + 2;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            if cursor > index + 2 && cursor < bytes.len() && bytes[cursor] == b'A' {
+                last = Some(cursor + 1);
+            }
+        }
+        index += 1;
+    }
+
+    last
+}
+
+fn final_progress_line(stderr: &str) -> &str {
+    let final_frame = last_cursor_up_escape_end(stderr)
+        .map(|index| &stderr[index..])
+        .unwrap_or(stderr);
+
+    final_frame
+        .trim_end_matches('\n')
+        .split('\r')
+        .next_back()
+        .unwrap_or(final_frame)
 }
 
 fn decode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
@@ -765,10 +798,8 @@ fn encode_command_renders_filename_elapsed_and_progress_when_interactive() {
 
     let stderr = String::from_utf8(stderr).unwrap();
     assert!(stderr.contains('\r'));
-    assert!(
-        stderr.contains("input.wav")
-            || stderr.contains(input_path.file_name().unwrap().to_str().unwrap())
-    );
+    let final_line = final_progress_line(&stderr);
+    assert!(final_line.contains("wav") || final_line.contains('…'));
     assert!(stderr.contains("100.0%"));
     assert!(stderr.contains("Elapsed"));
     assert!(stderr.contains("ETA"));
@@ -777,6 +808,44 @@ fn encode_command_renders_filename_elapsed_and_progress_when_interactive() {
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn encode_command_renders_unicode_filename_cleanly_when_interactive() {
+    let input_dir = unique_temp_dir();
+    let input_path = input_dir.join("『世界の果て』　【テスト】.wav");
+    let output_path = input_dir.join("encoded.flac");
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    fs::write(&input_path, &wav).unwrap();
+
+    let command = EncodeCommand {
+        input: input_path.clone(),
+        output: Some(output_path.clone()),
+        depth: 1,
+        config: EncoderConfig::default()
+            .with_level(Level::Level0)
+            .with_threads(1)
+            .with_block_size(576),
+        raw_descriptor: None,
+    };
+    let mut stderr = Vec::new();
+
+    encode_command(&command, true, &mut stderr).unwrap();
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains('\r'));
+    let final_line = final_progress_line(&stderr);
+    assert!(final_line.contains("100.0%"));
+    assert!(final_line.contains("Elapsed"));
+    assert!(final_line.contains("ETA"));
+    assert!(final_line.contains("Rate"));
+    assert_eq!(final_line.matches("Elapsed").count(), 1);
+    assert_eq!(final_line.matches("Rate").count(), 1);
+    assert!(
+        final_line.contains("『世界") || final_line.contains("テスト") || final_line.contains('…')
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
 }
 
 #[test]
