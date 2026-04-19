@@ -2,6 +2,11 @@ mod blocks;
 mod draft;
 
 use crate::input::ordinary_channel_mask;
+use crate::{
+    error::{Error, Result},
+    input::PcmSpec,
+    pcm::is_supported_channel_mask,
+};
 
 pub(crate) use blocks::{
     CueSheetBlock, FlacMetadataBlock, PreservedMetadataBundle, VorbisCommentBlock,
@@ -369,6 +374,58 @@ impl Metadata {
             )
         })
     }
+}
+
+fn strict_channel_layout_provenance_error(channels: u8) -> Error {
+    Error::UnsupportedFlac(format!(
+        "strict channel-layout provenance requires {FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY} for {channels}-channel decode"
+    ))
+}
+
+pub(crate) fn align_metadata_to_stream_spec(
+    metadata: &mut Metadata,
+    spec: PcmSpec,
+    strict_channel_mask_provenance: bool,
+) -> Result<()> {
+    let channels = u16::from(spec.channels);
+    let ordinary_mask = ordinary_channel_mask(channels).ok_or_else(|| {
+        Error::UnsupportedWav(format!(
+            "only 1..8 channel layouts are supported for direct stream construction, found {}",
+            spec.channels
+        ))
+    })?;
+
+    if !is_supported_channel_mask(channels, spec.channel_mask) {
+        return Err(Error::UnsupportedWav(format!(
+            "channel mask {:#010x} is not supported for {} channels",
+            spec.channel_mask, spec.channels
+        )));
+    }
+
+    match metadata.channel_mask() {
+        Some(mask) if mask != spec.channel_mask => {
+            return Err(Error::UnsupportedWav(format!(
+                "metadata channel mask {mask:#010x} does not match stream channel mask {:#010x}",
+                spec.channel_mask
+            )));
+        }
+        None if spec.channel_mask != ordinary_mask => {
+            if strict_channel_mask_provenance {
+                return Err(strict_channel_layout_provenance_error(spec.channels));
+            }
+            metadata.set_channel_mask_for_channels(channels, spec.channel_mask);
+        }
+        _ => {}
+    }
+
+    if strict_channel_mask_provenance
+        && metadata.channel_mask().is_some()
+        && !metadata.has_channel_layout_provenance()
+    {
+        return Err(strict_channel_layout_provenance_error(spec.channels));
+    }
+
+    Ok(())
 }
 
 pub(crate) type WavMetadata = Metadata;

@@ -5,6 +5,7 @@ use crate::{
     input::WavSpec,
     metadata::Metadata,
     pcm::{PcmEnvelope, container_bits_from_valid_bits, ordinary_channel_mask},
+    raw::RawPcmByteOrder,
 };
 
 const FORM_ID: [u8; 4] = *b"FORM";
@@ -42,6 +43,21 @@ struct CommonChunk {
     endianness: SampleEndianness,
 }
 
+/// Explicit descriptor for direct AIFF/AIFC PCM stream construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiffPcmDescriptor {
+    /// Samples per second.
+    pub sample_rate: u32,
+    /// Number of interleaved channels.
+    pub channels: u8,
+    /// Valid bits carried by each sample.
+    pub valid_bits_per_sample: u8,
+    /// Total samples per channel available from the positioned PCM payload.
+    pub total_samples: u64,
+    /// Byte order of the positioned PCM payload.
+    pub byte_order: RawPcmByteOrder,
+}
+
 /// Reader façade for AIFF/AIFC encode inputs.
 #[derive(Debug, Clone)]
 pub struct AiffReader<R> {
@@ -59,14 +75,7 @@ impl<R: Read + Seek> AiffReader<R> {
         reader.seek(SeekFrom::Start(layout.data_offset))?;
         Ok(Self {
             reader,
-            spec: WavSpec {
-                sample_rate: layout.sample_rate,
-                channels: layout.envelope.channels as u8,
-                bits_per_sample: layout.envelope.valid_bits_per_sample as u8,
-                total_samples: layout.total_samples,
-                bytes_per_sample: layout.envelope.container_bits_per_sample / 8,
-                channel_mask: layout.envelope.channel_mask,
-            },
+            spec: spec_from_envelope(layout.sample_rate, layout.total_samples, layout.envelope),
             metadata: Metadata::default(),
             envelope: layout.envelope,
             endianness: layout.endianness,
@@ -106,15 +115,8 @@ impl<R: Read + Seek> AiffReader<R> {
         } = self;
         (
             metadata,
-            AiffPcmStream {
-                reader,
-                spec,
-                envelope,
-                endianness,
-                remaining_frames: spec.total_samples,
-                frame_bytes: usize::from(envelope.channels)
-                    * usize::from(envelope.container_bits_per_sample / 8),
-            },
+            AiffPcmStream::from_parts(reader, spec, envelope, endianness)
+                .expect("validated AIFF reader state remains constructible"),
         )
     }
 }
@@ -128,6 +130,34 @@ pub struct AiffPcmStream<R> {
     endianness: SampleEndianness,
     remaining_frames: u64,
     frame_bytes: usize,
+}
+
+impl<R: Read + Seek> AiffPcmStream<R> {
+    /// Directly construct an AIFF/AIFC PCM stream from a positioned reader and
+    /// explicit descriptor.
+    pub fn new(reader: R, descriptor: AiffPcmDescriptor) -> Result<Self> {
+        let (spec, envelope, endianness) = validate_direct_descriptor(descriptor)?;
+        Self::from_parts(reader, spec, envelope, endianness)
+    }
+
+    fn from_parts(
+        reader: R,
+        spec: WavSpec,
+        envelope: PcmEnvelope,
+        endianness: SampleEndianness,
+    ) -> Result<Self> {
+        let frame_bytes = usize::from(envelope.channels)
+            .checked_mul(usize::from(envelope.container_bits_per_sample / 8))
+            .ok_or_else(|| Error::UnsupportedWav("AIFF frame size overflows".into()))?;
+        Ok(Self {
+            reader,
+            spec,
+            envelope,
+            endianness,
+            remaining_frames: spec.total_samples,
+            frame_bytes,
+        })
+    }
 }
 
 impl<R: Read + Seek> crate::input::EncodePcmStream for AiffPcmStream<R> {
@@ -151,6 +181,45 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for AiffPcmStream<R> {
         self.remaining_frames -= frames as u64;
         Ok(frames)
     }
+}
+
+fn spec_from_envelope(sample_rate: u32, total_samples: u64, envelope: PcmEnvelope) -> WavSpec {
+    WavSpec {
+        sample_rate,
+        channels: envelope.channels as u8,
+        bits_per_sample: envelope.valid_bits_per_sample as u8,
+        total_samples,
+        bytes_per_sample: envelope.container_bits_per_sample / 8,
+        channel_mask: envelope.channel_mask,
+    }
+}
+
+fn validate_direct_descriptor(
+    descriptor: AiffPcmDescriptor,
+) -> Result<(WavSpec, PcmEnvelope, SampleEndianness)> {
+    let endianness = match descriptor.byte_order {
+        RawPcmByteOrder::BigEndian => SampleEndianness::Big,
+        RawPcmByteOrder::LittleEndian => SampleEndianness::Little,
+    };
+    let common = CommonChunk {
+        channels: u16::from(descriptor.channels),
+        sample_frames: descriptor.total_samples,
+        valid_bits_per_sample: u16::from(descriptor.valid_bits_per_sample),
+        sample_rate: descriptor.sample_rate,
+        endianness,
+    };
+    let envelope = validate_common_chunk(common)?;
+    if matches!(endianness, SampleEndianness::Little) && envelope.valid_bits_per_sample != 16 {
+        return Err(Error::UnsupportedWav(
+            "AIFC compression 'sowt' is only supported for 16-bit signed PCM".into(),
+        ));
+    }
+
+    Ok((
+        spec_from_envelope(descriptor.sample_rate, descriptor.total_samples, envelope),
+        envelope,
+        endianness,
+    ))
 }
 
 pub(crate) fn inspect_aiff_total_samples<R: Read + Seek>(reader: &mut R) -> Result<u64> {
@@ -501,10 +570,10 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        AIFC_FORM_TYPE, AIFC_NONE, AIFC_SOWT, AIFF_FORM_TYPE, AiffReader,
-        inspect_aiff_total_samples,
+        AIFC_FORM_TYPE, AIFC_NONE, AIFC_SOWT, AIFF_FORM_TYPE, AiffPcmDescriptor, AiffPcmStream,
+        AiffReader, inspect_aiff_total_samples,
     };
-    use crate::input::EncodePcmStream;
+    use crate::{RawPcmByteOrder, input::EncodePcmStream};
 
     fn encode_extended_u32(value: u32) -> [u8; 10] {
         assert!(value > 0);
@@ -698,5 +767,57 @@ mod tests {
         assert!(
             error.to_string().contains("sample rate") || error.to_string().contains("fractional")
         );
+    }
+
+    #[test]
+    fn directly_constructs_big_endian_aiff_stream() {
+        let descriptor = AiffPcmDescriptor {
+            sample_rate: 48_000,
+            channels: 3,
+            valid_bits_per_sample: 24,
+            total_samples: 2,
+            byte_order: RawPcmByteOrder::BigEndian,
+        };
+        let mut data = Vec::new();
+        write_samples(&mut data, 24, &[1, -2, 3, -4, 5, -6], false);
+
+        let mut stream = AiffPcmStream::new(Cursor::new(data), descriptor).unwrap();
+        let mut samples = Vec::new();
+        stream.read_chunk(2, &mut samples).unwrap();
+
+        assert_eq!(stream.spec().channel_mask, 0x0007);
+        assert_eq!(samples, vec![1, -2, 3, -4, 5, -6]);
+    }
+
+    #[test]
+    fn directly_constructs_little_endian_sowt_stream() {
+        let descriptor = AiffPcmDescriptor {
+            sample_rate: 44_100,
+            channels: 2,
+            valid_bits_per_sample: 16,
+            total_samples: 2,
+            byte_order: RawPcmByteOrder::LittleEndian,
+        };
+        let mut data = Vec::new();
+        write_samples(&mut data, 16, &[10, -11, 12, -13], true);
+
+        let mut stream = AiffPcmStream::new(Cursor::new(data), descriptor).unwrap();
+        let mut samples = Vec::new();
+        stream.read_chunk(2, &mut samples).unwrap();
+
+        assert_eq!(samples, vec![10, -11, 12, -13]);
+    }
+
+    #[test]
+    fn rejects_direct_little_endian_non_16bit_aiff() {
+        let descriptor = AiffPcmDescriptor {
+            sample_rate: 44_100,
+            channels: 1,
+            valid_bits_per_sample: 24,
+            total_samples: 2,
+            byte_order: RawPcmByteOrder::LittleEndian,
+        };
+        let error = AiffPcmStream::new(Cursor::new(vec![0; 6]), descriptor).unwrap_err();
+        assert!(error.to_string().contains("16-bit"));
     }
 }

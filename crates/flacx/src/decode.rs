@@ -1,7 +1,8 @@
 //! FLAC-to-PCM-container decoding session primitives used by the `flacx` crate.
 //!
-//! The public decode flow is reader-driven: parse a FLAC reader, convert it
-//! into an owned decode source, bind an output writer through
+//! The public decode flow can be reader-driven or direct-stream-driven: parse
+//! a FLAC reader or construct a [`crate::FlacPcmStream`] explicitly, stage
+//! metadata in a [`DecodeSource`], bind an output writer through
 //! [`DecodeConfig::into_decoder`], then feed that source into
 //! [`Decoder::decode_source`].
 
@@ -197,7 +198,12 @@ where
         S: DecodePcmStream,
         P: ProgressSink,
     {
-        let (metadata, mut stream) = source.into_parts();
+        let (mut metadata, mut stream) = source.into_parts();
+        crate::metadata::align_metadata_to_stream_spec(
+            &mut metadata,
+            stream.spec(),
+            self.config.strict_channel_mask_provenance,
+        )?;
         stream.set_threads(self.config.threads);
         decode_stream_to_container(stream, &mut self.writer, metadata, self.config, progress)
     }

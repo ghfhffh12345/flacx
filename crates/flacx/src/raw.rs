@@ -44,16 +44,10 @@ impl<R: Read + Seek> RawPcmReader<R> {
     /// Create a raw PCM reader from a seekable byte stream and descriptor.
     pub fn new(mut reader: R, descriptor: RawPcmDescriptor) -> Result<Self> {
         let total_samples = inspect_raw_pcm_total_samples_impl(&mut reader, descriptor)?;
+        let validated = validate_raw_descriptor(descriptor)?;
         Ok(Self {
             reader,
-            spec: WavSpec {
-                sample_rate: descriptor.sample_rate,
-                channels: descriptor.channels,
-                bits_per_sample: descriptor.valid_bits_per_sample,
-                total_samples,
-                bytes_per_sample: u16::from(descriptor.container_bits_per_sample) / 8,
-                channel_mask: validate_raw_descriptor(descriptor)?.channel_mask,
-            },
+            spec: spec_from_validated_descriptor(validated, total_samples),
             descriptor,
         })
     }
@@ -110,18 +104,13 @@ pub struct RawPcmStream<R> {
 }
 
 impl<R: Read + Seek> RawPcmStream<R> {
-    pub(crate) fn new(reader: R, descriptor: RawPcmDescriptor, total_samples: u64) -> Result<Self> {
+    /// Directly construct a raw PCM stream from a positioned reader, explicit
+    /// descriptor, and known per-channel sample count.
+    pub fn new(reader: R, descriptor: RawPcmDescriptor, total_samples: u64) -> Result<Self> {
         let validated = validate_raw_descriptor(descriptor)?;
         Ok(Self {
             reader,
-            spec: WavSpec {
-                sample_rate: descriptor.sample_rate,
-                channels: descriptor.channels,
-                bits_per_sample: descriptor.valid_bits_per_sample,
-                total_samples,
-                bytes_per_sample: u16::from(descriptor.container_bits_per_sample) / 8,
-                channel_mask: validated.channel_mask,
-            },
+            spec: spec_from_validated_descriptor(validated, total_samples),
             validated,
             remaining_frames: total_samples,
             last_chunk_bytes: Vec::new(),
@@ -182,6 +171,20 @@ struct ValidatedRawDescriptor {
     envelope: PcmEnvelope,
     channel_mask: u32,
     frame_bytes: u64,
+}
+
+fn spec_from_validated_descriptor(
+    validated: ValidatedRawDescriptor,
+    total_samples: u64,
+) -> WavSpec {
+    WavSpec {
+        sample_rate: validated.descriptor.sample_rate,
+        channels: validated.descriptor.channels,
+        bits_per_sample: validated.descriptor.valid_bits_per_sample,
+        total_samples,
+        bytes_per_sample: u16::from(validated.descriptor.container_bits_per_sample) / 8,
+        channel_mask: validated.channel_mask,
+    }
 }
 
 fn validate_raw_descriptor(descriptor: RawPcmDescriptor) -> Result<ValidatedRawDescriptor> {
@@ -392,5 +395,26 @@ mod tests {
         let error =
             inspect_raw_pcm_total_samples(Cursor::new(vec![0u8; 16]), descriptor).unwrap_err();
         assert!(error.to_string().contains("channel mask"));
+    }
+
+    #[test]
+    fn directly_constructs_raw_pcm_stream() {
+        let descriptor = RawPcmDescriptor {
+            sample_rate: 48_000,
+            channels: 1,
+            valid_bits_per_sample: 24,
+            container_bits_per_sample: 24,
+            byte_order: RawPcmByteOrder::BigEndian,
+            channel_mask: None,
+        };
+        let data = vec![0x00, 0x00, 0x01, 0xff, 0xff, 0xfe];
+
+        let mut stream = super::RawPcmStream::new(Cursor::new(data), descriptor, 2).unwrap();
+        let mut samples = Vec::new();
+        let frames = stream.read_chunk(2, &mut samples).unwrap();
+
+        assert_eq!(frames, 2);
+        assert_eq!(stream.spec().channel_mask, 0x0004);
+        assert_eq!(samples, vec![1, -2]);
     }
 }

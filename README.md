@@ -56,6 +56,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Advanced direct-construction workflow:
+
+```rust
+use flacx::{EncodeSource, EncoderConfig, Metadata, WavPcmStream};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Seek, SeekFrom},
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut payload = BufReader::new(File::open("input.wav")?);
+    payload.seek(SeekFrom::Start(44))?; // canonical PCM WAV payload offset
+
+    let stream = WavPcmStream::builder(payload)
+        .sample_rate(44_100)
+        .channels(2)
+        .valid_bits_per_sample(16)
+        .total_samples(1_024)
+        .build()?;
+
+    let source = EncodeSource::new(Metadata::new(), stream);
+    let output = BufWriter::new(File::create("output.flac")?);
+    let mut encoder = EncoderConfig::default().into_encoder(output);
+    encoder.encode_source(source)?;
+    Ok(())
+}
+```
+
 One-shot helper workflow:
 
 ```rust

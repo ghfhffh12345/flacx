@@ -1,8 +1,10 @@
 //! PCM-container-to-FLAC encoding session primitives used by the `flacx` crate.
 //!
-//! The public encode flow is reader-driven: parse a family reader, inspect its
-//! spec/metadata, bind an output writer through [`EncoderConfig::into_encoder`],
-//! then feed the resulting single-pass PCM stream into [`Encoder::encode`].
+//! The public encode flow can be reader-driven or direct-stream-driven: parse a
+//! family reader or construct a concrete stream explicitly, stage metadata in
+//! an [`EncodeSource`], bind an output writer through
+//! [`EncoderConfig::into_encoder`], then feed that source into
+//! [`Encoder::encode_source`].
 
 use std::{
     collections::BTreeMap,
@@ -199,7 +201,8 @@ where
         S: EncodePcmStream,
         P: ProgressSink,
     {
-        let (metadata, stream) = source.into_parts();
+        let (mut metadata, stream) = source.into_parts();
+        crate::metadata::align_metadata_to_stream_spec(&mut metadata, stream.spec(), false)?;
         encode_stream(&self.config, metadata, stream, &mut self.writer, progress)
     }
 

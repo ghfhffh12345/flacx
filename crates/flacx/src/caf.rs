@@ -95,17 +95,27 @@ impl<R: Read + Seek> CafReader<R> {
         } = self;
         (
             metadata,
-            CafPcmStream {
-                inner: crate::raw::RawPcmStream::new(reader, descriptor, spec.total_samples)
-                    .expect("validated CAF descriptor remains valid"),
-            },
+            CafPcmStream::new(reader, descriptor, spec.total_samples)
+                .expect("validated CAF descriptor remains valid"),
         )
     }
 }
 
 /// Single-pass PCM stream produced by [`CafReader`].
+#[derive(Debug)]
 pub struct CafPcmStream<R> {
     inner: crate::raw::RawPcmStream<R>,
+}
+
+impl<R: Read + Seek> CafPcmStream<R> {
+    /// Directly construct a CAF LPCM stream from a positioned payload reader,
+    /// explicit descriptor, and known per-channel sample count.
+    pub fn new(reader: R, descriptor: RawPcmDescriptor, total_samples: u64) -> Result<Self> {
+        validate_direct_descriptor(descriptor)?;
+        Ok(Self {
+            inner: crate::raw::RawPcmStream::new(reader, descriptor, total_samples)?,
+        })
+    }
 }
 
 impl<R: Read + Seek> crate::input::EncodePcmStream for CafPcmStream<R> {
@@ -116,6 +126,16 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for CafPcmStream<R> {
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
         self.inner.read_chunk(max_frames, output)
     }
+}
+
+fn validate_direct_descriptor(descriptor: RawPcmDescriptor) -> Result<()> {
+    if matches!(descriptor.channel_mask, Some(0)) {
+        return Err(Error::UnsupportedWav(
+            "CAF channel layout mappings must use a supported non-zero channel bitmap".into(),
+        ));
+    }
+    let _ = total_samples_from_byte_len_with_descriptor(0, descriptor)?;
+    Ok(())
 }
 
 pub(crate) fn inspect_caf_total_samples<R: Read + Seek>(reader: &mut R) -> Result<u64> {
@@ -392,10 +412,10 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        CAF_LAYOUT_TAG_USE_CHANNEL_BITMAP, CAF_MAGIC, CHAN_CHUNK_ID, CafReader, DATA_CHUNK_ID,
-        DESC_CHUNK_ID, LPCM_FORMAT_ID, inspect_caf_total_samples,
+        CAF_LAYOUT_TAG_USE_CHANNEL_BITMAP, CAF_MAGIC, CHAN_CHUNK_ID, CafPcmStream, CafReader,
+        DATA_CHUNK_ID, DESC_CHUNK_ID, LPCM_FORMAT_ID, inspect_caf_total_samples,
     };
-    use crate::input::EncodePcmStream;
+    use crate::{RawPcmByteOrder, RawPcmDescriptor, input::EncodePcmStream};
 
     fn append_chunk(bytes: &mut Vec<u8>, chunk_id: [u8; 4], payload: &[u8]) {
         bytes.extend_from_slice(&chunk_id);
@@ -515,5 +535,42 @@ mod tests {
         append_chunk(&mut bytes, CHAN_CHUNK_ID, &chan);
         let parsed = CafReader::new(Cursor::new(bytes)).unwrap();
         assert_eq!(parsed.spec().channel_mask, 0x0033);
+    }
+
+    #[test]
+    fn directly_constructs_caf_stream_from_descriptor() {
+        let descriptor = RawPcmDescriptor {
+            sample_rate: 48_000,
+            channels: 4,
+            valid_bits_per_sample: 16,
+            container_bits_per_sample: 16,
+            byte_order: RawPcmByteOrder::LittleEndian,
+            channel_mask: Some(0x0033),
+        };
+        let data = [1i16, -2, 3, -4, 5, -6, 7, -8]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let mut stream = CafPcmStream::new(Cursor::new(data), descriptor, 2).unwrap();
+        let mut samples = Vec::new();
+        stream.read_chunk(2, &mut samples).unwrap();
+
+        assert_eq!(stream.spec().channel_mask, 0x0033);
+        assert_eq!(samples, vec![1, -2, 3, -4, 5, -6, 7, -8]);
+    }
+
+    #[test]
+    fn rejects_zero_bitmap_in_direct_caf_descriptor() {
+        let descriptor = RawPcmDescriptor {
+            sample_rate: 44_100,
+            channels: 2,
+            valid_bits_per_sample: 16,
+            container_bits_per_sample: 16,
+            byte_order: RawPcmByteOrder::BigEndian,
+            channel_mask: Some(0),
+        };
+        let error = CafPcmStream::new(Cursor::new(vec![0; 4]), descriptor, 1).unwrap_err();
+        assert!(error.to_string().contains("channel bitmap"));
     }
 }

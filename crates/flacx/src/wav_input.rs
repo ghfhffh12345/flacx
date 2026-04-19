@@ -5,8 +5,8 @@ use crate::metadata::{FXMD_CHUNK_ID, FxmdChunkPolicy, Metadata, MetadataDraft};
 use crate::{
     error::{Error, Result},
     pcm::{
-        PcmEnvelope, PcmSpec as WavSpec, PcmStream as WavData, is_supported_channel_mask,
-        ordinary_channel_mask,
+        PcmEnvelope, PcmSpec as WavSpec, PcmStream as WavData, container_bits_from_valid_bits,
+        is_supported_channel_mask, ordinary_channel_mask,
     },
 };
 
@@ -52,6 +52,18 @@ struct FormatChunk {
     container_bits_per_sample: u16,
     valid_bits_per_sample: u16,
     channel_mask: u32,
+}
+
+/// Builder for direct WAV/RF64/Wave64 PCM stream construction.
+#[derive(Debug)]
+pub struct WavPcmStreamBuilder<R> {
+    reader: R,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
+    valid_bits_per_sample: Option<u8>,
+    container_bits_per_sample: Option<u8>,
+    total_samples: Option<u64>,
+    channel_mask: Option<u32>,
 }
 
 /// Reader façade for WAV/RF64/Wave64 encode inputs.
@@ -150,15 +162,8 @@ impl<R: Read + Seek> WavReader<R> {
         } = self;
         (
             metadata,
-            WavPcmStream {
-                reader,
-                spec,
-                envelope,
-                remaining_frames: spec.total_samples,
-                frame_bytes: usize::from(envelope.channels)
-                    * usize::from(envelope.container_bits_per_sample / 8),
-                last_chunk_bytes: Vec::new(),
-            },
+            WavPcmStream::from_parts(reader, spec, envelope)
+                .expect("validated WAV reader state remains constructible"),
         )
     }
 }
@@ -172,6 +177,148 @@ pub struct WavPcmStream<R> {
     remaining_frames: u64,
     frame_bytes: usize,
     last_chunk_bytes: Vec<u8>,
+}
+
+impl<R: Read + Seek> WavPcmStream<R> {
+    /// Start staged direct construction of a WAV-family PCM stream from a
+    /// reader positioned at the beginning of the PCM payload.
+    pub fn builder(reader: R) -> WavPcmStreamBuilder<R> {
+        WavPcmStreamBuilder::new(reader)
+    }
+
+    fn from_parts(reader: R, spec: WavSpec, envelope: PcmEnvelope) -> Result<Self> {
+        let frame_bytes = usize::from(envelope.channels)
+            .checked_mul(usize::from(envelope.container_bits_per_sample / 8))
+            .ok_or_else(|| Error::UnsupportedWav("PCM frame size overflows".into()))?;
+        Ok(Self {
+            reader,
+            spec,
+            envelope,
+            remaining_frames: spec.total_samples,
+            frame_bytes,
+            last_chunk_bytes: Vec::new(),
+        })
+    }
+}
+
+impl<R> WavPcmStreamBuilder<R> {
+    /// Create a new direct-construction builder around a positioned PCM reader.
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            sample_rate: None,
+            channels: None,
+            valid_bits_per_sample: None,
+            container_bits_per_sample: None,
+            total_samples: None,
+            channel_mask: None,
+        }
+    }
+
+    /// Set the stream sample rate in Hz.
+    #[must_use]
+    pub fn sample_rate(mut self, sample_rate: u32) -> Self {
+        self.sample_rate = Some(sample_rate);
+        self
+    }
+
+    /// Set the stream channel count.
+    #[must_use]
+    pub fn channels(mut self, channels: u8) -> Self {
+        self.channels = Some(channels);
+        self
+    }
+
+    /// Set the valid bits carried by each PCM sample.
+    #[must_use]
+    pub fn valid_bits_per_sample(mut self, valid_bits_per_sample: u8) -> Self {
+        self.valid_bits_per_sample = Some(valid_bits_per_sample);
+        self
+    }
+
+    /// Override the stored container width used by each PCM sample.
+    ///
+    /// When omitted, the builder uses the next byte-aligned width that can
+    /// store the configured valid bits.
+    #[must_use]
+    pub fn container_bits_per_sample(mut self, container_bits_per_sample: u8) -> Self {
+        self.container_bits_per_sample = Some(container_bits_per_sample);
+        self
+    }
+
+    /// Set the total samples per channel expected from the payload reader.
+    #[must_use]
+    pub fn total_samples(mut self, total_samples: u64) -> Self {
+        self.total_samples = Some(total_samples);
+        self
+    }
+
+    /// Override the physical RFC 9639 channel mask used by the payload.
+    ///
+    /// When omitted, the builder uses the ordinary mask for the configured
+    /// channel count when one exists.
+    #[must_use]
+    pub fn channel_mask(mut self, channel_mask: u32) -> Self {
+        self.channel_mask = Some(channel_mask);
+        self
+    }
+}
+
+impl<R: Read + Seek> WavPcmStreamBuilder<R> {
+    /// Validate the staged fields and construct the concrete stream.
+    pub fn build(self) -> Result<WavPcmStream<R>> {
+        let sample_rate = required_builder_field("sample_rate", self.sample_rate)?;
+        let channels = required_builder_field("channels", self.channels)?;
+        let valid_bits_per_sample =
+            required_builder_field("valid_bits_per_sample", self.valid_bits_per_sample)?;
+        let total_samples = required_builder_field("total_samples", self.total_samples)?;
+        let container_bits_per_sample = self.container_bits_per_sample.unwrap_or_else(|| {
+            u8::try_from(container_bits_from_valid_bits(u16::from(
+                valid_bits_per_sample,
+            )))
+            .expect("byte-aligned container width fits in u8")
+        });
+        let channels_u16 = u16::from(channels);
+        let channel_mask = match self.channel_mask {
+            Some(mask) => mask,
+            None => ordinary_channel_mask(channels_u16).ok_or_else(|| {
+                Error::UnsupportedWav(format!(
+                    "no ordinary channel mask exists for {channels} channels"
+                ))
+            })?,
+        };
+        let bytes_per_sample = u16::from(container_bits_per_sample / 8);
+        let block_align = channels_u16
+            .checked_mul(bytes_per_sample)
+            .ok_or_else(|| Error::UnsupportedWav("fmt block alignment overflows".into()))?;
+        let byte_rate = sample_rate
+            .checked_mul(u32::from(block_align))
+            .ok_or_else(|| Error::UnsupportedWav("fmt byte rate overflows".into()))?;
+        let ordinary_mask = ordinary_channel_mask(channels_u16);
+        let uses_extensible = channels > 2
+            || valid_bits_per_sample != container_bits_per_sample
+            || ordinary_mask != Some(channel_mask);
+        let format = FormatChunk {
+            format_tag: if uses_extensible { 0xFFFE } else { 1 },
+            channels: channels_u16,
+            sample_rate,
+            byte_rate,
+            block_align,
+            container_bits_per_sample: u16::from(container_bits_per_sample),
+            valid_bits_per_sample: u16::from(valid_bits_per_sample),
+            channel_mask,
+        };
+        let envelope = validate_format(format)?;
+        let spec = WavSpec {
+            sample_rate,
+            channels,
+            bits_per_sample: valid_bits_per_sample,
+            total_samples,
+            bytes_per_sample,
+            channel_mask: envelope.channel_mask,
+        };
+        WavPcmStream::from_parts(self.reader, spec, envelope)
+    }
 }
 
 impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
@@ -228,6 +375,14 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
 
 pub(crate) fn inspect_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64> {
     Ok(parse_wav_layout(&mut reader, false, FxmdChunkPolicy::IGNORE)?.total_samples)
+}
+
+fn required_builder_field<T>(name: &str, value: Option<T>) -> Result<T> {
+    value.ok_or_else(|| {
+        Error::UnsupportedWav(format!(
+            "direct WAV stream construction requires `{name}` to be set"
+        ))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1341,5 +1496,70 @@ mod tests {
         let blocks = parsed.metadata.flac_blocks(parsed.wav.spec.total_samples);
         assert_eq!(blocks.len(), 1);
         assert!(matches!(&blocks[0], FlacMetadataBlock::VorbisComment(_)));
+    }
+
+    #[test]
+    fn directly_builds_canonical_wav_stream() {
+        let data = [1i16, -2, 3, -4]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut stream = super::WavPcmStream::builder(Cursor::new(data))
+            .sample_rate(44_100)
+            .channels(2)
+            .valid_bits_per_sample(16)
+            .total_samples(2)
+            .build()
+            .unwrap();
+        let mut samples = Vec::new();
+        stream.read_chunk(2, &mut samples).unwrap();
+
+        assert_eq!(
+            stream.spec().channel_mask,
+            ordinary_channel_mask(2).unwrap()
+        );
+        assert_eq!(samples, vec![1, -2, 3, -4]);
+    }
+
+    #[test]
+    fn directly_builds_extensible_wav_stream() {
+        let envelope = crate::pcm::PcmEnvelope {
+            channels: 4,
+            valid_bits_per_sample: 20,
+            container_bits_per_sample: 24,
+            channel_mask: 0x0033,
+        };
+        let mut data = Vec::new();
+        for &sample in &[1, -2, 3, -4, 5, -6, 7, -8] {
+            crate::pcm::append_encoded_sample(&mut data, sample, envelope).unwrap();
+        }
+
+        let mut stream = super::WavPcmStream::builder(Cursor::new(data))
+            .sample_rate(48_000)
+            .channels(4)
+            .valid_bits_per_sample(20)
+            .container_bits_per_sample(24)
+            .channel_mask(0x0033)
+            .total_samples(2)
+            .build()
+            .unwrap();
+        let mut samples = Vec::new();
+        stream.read_chunk(2, &mut samples).unwrap();
+
+        assert_eq!(stream.spec().bits_per_sample, 20);
+        assert_eq!(stream.spec().bytes_per_sample, 3);
+        assert_eq!(stream.spec().channel_mask, 0x0033);
+        assert_eq!(samples, vec![1, -2, 3, -4, 5, -6, 7, -8]);
+    }
+
+    #[test]
+    fn direct_wav_builder_requires_total_samples() {
+        let error = super::WavPcmStream::builder(Cursor::new(Vec::new()))
+            .sample_rate(44_100)
+            .channels(2)
+            .valid_bits_per_sample(16)
+            .build()
+            .unwrap_err();
+        assert!(error.to_string().contains("total_samples"));
     }
 }

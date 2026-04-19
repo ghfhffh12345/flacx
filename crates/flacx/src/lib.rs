@@ -11,6 +11,10 @@
 //! over metadata, output configuration, or progress reporting, and use
 //! [`builtin`] when a single function call is enough.
 //!
+//! Advanced callers can also skip the reader façade and directly construct the
+//! concrete stream types that feed [`EncodeSource`], [`DecodeSource`], and
+//! [`FlacRecompressSource`].
+//!
 //! ## Getting started
 //!
 //! Encode a supported PCM container to FLAC:
@@ -30,6 +34,33 @@
 //! let summary = encoder.encode_source(source)?;
 //!
 //! println!("encoded {} samples", summary.total_samples);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Or construct a concrete stream directly when you already know the low-level
+//! format details:
+//!
+//! ```no_run
+//! use flacx::{EncodeSource, EncoderConfig, Metadata, WavPcmStream};
+//! use std::{
+//!     fs::File,
+//!     io::{BufReader, BufWriter, Seek, SeekFrom},
+//! };
+//!
+//! let mut payload = BufReader::new(File::open("input.wav")?);
+//! payload.seek(SeekFrom::Start(44))?; // canonical PCM payload offset
+//!
+//! let stream = WavPcmStream::builder(payload)
+//!     .sample_rate(44_100)
+//!     .channels(2)
+//!     .valid_bits_per_sample(16)
+//!     .total_samples(1_024)
+//!     .build()?;
+//! let source = EncodeSource::new(Metadata::new(), stream);
+//!
+//! let output = BufWriter::new(File::create("output.flac")?);
+//! let mut encoder = EncoderConfig::default().into_encoder(output);
+//! encoder.encode_source(source)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -76,7 +107,7 @@
 //!
 //! | Surface | Use it when | Main entry points |
 //! | --- | --- | --- |
-//! | Explicit pipeline | You want direct control over readers, metadata, configs, output containers, or progress callbacks. | [`core`], [`EncoderConfig`], [`DecodeConfig`], [`RecompressConfig`], [`WavReader`], [`FlacReader`], [`Encoder`], [`Decoder`], [`Recompressor`] |
+//! | Explicit pipeline | You want direct control over readers, direct stream construction, metadata, configs, output containers, or progress callbacks. | [`core`], [`EncoderConfig`], [`DecodeConfig`], [`RecompressConfig`], [`WavReader`], [`FlacReader`], [`WavPcmStream`], [`FlacPcmStream`], [`Encoder`], [`Decoder`], [`Recompressor`] |
 //! | Convenience helpers | You want file-path or byte-slice conversions with minimal setup. | [`builtin`] |
 //! | Supporting types | You need presets, metadata editing, raw PCM descriptors, or preflight inspection helpers. | [`level`], [`Metadata`], [`RawPcmDescriptor`], [`inspect_wav_total_samples`], [`inspect_flac_total_samples`] |
 //!
@@ -87,6 +118,10 @@
 //! - **Readers** parse an input format and expose its recovered stream spec and
 //!   metadata, such as [`WavReader`], [`AiffReader`], [`CafReader`], and
 //!   [`FlacReader`].
+//! - **Concrete streams** can be reader-produced or directly constructed when
+//!   you already know the payload layout, such as [`WavPcmStream`],
+//!   [`AiffPcmStream`], [`CafPcmStream`], [`RawPcmStream`], and
+//!   [`FlacPcmStream`].
 //! - **Sources** carry parsed metadata and a single-pass PCM stream into the
 //!   next stage, such as [`EncodeSource`], [`DecodeSource`], and
 //!   [`FlacRecompressSource`].
@@ -168,7 +203,7 @@ pub mod builtin {
 }
 
 #[cfg(feature = "aiff")]
-pub use aiff::{AiffPcmStream, AiffReader};
+pub use aiff::{AiffPcmDescriptor, AiffPcmStream, AiffReader};
 #[cfg(feature = "caf")]
 pub use caf::{CafPcmStream, CafReader};
 pub use config::{DecodeBuilder, DecodeConfig, EncoderBuilder, EncoderConfig};
@@ -185,14 +220,15 @@ pub use raw::{
     RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream, inspect_raw_pcm_total_samples,
 };
 pub use read::{
-    DecodePcmStream, DecodeSource, FlacReader, FlacReaderOptions, read_flac_reader,
-    read_flac_reader_with_options,
+    DecodePcmStream, DecodeSource, FlacPcmStream, FlacPcmStreamBuilder, FlacReader,
+    FlacReaderOptions, read_flac_reader, read_flac_reader_with_options,
 };
 pub use recompress::{
     FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,
     RecompressProgress, RecompressSummary, Recompressor,
 };
-pub use wav_input::{WavPcmStream, WavReader, WavReaderOptions};
+pub use stream_info::StreamInfo;
+pub use wav_input::{WavPcmStream, WavPcmStreamBuilder, WavReader, WavReaderOptions};
 
 /// Inspect a supported PCM-container stream and return its total sample count without decoding it.
 ///
@@ -231,19 +267,20 @@ pub fn write_pcm_stream<W: std::io::Write>(
 /// without the one-shot convenience wrappers.
 pub mod core {
     #[cfg(feature = "aiff")]
-    pub use crate::{AiffPcmStream, AiffReader};
+    pub use crate::{AiffPcmDescriptor, AiffPcmStream, AiffReader};
     #[cfg(feature = "caf")]
     pub use crate::{CafPcmStream, CafReader};
     pub use crate::{
         DecodeBuilder, DecodeConfig, DecodePcmStream, DecodeSource, DecodeSummary, Decoder,
         EncodePcmStream, EncodeSource, EncodeSummary, Encoder, EncoderBuilder, EncoderConfig,
-        FlacReader, FlacReaderOptions, Metadata, PcmContainer, PcmReader, PcmStream, PcmStreamSpec,
-        RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream, RecompressBuilder,
-        RecompressConfig, RecompressMode, RecompressPhase, RecompressProgress, Recompressor,
-        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, read_flac_reader,
-        read_flac_reader_with_options, write_pcm_stream,
+        FlacPcmStream, FlacPcmStreamBuilder, FlacReader, FlacReaderOptions, Metadata, PcmContainer,
+        PcmReader, PcmStream, PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor, RawPcmReader,
+        RawPcmStream, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,
+        RecompressProgress, Recompressor, StreamInfo, inspect_pcm_total_samples,
+        inspect_raw_pcm_total_samples, read_flac_reader, read_flac_reader_with_options,
+        write_pcm_stream,
     };
-    pub use crate::{WavPcmStream, WavReader, WavReaderOptions};
+    pub use crate::{WavPcmStream, WavPcmStreamBuilder, WavReader, WavReaderOptions};
 
     #[cfg(feature = "progress")]
     pub use crate::{DecodeProgress, EncodeProgress, ProgressSnapshot};

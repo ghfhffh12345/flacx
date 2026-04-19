@@ -7,9 +7,10 @@ use std::{
 
 use flacx::{
     DecodePcmStream, DecodeSource, DecodeSummary, EncodePcmStream, EncodeSource, EncoderConfig,
-    FlacReaderOptions, Metadata, PcmReader, PcmSpec, RawPcmByteOrder, RawPcmDescriptor,
-    RecompressConfig, RecompressMode, WavReader, builtin, inspect_raw_pcm_total_samples,
-    level::Level, read_flac_reader, read_flac_reader_with_options, write_pcm_stream,
+    FlacPcmStream, FlacReaderOptions, Metadata, PcmReader, PcmSpec, RawPcmByteOrder,
+    RawPcmDescriptor, RecompressConfig, RecompressMode, StreamInfo, WavPcmStream, WavReader,
+    builtin, inspect_raw_pcm_total_samples, level::Level, read_flac_reader,
+    read_flac_reader_with_options, write_pcm_stream,
 };
 
 mod support;
@@ -38,6 +39,33 @@ fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {
             strict_seektable_validation: true,
             strict_channel_mask_provenance: true,
         },
+    }
+}
+
+fn canonical_wav_payload_offset() -> u64 {
+    44
+}
+
+fn flac_stream_info(bytes: &[u8]) -> StreamInfo {
+    assert!(bytes.starts_with(b"fLaC"));
+    let mut raw = [0u8; 34];
+    raw.copy_from_slice(&bytes[8..42]);
+    StreamInfo::from_bytes(raw)
+}
+
+fn flac_frame_offset(bytes: &[u8]) -> u64 {
+    assert!(bytes.starts_with(b"fLaC"));
+    let mut offset = 4usize;
+    loop {
+        let header = bytes[offset];
+        let is_last = header & 0x80 != 0;
+        let block_len =
+            u32::from_be_bytes([0, bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
+                as usize;
+        offset += 4 + block_len;
+        if is_last {
+            return offset as u64;
+        }
     }
 }
 
@@ -157,6 +185,45 @@ fn source_api_exports_replace_split_metadata_surface() {
     assert!(input_source.contains("pub fn new(reader: R) -> Result<Self>"));
     assert!(!input_source.contains("pub fn read_pcm_reader<"));
     assert!(!input_source.contains("pub fn read_pcm_reader_with_options<"));
+}
+
+#[test]
+fn direct_construction_exports_include_flac_pcm_stream_and_stream_info() {
+    let lib_source = include_str!("../src/lib.rs");
+
+    assert!(lib_source.contains("pub use read::{"));
+    assert!(lib_source.contains("FlacPcmStream"));
+    assert!(lib_source.contains("FlacReader"));
+    assert!(lib_source.contains("pub use stream_info::StreamInfo;"));
+    assert!(lib_source.contains("pub mod core {"));
+    assert!(lib_source.contains("FlacPcmStream"));
+    assert!(lib_source.contains("StreamInfo"));
+}
+
+#[test]
+fn direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
+    let wav_source = include_str!("../src/wav_input.rs");
+    let aiff_source = include_str!("../src/aiff.rs");
+    let caf_source = include_str!("../src/caf.rs");
+    let raw_source = include_str!("../src/raw.rs");
+    let read_source = include_str!("../src/read.rs");
+
+    assert!(wav_source.contains("pub struct WavPcmStream"));
+    assert!(wav_source.contains("WavPcmStream::builder") || wav_source.contains("pub fn builder("));
+
+    assert!(aiff_source.contains("pub struct AiffPcmStream"));
+    assert!(aiff_source.contains("AiffPcmStream") && aiff_source.contains("pub fn new("));
+
+    assert!(caf_source.contains("pub struct CafPcmStream"));
+    assert!(caf_source.contains("CafPcmStream") && caf_source.contains("pub fn new("));
+
+    assert!(raw_source.contains("pub struct RawPcmStream"));
+    assert!(raw_source.contains("RawPcmStream") && raw_source.contains("pub fn new("));
+
+    assert!(read_source.contains("pub struct FlacPcmStream"));
+    assert!(
+        read_source.contains("FlacPcmStream::builder") || read_source.contains("pub fn builder(")
+    );
 }
 
 #[cfg(feature = "aiff")]
@@ -543,6 +610,38 @@ fn encode_source_new_with_scratch_metadata_emits_expected_flac_and_summary() {
 }
 
 #[test]
+fn directly_constructed_wav_stream_matches_reader_encode_source_output() {
+    let samples = sample_fixture(2, 1_024);
+    let wav = pcm_wav_bytes(16, 2, 44_100, &samples);
+
+    let mut baseline_encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    let baseline_summary = baseline_encoder
+        .encode_source(WavReader::new(Cursor::new(&wav)).unwrap().into_source())
+        .unwrap();
+    let baseline_flac = baseline_encoder.into_inner().into_inner();
+
+    let mut payload = Cursor::new(wav.clone());
+    payload
+        .seek(SeekFrom::Start(canonical_wav_payload_offset()))
+        .unwrap();
+    let direct_stream = WavPcmStream::builder(payload)
+        .sample_rate(44_100)
+        .channels(2)
+        .valid_bits_per_sample(16)
+        .total_samples(1_024)
+        .build()
+        .unwrap();
+    let mut direct_encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    let direct_summary = direct_encoder
+        .encode_source(EncodeSource::new(Metadata::default(), direct_stream))
+        .unwrap();
+    let direct_flac = direct_encoder.into_inner().into_inner();
+
+    assert_eq!(direct_summary, baseline_summary);
+    assert_eq!(direct_flac, baseline_flac);
+}
+
+#[test]
 fn shared_metadata_api_replaces_public_split_metadata_and_exposes_no_raw_authoring_surface() {
     let lib_source = include_str!("../src/lib.rs");
     let metadata_source = include_str!("../src/metadata.rs");
@@ -711,6 +810,77 @@ fn reader_metadata_reused_via_decode_source_new_matches_reader_into_decode_sourc
 }
 
 #[test]
+fn directly_constructed_flac_stream_matches_reader_decode_source_output() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+    let direct_metadata = read_flac_reader(Cursor::new(&flac))
+        .unwrap()
+        .metadata()
+        .clone();
+
+    let mut baseline_decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
+    let baseline_summary = baseline_decoder
+        .decode_source(
+            read_flac_reader(Cursor::new(&flac))
+                .unwrap()
+                .into_decode_source(),
+        )
+        .unwrap();
+    let baseline_output = baseline_decoder.into_inner().into_inner();
+
+    let direct_stream = FlacPcmStream::builder(Cursor::new(flac.clone()))
+        .stream_info(flac_stream_info(&flac))
+        .frame_offset(flac_frame_offset(&flac))
+        .build()
+        .unwrap();
+    let mut direct_decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
+    let direct_summary = direct_decoder
+        .decode_source(DecodeSource::new(direct_metadata, direct_stream))
+        .unwrap();
+    let direct_output = direct_decoder.into_inner().into_inner();
+
+    assert_eq!(direct_summary, baseline_summary);
+    assert_eq!(direct_output, baseline_output);
+}
+
+#[test]
+fn directly_constructed_flac_stream_matches_reader_recompress_output() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+
+    let mut baseline_recompressor =
+        RecompressConfig::default().into_recompressor(Cursor::new(Vec::new()));
+    let baseline_summary = baseline_recompressor
+        .recompress(
+            read_flac_reader(Cursor::new(&flac))
+                .unwrap()
+                .into_recompress_source(),
+        )
+        .unwrap();
+    let baseline_output = baseline_recompressor.into_inner().into_inner();
+
+    let stream_info = flac_stream_info(&flac);
+    let direct_stream = FlacPcmStream::builder(Cursor::new(flac.clone()))
+        .stream_info(stream_info)
+        .frame_offset(flac_frame_offset(&flac))
+        .build()
+        .unwrap();
+    let mut direct_recompressor =
+        RecompressConfig::default().into_recompressor(Cursor::new(Vec::new()));
+    let direct_summary = direct_recompressor
+        .recompress(flacx::FlacRecompressSource::new(
+            Metadata::default(),
+            direct_stream,
+            stream_info.md5,
+        ))
+        .unwrap();
+    let direct_output = direct_recompressor.into_inner().into_inner();
+
+    assert_eq!(direct_summary, baseline_summary);
+    assert_eq!(direct_output, baseline_output);
+}
+
+#[test]
 fn decode_builder_supports_strict_channel_mask_provenance() {
     let config = flacx::DecodeConfig::builder()
         .threads(2)
@@ -755,6 +925,60 @@ fn raw_api_rejects_missing_multichannel_channel_mask() {
         channel_mask: None,
     };
     let error = inspect_raw_pcm_total_samples(Cursor::new(vec![0u8; 16]), descriptor).unwrap_err();
+    assert!(error.to_string().contains("channel mask"));
+}
+
+#[test]
+fn encode_source_rejects_conflicting_metadata_channel_mask() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let (_, stream) = WavReader::new(Cursor::new(&wav))
+        .unwrap()
+        .into_source()
+        .into_parts();
+    let mut metadata = Metadata::new();
+    metadata.set_channel_mask(0);
+
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    let error = encoder
+        .encode_source(EncodeSource::new(metadata, stream))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("channel mask"));
+}
+
+#[test]
+fn decode_source_rejects_conflicting_metadata_channel_mask() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+    let (_, stream) = read_flac_reader(Cursor::new(&flac))
+        .unwrap()
+        .into_decode_source()
+        .into_parts();
+    let mut metadata = Metadata::new();
+    metadata.set_channel_mask(0);
+
+    let mut decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
+    let error = decoder
+        .decode_source(DecodeSource::new(metadata, stream))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("channel mask"));
+}
+
+#[test]
+fn recompress_source_rejects_conflicting_metadata_channel_mask() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let expected_md5 = reader.stream_info().md5;
+    let (_, stream) = reader.into_decode_source().into_parts();
+    let mut metadata = Metadata::new();
+    metadata.set_channel_mask(0);
+
+    let source = flacx::FlacRecompressSource::new(metadata, stream, expected_md5);
+    let mut recompressor = RecompressConfig::default().into_recompressor(Cursor::new(Vec::new()));
+    let error = recompressor.recompress(source).unwrap_err();
+
     assert!(error.to_string().contains("channel mask"));
 }
 

@@ -13,8 +13,9 @@ use crate::{
     input::{EncodePcmStream, WavSpec},
     metadata::Metadata,
     model::ChannelAssignment,
+    pcm::{is_supported_channel_mask, ordinary_channel_mask},
     progress::NoProgress,
-    stream_info::StreamInfo,
+    stream_info::{MAX_STREAMINFO_SAMPLE_RATE, StreamInfo},
 };
 
 const FLAC_MAGIC: &[u8; 4] = b"fLaC";
@@ -211,16 +212,7 @@ impl<R: Read + Seek> FlacReader<R> {
             self.metadata,
             self.stream_info,
             self.spec,
-            FlacPcmStream {
-                reader: self.reader,
-                stream_info: self.stream_info,
-                spec: self.spec,
-                next_frame_index: 0,
-                next_sample_number: 0,
-                threads: 1,
-                pending_bytes: Vec::new(),
-                eof: false,
-            },
+            FlacPcmStream::from_parts(self.reader, self.stream_info, self.spec),
         )
     }
 }
@@ -238,13 +230,100 @@ pub struct FlacPcmStream<R> {
 }
 
 impl<R> FlacPcmStream<R> {
+    /// Start building a directly constructed FLAC PCM stream.
+    #[must_use]
+    pub fn builder(reader: R) -> FlacPcmStreamBuilder<R> {
+        FlacPcmStreamBuilder::new(reader)
+    }
+
+    fn from_parts(reader: R, stream_info: StreamInfo, spec: WavSpec) -> Self {
+        Self {
+            reader,
+            stream_info,
+            spec,
+            next_frame_index: 0,
+            next_sample_number: 0,
+            threads: 1,
+            pending_bytes: Vec::new(),
+            eof: false,
+        }
+    }
+
     #[must_use]
     pub fn spec(&self) -> WavSpec {
         self.spec
     }
 
+    /// Return the parsed or staged STREAMINFO block for this stream.
+    #[must_use]
+    pub fn stream_info(&self) -> StreamInfo {
+        self.stream_info
+    }
+
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads.max(1);
+    }
+}
+
+/// Builder for directly constructing [`FlacPcmStream`] from a seekable FLAC
+/// frame source plus explicit STREAMINFO-driven structural inputs.
+#[derive(Debug)]
+pub struct FlacPcmStreamBuilder<R> {
+    reader: R,
+    stream_info: Option<StreamInfo>,
+    channel_mask: Option<u32>,
+    frame_offset: Option<u64>,
+}
+
+impl<R> FlacPcmStreamBuilder<R> {
+    #[must_use]
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            stream_info: None,
+            channel_mask: None,
+            frame_offset: None,
+        }
+    }
+
+    /// Set the STREAMINFO block that acts as the sole structural authority for
+    /// the direct FLAC stream.
+    #[must_use]
+    pub fn stream_info(mut self, stream_info: StreamInfo) -> Self {
+        self.stream_info = Some(stream_info);
+        self
+    }
+
+    /// Override the decoded PCM channel mask. When omitted, the ordinary mask
+    /// for the STREAMINFO channel count is used.
+    #[must_use]
+    pub fn channel_mask(mut self, channel_mask: u32) -> Self {
+        self.channel_mask = Some(channel_mask);
+        self
+    }
+
+    /// Seek the reader to the first FLAC frame before building the stream.
+    #[must_use]
+    pub fn frame_offset(mut self, frame_offset: u64) -> Self {
+        self.frame_offset = Some(frame_offset);
+        self
+    }
+}
+
+impl<R: Read + Seek> FlacPcmStreamBuilder<R> {
+    pub fn build(mut self) -> Result<FlacPcmStream<R>> {
+        let stream_info = self.stream_info.ok_or(Error::InvalidFlac(
+            "direct FLAC stream construction requires STREAMINFO",
+        ))?;
+        validate_direct_stream_info(stream_info)?;
+        if let Some(frame_offset) = self.frame_offset {
+            self.reader.seek(std::io::SeekFrom::Start(frame_offset))?;
+        }
+        Ok(FlacPcmStream::from_parts(
+            self.reader,
+            stream_info,
+            direct_spec_from_stream_info(stream_info, self.channel_mask)?,
+        ))
     }
 }
 
@@ -500,13 +579,72 @@ fn spec_from_stream_info(
     })
 }
 
+fn direct_spec_from_stream_info(
+    stream_info: StreamInfo,
+    channel_mask: Option<u32>,
+) -> Result<WavSpec> {
+    let channel_mask = match channel_mask {
+        Some(channel_mask) => channel_mask,
+        None => ordinary_channel_mask(u16::from(stream_info.channels)).ok_or_else(|| {
+            Error::UnsupportedFlac(format!(
+                "no ordinary channel mask exists for {} channels",
+                stream_info.channels
+            ))
+        })?,
+    };
+    if !is_supported_channel_mask(u16::from(stream_info.channels), channel_mask) {
+        return Err(Error::UnsupportedFlac(format!(
+            "channel mask {channel_mask:#010x} is not supported for {} channels",
+            stream_info.channels
+        )));
+    }
+    Ok(WavSpec {
+        sample_rate: stream_info.sample_rate,
+        channels: stream_info.channels,
+        bits_per_sample: stream_info.bits_per_sample,
+        total_samples: stream_info.total_samples,
+        bytes_per_sample: u16::from(stream_info.bits_per_sample.div_ceil(8)),
+        channel_mask,
+    })
+}
+
+fn validate_direct_stream_info(stream_info: StreamInfo) -> Result<()> {
+    if !(1..=8).contains(&stream_info.channels) {
+        return Err(Error::UnsupportedFlac(format!(
+            "FLAC direct streams only support 1..8 channels, found {}",
+            stream_info.channels
+        )));
+    }
+    if !(4..=32).contains(&stream_info.bits_per_sample) {
+        return Err(Error::UnsupportedFlac(format!(
+            "FLAC direct streams only support 4..32 bits/sample, found {}",
+            stream_info.bits_per_sample
+        )));
+    }
+    if stream_info.sample_rate > MAX_STREAMINFO_SAMPLE_RATE {
+        return Err(Error::UnsupportedFlac(format!(
+            "FLAC sample rate {} exceeds STREAMINFO limits",
+            stream_info.sample_rate
+        )));
+    }
+    if stream_info.total_samples > 0x0f_ff_ff_ff_ff {
+        return Err(Error::UnsupportedFlac(format!(
+            "FLAC total samples {} exceed STREAMINFO limits",
+            stream_info.total_samples
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::frame::{
         channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment,
     };
     use super::metadata::requires_channel_layout_provenance;
+    use super::{FlacPcmStream, StreamInfo};
     use crate::model::ChannelAssignment;
+    use std::io::Cursor;
 
     #[test]
     fn decodes_independent_channel_assignments_for_one_to_eight_channels() {
@@ -564,5 +702,25 @@ mod tests {
         assert!(!requires_channel_layout_provenance(2, None));
         assert!(requires_channel_layout_provenance(2, Some(0)));
         assert!(requires_channel_layout_provenance(4, Some(0x0001_2104)));
+    }
+
+    #[test]
+    fn direct_flac_builder_rejects_invalid_streaminfo() {
+        let stream_info = StreamInfo {
+            sample_rate: 44_100,
+            channels: 0,
+            bits_per_sample: 16,
+            total_samples: 16,
+            md5: [0; 16],
+            min_block_size: 0,
+            max_block_size: 0,
+            min_frame_size: 0,
+            max_frame_size: 0,
+        };
+        let error = FlacPcmStream::builder(Cursor::new(Vec::<u8>::new()))
+            .stream_info(stream_info)
+            .build()
+            .unwrap_err();
+        assert!(error.to_string().contains("1..8"));
     }
 }
