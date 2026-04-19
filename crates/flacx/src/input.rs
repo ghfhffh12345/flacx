@@ -4,8 +4,7 @@ use crate::error::{Error, Result};
 use crate::metadata::Metadata;
 
 pub(crate) use crate::pcm::{
-    PcmEnvelope, PcmSpec as WavSpec, PcmStream as WavData, append_encoded_sample,
-    container_bits_from_valid_bits, ordinary_channel_mask,
+    PcmEnvelope, append_encoded_sample, container_bits_from_valid_bits, ordinary_channel_mask,
 };
 pub use crate::pcm::{PcmSpec, PcmStream};
 pub(crate) type PcmReaderOptions = crate::wav_input::WavReaderOptions;
@@ -218,7 +217,7 @@ pub(crate) fn read_pcm_reader<R: Read + Seek>(reader: R) -> Result<PcmReader<R>>
 }
 
 #[allow(dead_code)]
-pub fn read_wav<R: Read + Seek>(reader: R) -> Result<WavData> {
+pub fn read_wav<R: Read + Seek>(reader: R) -> Result<PcmStream> {
     #[cfg(not(feature = "wav"))]
     {
         return Err(wav_feature_disabled_error());

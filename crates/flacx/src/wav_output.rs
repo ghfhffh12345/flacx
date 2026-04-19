@@ -7,11 +7,11 @@ use crate::caf_output::{CafStreamWriter, write_caf};
 use crate::{
     error::{Error, Result},
     input::{
-        PcmEnvelope, WavSpec, append_encoded_sample, container_bits_from_valid_bits,
+        PcmEnvelope, PcmSpec, append_encoded_sample, container_bits_from_valid_bits,
         ordinary_channel_mask,
     },
     md5::Md5,
-    metadata::{FXMD_CHUNK_ID, WavMetadata},
+    metadata::{FXMD_CHUNK_ID, Metadata},
     pcm::{PcmContainer, is_supported_channel_mask},
 };
 
@@ -55,8 +55,8 @@ pub(crate) struct RiffStreamWriter<W: Write> {
 impl<W: Write> StreamingPcmWriter<W> {
     pub(crate) fn new(
         mut writer: W,
-        spec: WavSpec,
-        metadata: &WavMetadata,
+        spec: PcmSpec,
+        metadata: &Metadata,
         options: WavMetadataWriteOptions,
     ) -> Result<Self> {
         match options.container {
@@ -442,15 +442,15 @@ fn caf_feature_disabled_error() -> Error {
 }
 
 #[allow(dead_code)]
-pub(crate) fn write_wav<W: Write>(writer: &mut W, spec: WavSpec, samples: &[i32]) -> Result<()> {
-    write_wav_with_metadata(writer, spec, samples, &WavMetadata::default())
+pub(crate) fn write_wav<W: Write>(writer: &mut W, spec: PcmSpec, samples: &[i32]) -> Result<()> {
+    write_wav_with_metadata(writer, spec, samples, &Metadata::default())
 }
 
 pub(crate) fn write_wav_with_metadata<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
-    metadata: &WavMetadata,
+    metadata: &Metadata,
 ) -> Result<()> {
     write_wav_with_metadata_and_md5_with_options(
         writer,
@@ -464,9 +464,9 @@ pub(crate) fn write_wav_with_metadata<W: Write>(
 
 pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
-    metadata: &WavMetadata,
+    metadata: &Metadata,
     options: WavMetadataWriteOptions,
 ) -> Result<[u8; 16]> {
     match options.container {
@@ -617,7 +617,7 @@ pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
 }
 
 fn fmt_chunk_payload(
-    spec: WavSpec,
+    spec: PcmSpec,
     container_bits_per_sample: u16,
     block_align: usize,
     channel_mask: u32,
@@ -645,7 +645,7 @@ fn fmt_chunk_payload(
     payload
 }
 
-fn wav_metadata_chunks(metadata: &WavMetadata, emit_fxmd: bool) -> Vec<([u8; 4], Vec<u8>)> {
+fn wav_metadata_chunks(metadata: &Metadata, emit_fxmd: bool) -> Vec<([u8; 4], Vec<u8>)> {
     if metadata.is_empty() {
         return Vec::new();
     }
@@ -743,9 +743,9 @@ pub(crate) fn ensure_output_container_enabled(container: PcmContainer) -> Result
 #[cfg(feature = "aiff")]
 fn write_aiff<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
-    metadata: &WavMetadata,
+    metadata: &Metadata,
 ) -> Result<[u8; 16]> {
     write_aiff_with_metadata_and_md5(writer, spec, samples, metadata, AiffContainer::Aiff)
 }
@@ -753,9 +753,9 @@ fn write_aiff<W: Write>(
 #[cfg(not(feature = "aiff"))]
 fn write_aiff<W: Write>(
     _writer: &mut W,
-    _spec: WavSpec,
+    _spec: PcmSpec,
     _samples: &[i32],
-    _metadata: &WavMetadata,
+    _metadata: &Metadata,
 ) -> Result<[u8; 16]> {
     Err(feature_disabled_output_error(PcmContainer::Aiff))
 }
@@ -763,9 +763,9 @@ fn write_aiff<W: Write>(
 #[cfg(feature = "aiff")]
 fn write_aifc<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
-    metadata: &WavMetadata,
+    metadata: &Metadata,
 ) -> Result<[u8; 16]> {
     write_aiff_with_metadata_and_md5(writer, spec, samples, metadata, AiffContainer::AifcNone)
 }
@@ -773,9 +773,9 @@ fn write_aifc<W: Write>(
 #[cfg(not(feature = "aiff"))]
 fn write_aifc<W: Write>(
     _writer: &mut W,
-    _spec: WavSpec,
+    _spec: PcmSpec,
     _samples: &[i32],
-    _metadata: &WavMetadata,
+    _metadata: &Metadata,
 ) -> Result<[u8; 16]> {
     Err(feature_disabled_output_error(PcmContainer::Aifc))
 }
@@ -783,9 +783,9 @@ fn write_aifc<W: Write>(
 #[cfg(feature = "caf")]
 fn write_caf_container<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
-    metadata: &WavMetadata,
+    metadata: &Metadata,
 ) -> Result<[u8; 16]> {
     write_caf(writer, spec, samples, metadata)
 }
@@ -793,9 +793,9 @@ fn write_caf_container<W: Write>(
 #[cfg(not(feature = "caf"))]
 fn write_caf_container<W: Write>(
     _writer: &mut W,
-    _spec: WavSpec,
+    _spec: PcmSpec,
     _samples: &[i32],
-    _metadata: &WavMetadata,
+    _metadata: &Metadata,
 ) -> Result<[u8; 16]> {
     Err(feature_disabled_output_error(PcmContainer::Caf))
 }
@@ -1031,8 +1031,8 @@ fn write_sample_bytes<W: Write>(
 mod tests {
     use crate::{
         PcmContainer,
-        input::{WavSpec, ordinary_channel_mask},
-        metadata::WavMetadata,
+        input::{PcmSpec, ordinary_channel_mask},
+        metadata::Metadata,
     };
 
     use super::{
@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn writes_canonical_16bit_wav() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 44_100,
             channels: 2,
             bits_per_sample: 16,
@@ -1114,7 +1114,7 @@ mod tests {
 
     #[test]
     fn writes_extensible_wav_for_padded_container() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 48_000,
             channels: 2,
             bits_per_sample: 12,
@@ -1136,7 +1136,7 @@ mod tests {
 
     #[test]
     fn metadata_wav_layout_is_fixed_and_padded() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 44_100,
             channels: 1,
             bits_per_sample: 16,
@@ -1145,7 +1145,7 @@ mod tests {
             channel_mask: ordinary_channel_mask(1u16).unwrap(),
         };
         let samples = [1, -2];
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 4,
@@ -1196,7 +1196,7 @@ mod tests {
 
     #[test]
     fn metadata_output_can_omit_fxmd_while_preserving_other_chunks() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 44_100,
             channels: 1,
             bits_per_sample: 16,
@@ -1205,7 +1205,7 @@ mod tests {
             channel_mask: ordinary_channel_mask(1u16).unwrap(),
         };
         let samples = [1, -2];
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 4,
@@ -1245,7 +1245,7 @@ mod tests {
 
     #[test]
     fn writes_non_ordinary_channel_masks_in_extensible_fmt() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 48_000,
             channels: 4,
             bits_per_sample: 16,
@@ -1271,7 +1271,7 @@ mod tests {
 
     #[test]
     fn writes_zero_channel_mask_in_extensible_fmt() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 44_100,
             channels: 2,
             bits_per_sample: 16,

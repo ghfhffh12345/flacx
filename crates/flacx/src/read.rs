@@ -10,7 +10,7 @@ use std::{
 use crate::{
     config::DecodeConfig,
     error::{Error, Result},
-    input::{EncodePcmStream, WavSpec},
+    input::{EncodePcmStream, PcmSpec},
     metadata::Metadata,
     model::ChannelAssignment,
     pcm::{is_supported_channel_mask, ordinary_channel_mask},
@@ -141,7 +141,7 @@ impl<S> DecodeSource<S> {
 impl<S: DecodePcmStream> DecodeSource<S> {
     /// Return the PCM spec that will be decoded into an output container.
     #[must_use]
-    pub fn spec(&self) -> WavSpec {
+    pub fn spec(&self) -> PcmSpec {
         self.stream.spec()
     }
 }
@@ -149,7 +149,7 @@ impl<S: DecodePcmStream> DecodeSource<S> {
 /// Reader façade for FLAC inputs.
 ///
 /// `FlacReader` parses STREAMINFO plus user-visible metadata, exposes the
-/// recovered [`WavSpec`]-shaped stream description, and can then hand ownership
+/// recovered [`PcmSpec`]-shaped stream description, and can then hand ownership
 /// to either a decode or recompress source.
 #[derive(Debug)]
 pub struct FlacReader<R> {
@@ -157,7 +157,7 @@ pub struct FlacReader<R> {
     frame_offset: u64,
     stream_info: StreamInfo,
     metadata: Metadata,
-    spec: WavSpec,
+    spec: PcmSpec,
 }
 
 impl<R: Read + Seek> FlacReader<R> {
@@ -168,7 +168,7 @@ impl<R: Read + Seek> FlacReader<R> {
 
     /// Return the decoded PCM-facing stream description.
     #[must_use]
-    pub fn spec(&self) -> WavSpec {
+    pub fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -204,7 +204,7 @@ impl<R: Read + Seek> FlacReader<R> {
 
     pub(crate) fn into_session_parts(
         mut self,
-    ) -> (Metadata, StreamInfo, WavSpec, FlacPcmStream<R>) {
+    ) -> (Metadata, StreamInfo, PcmSpec, FlacPcmStream<R>) {
         self.reader
             .seek(std::io::SeekFrom::Start(self.frame_offset))
             .expect("flac reader remains seekable through stream conversion");
@@ -221,7 +221,7 @@ impl<R: Read + Seek> FlacReader<R> {
 pub struct FlacPcmStream<R> {
     reader: R,
     stream_info: StreamInfo,
-    spec: WavSpec,
+    spec: PcmSpec,
     next_frame_index: usize,
     next_sample_number: u64,
     threads: usize,
@@ -236,7 +236,7 @@ impl<R> FlacPcmStream<R> {
         FlacPcmStreamBuilder::new(reader)
     }
 
-    fn from_parts(reader: R, stream_info: StreamInfo, spec: WavSpec) -> Self {
+    fn from_parts(reader: R, stream_info: StreamInfo, spec: PcmSpec) -> Self {
         Self {
             reader,
             stream_info,
@@ -250,7 +250,7 @@ impl<R> FlacPcmStream<R> {
     }
 
     #[must_use]
-    pub fn spec(&self) -> WavSpec {
+    pub fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -364,7 +364,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
 }
 
 impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
-    fn spec(&self) -> WavSpec {
+    fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -563,13 +563,13 @@ fn spec_from_stream_info(
     stream_info: StreamInfo,
     metadata: &Metadata,
     strict_channel_mask_provenance: bool,
-) -> Result<WavSpec> {
+) -> Result<PcmSpec> {
     let channel_mask = resolve_channel_mask(
         stream_info.channels,
         metadata,
         strict_channel_mask_provenance,
     )?;
-    Ok(WavSpec {
+    Ok(PcmSpec {
         sample_rate: stream_info.sample_rate,
         channels: stream_info.channels,
         bits_per_sample: stream_info.bits_per_sample,
@@ -582,7 +582,7 @@ fn spec_from_stream_info(
 fn direct_spec_from_stream_info(
     stream_info: StreamInfo,
     channel_mask: Option<u32>,
-) -> Result<WavSpec> {
+) -> Result<PcmSpec> {
     let channel_mask = match channel_mask {
         Some(channel_mask) => channel_mask,
         None => ordinary_channel_mask(u16::from(stream_info.channels)).ok_or_else(|| {
@@ -598,7 +598,7 @@ fn direct_spec_from_stream_info(
             stream_info.channels
         )));
     }
-    Ok(WavSpec {
+    Ok(PcmSpec {
         sample_rate: stream_info.sample_rate,
         channels: stream_info.channels,
         bits_per_sample: stream_info.bits_per_sample,

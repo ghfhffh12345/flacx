@@ -428,8 +428,6 @@ pub(crate) fn align_metadata_to_stream_spec(
     Ok(())
 }
 
-pub(crate) type WavMetadata = Metadata;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SeekPoint {
     pub(crate) sample_number: u64,
@@ -500,10 +498,9 @@ pub(crate) fn validate_seektable_payload(payload: &[u8]) -> crate::error::Result
 mod tests {
     use super::{
         APPLICATION_BLOCK_TYPE, FLACX_CHANNEL_LAYOUT_PROVENANCE_KEY, FXMD_VERSION,
-        FlacMetadataBlock, FxmdChunkPolicy, MetadataDraft, PICTURE_BLOCK_TYPE,
+        FlacMetadataBlock, FxmdChunkPolicy, Metadata, MetadataDraft, PICTURE_BLOCK_TYPE,
         PreservedMetadataBundle, SEEKTABLE_PLACEHOLDER_SAMPLE_NUMBER, SeekPoint,
-        WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY, WavMetadata, parse_cuesheet_tracks,
-        validate_seektable_payload,
+        WAVEFORMATEXTENSIBLE_CHANNEL_MASK_KEY, parse_cuesheet_tracks, validate_seektable_payload,
     };
 
     fn info_list_chunk(entries: &[([u8; 4], &[u8])]) -> Vec<u8> {
@@ -687,7 +684,7 @@ mod tests {
 
     #[test]
     fn restores_vorbis_comments_into_supported_wav_info_entries() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 4,
@@ -711,7 +708,7 @@ mod tests {
 
     #[test]
     fn restores_cuesheet_tracks_preferring_index_01_offsets() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 5,
@@ -726,7 +723,7 @@ mod tests {
 
     #[test]
     fn drops_out_of_range_or_duplicate_cuesheet_points() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 5,
@@ -833,7 +830,7 @@ mod tests {
 
     #[test]
     fn parses_channel_mask_comment_case_insensitively_with_padded_hex() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 4,
@@ -848,7 +845,7 @@ mod tests {
 
     #[test]
     fn parses_zero_channel_mask_value() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 4,
@@ -863,7 +860,7 @@ mod tests {
 
     #[test]
     fn parses_private_layout_provenance_marker() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 4,
@@ -878,7 +875,7 @@ mod tests {
 
     #[test]
     fn wav_metadata_with_preserved_bundle_converts_back_to_encode_metadata() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(2, &application_payload(b"opaque-app"), 8_000, 1)
             .unwrap();
@@ -891,7 +888,7 @@ mod tests {
 
     #[test]
     fn rejects_channel_mask_comment_with_unsupported_speaker_bits() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         let error = metadata
             .ingest_flac_metadata_block(
                 4,
@@ -906,7 +903,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_private_layout_provenance_marker() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         let error = metadata
             .ingest_flac_metadata_block(
                 4,

@@ -5,8 +5,8 @@ use crate::metadata::{FXMD_CHUNK_ID, FxmdChunkPolicy, Metadata, MetadataDraft};
 use crate::{
     error::{Error, Result},
     pcm::{
-        PcmEnvelope, PcmSpec as WavSpec, PcmStream as WavData, container_bits_from_valid_bits,
-        is_supported_channel_mask, ordinary_channel_mask,
+        PcmEnvelope, PcmSpec, PcmStream, container_bits_from_valid_bits, is_supported_channel_mask,
+        ordinary_channel_mask,
     },
 };
 
@@ -70,7 +70,7 @@ pub struct WavPcmStreamBuilder<R> {
 #[derive(Debug, Clone)]
 pub struct WavReader<R> {
     reader: R,
-    spec: WavSpec,
+    spec: PcmSpec,
     metadata: Metadata,
     envelope: PcmEnvelope,
 }
@@ -107,7 +107,7 @@ impl<R: Read + Seek> WavReader<R> {
             },
         )?;
         reader.seek(SeekFrom::Start(layout.data_offset))?;
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: layout.format.sample_rate,
             channels: layout.format.channels as u8,
             bits_per_sample: layout.envelope.valid_bits_per_sample as u8,
@@ -133,7 +133,7 @@ impl<R: Read + Seek> WavReader<R> {
 
     /// Return the parsed PCM stream specification.
     #[must_use]
-    pub fn spec(&self) -> WavSpec {
+    pub fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -172,7 +172,7 @@ impl<R: Read + Seek> WavReader<R> {
 #[derive(Debug, Clone)]
 pub struct WavPcmStream<R> {
     reader: R,
-    spec: WavSpec,
+    spec: PcmSpec,
     envelope: PcmEnvelope,
     remaining_frames: u64,
     frame_bytes: usize,
@@ -186,7 +186,7 @@ impl<R: Read + Seek> WavPcmStream<R> {
         WavPcmStreamBuilder::new(reader)
     }
 
-    fn from_parts(reader: R, spec: WavSpec, envelope: PcmEnvelope) -> Result<Self> {
+    fn from_parts(reader: R, spec: PcmSpec, envelope: PcmEnvelope) -> Result<Self> {
         let frame_bytes = usize::from(envelope.channels)
             .checked_mul(usize::from(envelope.container_bits_per_sample / 8))
             .ok_or_else(|| Error::UnsupportedWav("PCM frame size overflows".into()))?;
@@ -309,7 +309,7 @@ impl<R: Read + Seek> WavPcmStreamBuilder<R> {
             channel_mask,
         };
         let envelope = validate_format(format)?;
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate,
             channels,
             bits_per_sample: valid_bits_per_sample,
@@ -322,7 +322,7 @@ impl<R: Read + Seek> WavPcmStreamBuilder<R> {
 }
 
 impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
-    fn spec(&self) -> WavSpec {
+    fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -358,7 +358,7 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
 }
 
 /// Read and materialize an entire WAV-family input into memory.
-pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
+pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<PcmStream> {
     let reader = WavReader::with_reader_options(
         &mut reader,
         WavReaderOptions {
@@ -370,7 +370,7 @@ pub fn read_wav<R: Read + Seek>(mut reader: R) -> Result<WavData> {
     let mut stream = reader.into_pcm_stream();
     let mut samples = Vec::new();
     while stream.read_chunk(4_096, &mut samples)? != 0 {}
-    Ok(WavData { spec, samples })
+    Ok(PcmStream { spec, samples })
 }
 
 pub(crate) fn inspect_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64> {
@@ -965,10 +965,10 @@ mod tests {
         metadata::FlacMetadataBlock,
     };
 
-    use super::{WavData, WavSpec, ordinary_channel_mask, read_wav};
+    use super::{PcmSpec, PcmStream, ordinary_channel_mask, read_wav};
 
     struct ParsedForEncode {
-        wav: WavData,
+        wav: PcmStream,
         metadata: crate::metadata::Metadata,
     }
 
@@ -987,7 +987,7 @@ mod tests {
         let mut samples = Vec::new();
         while stream.read_chunk(4_096, &mut samples).unwrap() != 0 {}
         ParsedForEncode {
-            wav: WavData { spec, samples },
+            wav: PcmStream { spec, samples },
             metadata,
         }
     }
@@ -1236,8 +1236,8 @@ mod tests {
         let wav = read_wav(Cursor::new(pcm_wav_bytes(16, 2, 44_100, &samples))).unwrap();
         assert_eq!(
             wav,
-            WavData {
-                spec: WavSpec {
+            PcmStream {
+                spec: PcmSpec {
                     sample_rate: 44_100,
                     channels: 2,
                     bits_per_sample: 16,

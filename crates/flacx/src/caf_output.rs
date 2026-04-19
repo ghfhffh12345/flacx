@@ -2,9 +2,9 @@ use std::io::Write;
 
 use crate::{
     error::{Error, Result},
-    input::{WavSpec, container_bits_from_valid_bits},
+    input::{PcmSpec, container_bits_from_valid_bits},
     md5::streaminfo_md5,
-    metadata::WavMetadata,
+    metadata::Metadata,
     pcm::{PcmEnvelope, is_supported_channel_mask, ordinary_channel_mask},
 };
 
@@ -25,9 +25,9 @@ const CAF_MARKER_SIZE: usize = 28;
 #[allow(dead_code)]
 pub(crate) fn write_caf<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
-    metadata: &WavMetadata,
+    metadata: &Metadata,
 ) -> Result<[u8; 16]> {
     if !(1..=8).contains(&spec.channels) {
         return Err(Error::UnsupportedWav(format!(
@@ -96,7 +96,7 @@ pub(crate) struct CafStreamWriter<W: Write> {
 }
 
 impl<W: Write> CafStreamWriter<W> {
-    pub(crate) fn new(mut writer: W, spec: WavSpec, metadata: &WavMetadata) -> Result<Self> {
+    pub(crate) fn new(mut writer: W, spec: PcmSpec, metadata: &Metadata) -> Result<Self> {
         if !(1..=8).contains(&spec.channels) {
             return Err(Error::UnsupportedWav(format!(
                 "only the ordinary 1..8 channel envelope is supported, found {} channels",
@@ -170,7 +170,7 @@ fn write_header<W: Write>(writer: &mut W) -> Result<()> {
 
 fn write_desc_chunk<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     container_bits_per_sample: u16,
 ) -> Result<()> {
     let bytes_per_frame = u32::from(spec.channels)
@@ -206,7 +206,7 @@ fn write_all_zero_edit_count<W: Write>(writer: &mut W) -> Result<()> {
     Ok(())
 }
 
-fn caf_channel_layout_chunk(spec: WavSpec) -> Result<Option<Vec<u8>>> {
+fn caf_channel_layout_chunk(spec: PcmSpec) -> Result<Option<Vec<u8>>> {
     let channels = u32::from(spec.channels);
     let mask = spec.channel_mask;
 
@@ -244,7 +244,7 @@ fn caf_channel_layout_chunk(spec: WavSpec) -> Result<Option<Vec<u8>>> {
     Ok(Some(payload))
 }
 
-fn caf_info_chunk_payload(metadata: &WavMetadata) -> Result<Option<Vec<u8>>> {
+fn caf_info_chunk_payload(metadata: &Metadata) -> Result<Option<Vec<u8>>> {
     let Some(payload) = metadata.list_info_chunk_payload() else {
         return Ok(None);
     };
@@ -279,7 +279,7 @@ fn caf_info_chunk_payload(metadata: &WavMetadata) -> Result<Option<Vec<u8>>> {
     Ok(Some(payload))
 }
 
-fn caf_mark_chunk_payload(metadata: &WavMetadata) -> Result<Option<Vec<u8>>> {
+fn caf_mark_chunk_payload(metadata: &Metadata) -> Result<Option<Vec<u8>>> {
     let Some(payload) = metadata.cue_chunk_payload() else {
         return Ok(None);
     };
@@ -483,7 +483,7 @@ fn append_caf_encoded_sample(
 
 #[cfg(test)]
 mod tests {
-    use crate::{input::ordinary_channel_mask, metadata::WavMetadata};
+    use crate::{input::ordinary_channel_mask, metadata::Metadata};
 
     use super::{
         CAF_CHAN_CHUNK_ID, CAF_DATA_CHUNK_ID, CAF_DESC_CHUNK_ID, CAF_INFO_CHUNK_ID,
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn writes_minimal_caf_pcm_with_md5() {
-        let spec = super::WavSpec {
+        let spec = super::PcmSpec {
             sample_rate: 44_100,
             channels: 2,
             bits_per_sample: 16,
@@ -583,7 +583,7 @@ mod tests {
         let samples = [1, -2, 3, -4];
         let mut caf = Vec::new();
 
-        let md5 = write_caf(&mut caf, spec, &samples, &WavMetadata::default()).unwrap();
+        let md5 = write_caf(&mut caf, spec, &samples, &Metadata::default()).unwrap();
         let chunks = parse_caf_chunks(&caf);
 
         assert_eq!(
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn writes_signed_8bit_pcm_without_wav_bias() {
-        let spec = super::WavSpec {
+        let spec = super::PcmSpec {
             sample_rate: 48_000,
             channels: 1,
             bits_per_sample: 8,
@@ -616,7 +616,7 @@ mod tests {
         let samples = [-128, 0, 127];
         let mut caf = Vec::new();
 
-        write_caf(&mut caf, spec, &samples, &WavMetadata::default()).unwrap();
+        write_caf(&mut caf, spec, &samples, &Metadata::default()).unwrap();
         let chunks = parse_caf_chunks(&caf);
 
         assert_eq!(chunks[1].1[..4], [0, 0, 0, 0]);
@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn projects_info_and_mark_metadata_without_strings_dependency() {
-        let spec = super::WavSpec {
+        let spec = super::PcmSpec {
             sample_rate: 44_100,
             channels: 2,
             bits_per_sample: 16,
@@ -634,7 +634,7 @@ mod tests {
             channel_mask: ordinary_channel_mask(2u16).unwrap(),
         };
         let samples = [1, -2, 3, -4, 5, -6, 7, -8];
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 4,
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn emits_channel_layout_for_non_ordinary_masks() {
-        let spec = super::WavSpec {
+        let spec = super::PcmSpec {
             sample_rate: 48_000,
             channels: 4,
             bits_per_sample: 16,
@@ -693,7 +693,7 @@ mod tests {
         let samples = [1, 2, 3, 4, 5, 6, 7, 8];
         let mut caf = Vec::new();
 
-        write_caf(&mut caf, spec, &samples, &WavMetadata::default()).unwrap();
+        write_caf(&mut caf, spec, &samples, &Metadata::default()).unwrap();
         let chunks = parse_caf_chunks(&caf);
 
         assert_eq!(
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_channel_layouts() {
-        let spec = super::WavSpec {
+        let spec = super::PcmSpec {
             sample_rate: 48_000,
             channels: 4,
             bits_per_sample: 16,
@@ -727,7 +727,7 @@ mod tests {
         let samples = [1, 2, 3, 4, 5, 6, 7, 8];
         let mut caf = Vec::new();
 
-        let error = write_caf(&mut caf, spec, &samples, &WavMetadata::default()).unwrap_err();
+        let error = write_caf(&mut caf, spec, &samples, &Metadata::default()).unwrap_err();
         assert!(error.to_string().contains("channel mask"));
     }
 }

@@ -1,7 +1,7 @@
 use crate::{
     config::EncoderConfig,
     error::{Error, Result},
-    input::WavSpec,
+    input::PcmSpec,
     level::LevelProfile,
     stream_info::{MAX_STREAMINFO_SAMPLE_RATE, StreamInfo},
 };
@@ -28,14 +28,14 @@ pub(crate) enum FramingPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EncodePlan {
-    pub(crate) spec: WavSpec,
+    pub(crate) spec: PcmSpec,
     pub(crate) framing: FramingPlan,
     pub(crate) profile: LevelProfile,
     pub(crate) total_frames: usize,
 }
 
 impl EncodePlan {
-    pub(crate) fn new(spec: WavSpec, config: EncoderConfig) -> Result<Self> {
+    pub(crate) fn new(spec: PcmSpec, config: EncoderConfig) -> Result<Self> {
         let framing = framing_plan(&spec, &config)?;
         let total_frames = match &framing {
             FramingPlan::Fixed { block_size } => {
@@ -111,7 +111,7 @@ pub(crate) fn summary_from_stream_info(
     }
 }
 
-fn validate_stream(spec: &WavSpec, block_size: u16) -> Result<()> {
+fn validate_stream(spec: &PcmSpec, block_size: u16) -> Result<()> {
     if spec.sample_rate == 0 {
         return Err(Error::UnsupportedFlac(
             "sample rate 0 is not allowed".into(),
@@ -146,7 +146,7 @@ fn validate_stream(spec: &WavSpec, block_size: u16) -> Result<()> {
     Ok(())
 }
 
-fn framing_plan(spec: &WavSpec, config: &EncoderConfig) -> Result<FramingPlan> {
+fn framing_plan(spec: &PcmSpec, config: &EncoderConfig) -> Result<FramingPlan> {
     match &config.block_schedule {
         Some(block_schedule) => variable_framing_plan(spec, block_schedule),
         None => {
@@ -158,7 +158,7 @@ fn framing_plan(spec: &WavSpec, config: &EncoderConfig) -> Result<FramingPlan> {
     }
 }
 
-fn variable_framing_plan(spec: &WavSpec, block_schedule: &[u16]) -> Result<FramingPlan> {
+fn variable_framing_plan(spec: &PcmSpec, block_schedule: &[u16]) -> Result<FramingPlan> {
     if spec.total_samples == 0 {
         if block_schedule.is_empty() {
             return Ok(FramingPlan::Variable {
@@ -204,7 +204,7 @@ mod tests {
     use super::{EncodePlan, FrameCodedNumberKind, FramingPlan};
     use crate::{
         config::EncoderConfig,
-        input::{WavSpec, ordinary_channel_mask},
+        input::{PcmSpec, ordinary_channel_mask},
         level::Level,
         stream_info::MAX_STREAMINFO_SAMPLE_RATE,
     };
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn computes_total_frames_from_block_size() {
         let plan = EncodePlan::new(
-            WavSpec {
+            PcmSpec {
                 sample_rate: 44_100,
                 channels: 2,
                 bits_per_sample: 16,
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn accepts_legal_streaminfo_fallback_sample_rates() {
         let plan = EncodePlan::new(
-            WavSpec {
+            PcmSpec {
                 sample_rate: 700_001,
                 channels: 2,
                 bits_per_sample: 16,
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn rejects_out_of_model_streaminfo_sample_rates() {
         let error = EncodePlan::new(
-            WavSpec {
+            PcmSpec {
                 sample_rate: MAX_STREAMINFO_SAMPLE_RATE + 1,
                 channels: 2,
                 bits_per_sample: 16,
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn accepts_large_legal_block_sizes_within_current_u16_model() {
         let plan = EncodePlan::new(
-            WavSpec {
+            PcmSpec {
                 sample_rate: 48_000,
                 channels: 1,
                 bits_per_sample: 16,
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn variable_schedule_uses_sample_numbers_and_exact_offsets() {
         let plan = EncodePlan::new(
-            WavSpec {
+            PcmSpec {
                 sample_rate: 44_100,
                 channels: 1,
                 bits_per_sample: 16,
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn rejects_variable_schedule_when_total_samples_do_not_match() {
         let error = EncodePlan::new(
-            WavSpec {
+            PcmSpec {
                 sample_rate: 44_100,
                 channels: 1,
                 bits_per_sample: 16,

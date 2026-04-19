@@ -1,6 +1,6 @@
 use crate::{
     Result,
-    input::{PcmEnvelope, WavSpec, append_encoded_sample, container_bits_from_valid_bits},
+    input::{PcmEnvelope, PcmSpec, append_encoded_sample, container_bits_from_valid_bits},
 };
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -435,7 +435,7 @@ pub(crate) fn digest_bytes(bytes: &[u8]) -> [u8; 16] {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn streaminfo_md5(spec: WavSpec, samples: &[i32]) -> Result<[u8; 16]> {
+pub(crate) fn streaminfo_md5(spec: PcmSpec, samples: &[i32]) -> Result<[u8; 16]> {
     let mut accumulator = StreaminfoMd5::new(spec);
     accumulator.update_samples(samples)?;
     accumulator.finalize()
@@ -448,7 +448,7 @@ pub struct StreaminfoMd5 {
 }
 
 impl StreaminfoMd5 {
-    pub(crate) fn new(spec: WavSpec) -> Self {
+    pub(crate) fn new(spec: PcmSpec) -> Self {
         Self {
             envelope: PcmEnvelope {
                 channels: u16::from(spec.channels),
@@ -492,7 +492,7 @@ impl StreaminfoMd5 {
 
 #[allow(dead_code)]
 pub(crate) fn verify_streaminfo_md5(
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
     expected_md5: [u8; 16],
 ) -> Result<()> {
@@ -514,7 +514,7 @@ pub(crate) fn verify_streaminfo_digest(actual_md5: [u8; 16], expected_md5: [u8; 
 #[cfg(test)]
 mod tests {
     use super::{EMPTY_STREAM_MD5, digest_bytes, streaminfo_md5};
-    use crate::input::{WavSpec, ordinary_channel_mask};
+    use crate::input::{PcmSpec, ordinary_channel_mask};
 
     #[test]
     fn digest_matches_empty_vector() {
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn streaminfo_md5_matches_simple_16bit_pcm_fixture() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 44_100,
             channels: 1,
             bits_per_sample: 16,

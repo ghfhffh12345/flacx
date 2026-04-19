@@ -2,7 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::{
     error::{Error, Result},
-    input::WavSpec,
+    input::PcmSpec,
     metadata::Metadata,
     pcm::{PcmEnvelope, container_bits_from_valid_bits, ordinary_channel_mask},
     raw::RawPcmByteOrder,
@@ -62,7 +62,7 @@ pub struct AiffPcmDescriptor {
 #[derive(Debug, Clone)]
 pub struct AiffReader<R> {
     reader: R,
-    spec: WavSpec,
+    spec: PcmSpec,
     metadata: Metadata,
     envelope: PcmEnvelope,
     endianness: SampleEndianness,
@@ -84,7 +84,7 @@ impl<R: Read + Seek> AiffReader<R> {
 
     /// Return the parsed PCM stream specification.
     #[must_use]
-    pub fn spec(&self) -> WavSpec {
+    pub fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -125,7 +125,7 @@ impl<R: Read + Seek> AiffReader<R> {
 #[derive(Debug, Clone)]
 pub struct AiffPcmStream<R> {
     reader: R,
-    spec: WavSpec,
+    spec: PcmSpec,
     envelope: PcmEnvelope,
     endianness: SampleEndianness,
     remaining_frames: u64,
@@ -142,7 +142,7 @@ impl<R: Read + Seek> AiffPcmStream<R> {
 
     fn from_parts(
         reader: R,
-        spec: WavSpec,
+        spec: PcmSpec,
         envelope: PcmEnvelope,
         endianness: SampleEndianness,
     ) -> Result<Self> {
@@ -161,7 +161,7 @@ impl<R: Read + Seek> AiffPcmStream<R> {
 }
 
 impl<R: Read + Seek> crate::input::EncodePcmStream for AiffPcmStream<R> {
-    fn spec(&self) -> WavSpec {
+    fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -183,8 +183,8 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for AiffPcmStream<R> {
     }
 }
 
-fn spec_from_envelope(sample_rate: u32, total_samples: u64, envelope: PcmEnvelope) -> WavSpec {
-    WavSpec {
+fn spec_from_envelope(sample_rate: u32, total_samples: u64, envelope: PcmEnvelope) -> PcmSpec {
+    PcmSpec {
         sample_rate,
         channels: envelope.channels as u8,
         bits_per_sample: envelope.valid_bits_per_sample as u8,
@@ -196,7 +196,7 @@ fn spec_from_envelope(sample_rate: u32, total_samples: u64, envelope: PcmEnvelop
 
 fn validate_direct_descriptor(
     descriptor: AiffPcmDescriptor,
-) -> Result<(WavSpec, PcmEnvelope, SampleEndianness)> {
+) -> Result<(PcmSpec, PcmEnvelope, SampleEndianness)> {
     let endianness = match descriptor.byte_order {
         RawPcmByteOrder::BigEndian => SampleEndianness::Big,
         RawPcmByteOrder::LittleEndian => SampleEndianness::Little,

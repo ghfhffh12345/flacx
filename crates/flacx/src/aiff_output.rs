@@ -2,9 +2,9 @@ use std::io::Write;
 
 use crate::{
     error::{Error, Result},
-    input::{WavSpec, ordinary_channel_mask},
+    input::{PcmSpec, ordinary_channel_mask},
     md5::streaminfo_md5,
-    metadata::WavMetadata,
+    metadata::Metadata,
     pcm::{PcmEnvelope, container_bits_from_valid_bits},
 };
 
@@ -35,9 +35,9 @@ pub(crate) enum AiffContainer {
 #[allow(dead_code)]
 pub(crate) fn write_aiff_with_metadata<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
-    metadata: &WavMetadata,
+    metadata: &Metadata,
     container: AiffContainer,
 ) -> Result<()> {
     write_aiff_with_metadata_and_md5(writer, spec, samples, metadata, container).map(|_| ())
@@ -45,9 +45,9 @@ pub(crate) fn write_aiff_with_metadata<W: Write>(
 
 pub(crate) fn write_aiff_with_metadata_and_md5<W: Write>(
     writer: &mut W,
-    spec: WavSpec,
+    spec: PcmSpec,
     samples: &[i32],
-    metadata: &WavMetadata,
+    metadata: &Metadata,
     container: AiffContainer,
 ) -> Result<[u8; 16]> {
     let envelope = validate_aiff_output_shape(spec, samples)?;
@@ -89,8 +89,8 @@ pub(crate) struct AiffStreamWriter<W: Write> {
 impl<W: Write> AiffStreamWriter<W> {
     pub(crate) fn new(
         mut writer: W,
-        spec: WavSpec,
-        metadata: &WavMetadata,
+        spec: PcmSpec,
+        metadata: &Metadata,
         container: AiffContainer,
     ) -> Result<Self> {
         let envelope = validate_aiff_output_spec(spec)?;
@@ -162,7 +162,7 @@ fn resolve_container(container: AiffContainer) -> AiffContainer {
     }
 }
 
-fn validate_aiff_output_shape(spec: WavSpec, samples: &[i32]) -> Result<PcmEnvelope> {
+fn validate_aiff_output_shape(spec: PcmSpec, samples: &[i32]) -> Result<PcmEnvelope> {
     let envelope = validate_aiff_output_spec(spec)?;
 
     if !samples.len().is_multiple_of(usize::from(spec.channels)) {
@@ -181,7 +181,7 @@ fn validate_aiff_output_shape(spec: WavSpec, samples: &[i32]) -> Result<PcmEnvel
     Ok(envelope)
 }
 
-fn validate_aiff_output_spec(spec: WavSpec) -> Result<PcmEnvelope> {
+fn validate_aiff_output_spec(spec: PcmSpec) -> Result<PcmEnvelope> {
     if !(1..=8).contains(&spec.channels) {
         return Err(Error::UnsupportedWav(format!(
             "AIFF/AIFC output only supports ordinary 1..8 channel PCM, found {} channels",
@@ -236,7 +236,7 @@ fn validate_aiff_output_spec(spec: WavSpec) -> Result<PcmEnvelope> {
     })
 }
 
-fn comm_chunk_payload(spec: WavSpec, envelope: PcmEnvelope, container: AiffContainer) -> Vec<u8> {
+fn comm_chunk_payload(spec: PcmSpec, envelope: PcmEnvelope, container: AiffContainer) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&u16::from(spec.channels).to_be_bytes());
     payload.extend_from_slice(
@@ -253,7 +253,7 @@ fn comm_chunk_payload(spec: WavSpec, envelope: PcmEnvelope, container: AiffConta
     payload
 }
 
-fn aiff_metadata_chunks(metadata: &WavMetadata) -> Vec<([u8; 4], Vec<u8>)> {
+fn aiff_metadata_chunks(metadata: &Metadata) -> Vec<([u8; 4], Vec<u8>)> {
     let mut chunks = Vec::new();
     let Some(payload) = metadata.list_info_chunk_payload() else {
         return chunks;
@@ -269,7 +269,7 @@ fn aiff_metadata_chunks(metadata: &WavMetadata) -> Vec<([u8; 4], Vec<u8>)> {
     chunks
 }
 
-fn mark_chunk_payload(metadata: &WavMetadata) -> Option<Vec<u8>> {
+fn mark_chunk_payload(metadata: &Metadata) -> Option<Vec<u8>> {
     let payload = metadata.cue_chunk_payload()?;
     let cue_points = parse_wav_cue_chunk_payload(&payload)?;
     if cue_points.len() > usize::from(u16::MAX) {
@@ -556,8 +556,8 @@ struct WavInfoEntry {
 #[cfg(test)]
 mod tests {
     use crate::{
-        input::{WavSpec, ordinary_channel_mask},
-        metadata::WavMetadata,
+        input::{PcmSpec, ordinary_channel_mask},
+        metadata::Metadata,
     };
 
     use super::{
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn project_cues_into_mark_chunk() {
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(5, &cue_payload(&[0, 2]), 4, 2)
             .unwrap();
@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn writes_canonical_aiff_with_text_and_markers() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 44_100,
             channels: 2,
             bits_per_sample: 16,
@@ -656,7 +656,7 @@ mod tests {
             channel_mask: ordinary_channel_mask(2).unwrap(),
         };
         let samples = [1, -2, 3, -4];
-        let mut metadata = WavMetadata::default();
+        let mut metadata = Metadata::default();
         metadata
             .ingest_flac_metadata_block(
                 4,
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn writes_canonical_aifc_none_with_fver() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 48_000,
             channels: 1,
             bits_per_sample: 24,
@@ -706,7 +706,7 @@ mod tests {
             channel_mask: ordinary_channel_mask(1).unwrap(),
         };
         let samples = [0x123456];
-        let metadata = WavMetadata::default();
+        let metadata = Metadata::default();
         let mut out = Vec::new();
 
         write_aiff_with_metadata_and_md5(
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn accepts_ordinary_multichannel_output_shapes() {
-        let spec = WavSpec {
+        let spec = PcmSpec {
             sample_rate: 48_000,
             channels: 4,
             bits_per_sample: 16,
@@ -745,7 +745,7 @@ mod tests {
             &mut out,
             spec,
             &samples,
-            &WavMetadata::default(),
+            &Metadata::default(),
             AiffContainer::Aiff,
         )
         .unwrap();

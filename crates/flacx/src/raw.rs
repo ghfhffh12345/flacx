@@ -2,7 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::{
     error::{Error, Result},
-    input::WavSpec,
+    input::PcmSpec,
     pcm::{PcmEnvelope, is_supported_channel_mask, ordinary_channel_mask},
 };
 
@@ -36,7 +36,7 @@ pub struct RawPcmDescriptor {
 #[derive(Debug)]
 pub struct RawPcmReader<R: Read + Seek> {
     reader: R,
-    spec: WavSpec,
+    spec: PcmSpec,
     descriptor: RawPcmDescriptor,
 }
 
@@ -54,7 +54,7 @@ impl<R: Read + Seek> RawPcmReader<R> {
 
     /// Return the parsed PCM spec derived from the supplied descriptor.
     #[must_use]
-    pub fn spec(&self) -> WavSpec {
+    pub fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -97,7 +97,7 @@ pub(crate) fn total_samples_from_byte_len_with_descriptor(
 #[derive(Debug)]
 pub struct RawPcmStream<R> {
     reader: R,
-    spec: WavSpec,
+    spec: PcmSpec,
     validated: ValidatedRawDescriptor,
     remaining_frames: u64,
     last_chunk_bytes: Vec<u8>,
@@ -118,13 +118,13 @@ impl<R: Read + Seek> RawPcmStream<R> {
     }
 
     #[must_use]
-    pub fn spec(&self) -> WavSpec {
+    pub fn spec(&self) -> PcmSpec {
         self.spec
     }
 }
 
 impl<R: Read + Seek> crate::input::EncodePcmStream for RawPcmStream<R> {
-    fn spec(&self) -> WavSpec {
+    fn spec(&self) -> PcmSpec {
         self.spec
     }
 
@@ -176,8 +176,8 @@ struct ValidatedRawDescriptor {
 fn spec_from_validated_descriptor(
     validated: ValidatedRawDescriptor,
     total_samples: u64,
-) -> WavSpec {
-    WavSpec {
+) -> PcmSpec {
+    PcmSpec {
         sample_rate: validated.descriptor.sample_rate,
         channels: validated.descriptor.channels,
         bits_per_sample: validated.descriptor.valid_bits_per_sample,

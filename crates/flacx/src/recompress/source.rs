@@ -3,7 +3,7 @@ use std::io::{Read, Seek};
 use crate::{
     Metadata,
     error::Result,
-    input::{EncodePcmStream, PcmStream, WavSpec},
+    input::{EncodePcmStream, PcmSpec, PcmStream},
     read::{DecodePcmStream, FlacReader},
 };
 
@@ -33,7 +33,7 @@ where
 
     /// Return the PCM spec that will be fed into the recompress session.
     #[must_use]
-    pub fn spec(&self) -> WavSpec {
+    pub fn spec(&self) -> PcmSpec {
         self.stream.spec()
     }
 
@@ -85,7 +85,7 @@ impl<S> EncodePcmStream for FlacRecompressSource<S>
 where
     S: DecodePcmStream,
 {
-    fn spec(&self) -> WavSpec {
+    fn spec(&self) -> PcmSpec {
         self.stream.spec()
     }
 

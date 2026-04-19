@@ -161,6 +161,8 @@ fn source_api_exports_replace_split_metadata_surface() {
     let encoder_source = include_str!("../src/encoder.rs");
     let decode_source = include_str!("../src/decode.rs");
     let input_source = include_str!("../src/input.rs");
+    let metadata_source = include_str!("../src/metadata.rs");
+    let wav_input_source = include_str!("../src/wav_input.rs");
 
     assert!(!lib_source.contains("AnyPcmStream,"));
     assert!(!lib_source.contains("PcmReaderOptions,"));
@@ -170,9 +172,12 @@ fn source_api_exports_replace_split_metadata_surface() {
     assert!(lib_source.contains("DecodeSource"));
     assert!(lib_source.contains("pub use metadata::Metadata;"));
     assert!(lib_source.contains("Metadata,"));
-    assert!(
-        !lib_source.contains("pub use metadata::{DecodeMetadata, EncodeMetadata, WavMetadata};")
+    let removed_metadata_reexport = concat!(
+        "pub use metadata::{DecodeMetadata, EncodeMetadata, ",
+        "Wav",
+        "Metadata};",
     );
+    assert!(!lib_source.contains(removed_metadata_reexport));
 
     assert!(encoder_source.contains("pub fn encode_source<"));
     assert!(!encoder_source.contains("pub fn set_metadata("));
@@ -185,6 +190,14 @@ fn source_api_exports_replace_split_metadata_surface() {
     assert!(input_source.contains("pub fn new(reader: R) -> Result<Self>"));
     assert!(!input_source.contains("pub fn read_pcm_reader<"));
     assert!(!input_source.contains("pub fn read_pcm_reader_with_options<"));
+    let removed_spec_alias = concat!("PcmSpec as ", "Wav", "Spec");
+    let removed_stream_alias = concat!("PcmStream as ", "Wav", "Data");
+    let removed_metadata_alias = concat!("type ", "Wav", "Metadata = Metadata");
+    assert!(!input_source.contains(removed_spec_alias));
+    assert!(!input_source.contains(removed_stream_alias));
+    assert!(!metadata_source.contains(removed_metadata_alias));
+    assert!(!wav_input_source.contains(removed_spec_alias));
+    assert!(!wav_input_source.contains(removed_stream_alias));
 }
 
 #[test]

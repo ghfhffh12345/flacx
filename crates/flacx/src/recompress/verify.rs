@@ -1,7 +1,7 @@
 use crate::{
     error::Error,
     error::Result,
-    input::{EncodePcmStream, PcmStream, WavSpec},
+    input::{EncodePcmStream, PcmSpec, PcmStream},
     md5::{StreaminfoMd5, verify_streaminfo_digest},
     read::DecodePcmStream,
 };
@@ -26,7 +26,7 @@ where
         }
     }
 
-    pub(super) fn spec(&self) -> WavSpec {
+    pub(super) fn spec(&self) -> PcmSpec {
         self.inner.spec()
     }
 
@@ -60,7 +60,7 @@ impl<S> EncodePcmStream for VerifyingPcmStream<S>
 where
     S: DecodePcmStream,
 {
-    fn spec(&self) -> WavSpec {
+    fn spec(&self) -> PcmSpec {
         self.spec()
     }
 
