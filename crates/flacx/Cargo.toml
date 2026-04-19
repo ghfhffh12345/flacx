@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 description = "Convert supported PCM containers to FLAC, decode FLAC back to PCM containers, and recompress existing FLAC streams."
 readme = "README.md"
-keywords = ["audio", "flac", "wav", "aiff", "caf", "codec"]
+keywords = ["audio", "flac", "wav", "aiff", "caf"]
 categories = ["compression", "multimedia::audio"]
 
 [features]
