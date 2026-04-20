@@ -32,6 +32,7 @@ const AIFC_FORM_TYPE: [u8; 4] = *b"AIFC";
 const AIFC_NONE: [u8; 4] = *b"NONE";
 const AIFC_SOWT: [u8; 4] = *b"sowt";
 const CAF_MAGIC: [u8; 4] = *b"caff";
+pub const LARGE_STREAMING_DECODE_SAMPLE_COUNT: usize = 8_650_000;
 
 pub fn encode_flac_bytes(input: &[u8]) -> Vec<u8> {
     flacx::builtin::encode_bytes(input).unwrap()
@@ -49,6 +50,22 @@ pub fn try_encode_flac_bytes_with_config(
 
 pub fn encode_flac_bytes_with_config(config: EncoderConfig, input: &[u8]) -> Vec<u8> {
     try_encode_flac_bytes_with_config(config, input).unwrap()
+}
+
+pub fn large_streaming_decode_wav_bytes() -> Vec<u8> {
+    pcm_wav_bytes(
+        16,
+        1,
+        44_100,
+        &sample_fixture(1, LARGE_STREAMING_DECODE_SAMPLE_COUNT),
+    )
+}
+
+pub fn large_streaming_decode_flac_bytes(threads: usize) -> Vec<u8> {
+    encode_flac_bytes_with_config(
+        EncoderConfig::default().with_threads(threads),
+        &large_streaming_decode_wav_bytes(),
+    )
 }
 
 pub fn try_encode_file_with_config(

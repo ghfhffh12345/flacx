@@ -14,13 +14,13 @@ mod support;
 use support::TestDecoder as DecodeHarness;
 use support::TestEncoder as Encoder;
 
+#[cfg(feature = "progress")]
+use support::{LARGE_STREAMING_DECODE_SAMPLE_COUNT, ordinary_channel_mask, streaminfo_md5};
 use support::{
     application_block, flac_metadata_blocks, pcm_wav_bytes, picture_block,
     replace_flac_optional_metadata, sample_fixture, seektable_block, unique_temp_path,
     wav_data_bytes,
 };
-#[cfg(feature = "progress")]
-use support::{ordinary_channel_mask, streaminfo_md5};
 
 fn reader_options(config: RecompressConfig) -> FlacReaderOptions {
     match config.mode() {
@@ -376,7 +376,9 @@ fn recompress_session_avoids_buffered_encode_handoff() {
 #[cfg(feature = "progress")]
 #[test]
 fn recompress_source_streams_verified_pcm_without_materializing_samples() {
-    let samples = sample_fixture(1, 2_048);
+    let total_samples = LARGE_STREAMING_DECODE_SAMPLE_COUNT;
+    let chunk_frames = 4_194_304usize;
+    let samples = sample_fixture(1, total_samples);
     let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
     let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
         .encode_bytes(&wav)
@@ -385,11 +387,12 @@ fn recompress_source_streams_verified_pcm_without_materializing_samples() {
         sample_rate: 44_100,
         channels: 1,
         bits_per_sample: 16,
-        total_samples: 2_048,
+        total_samples: total_samples as u64,
         bytes_per_sample: 2,
         channel_mask: ordinary_channel_mask(1).expect("mono channel mask"),
     };
-    let mut stream_info = StreamInfo::new(44_100, 1, 16, 2_048, streaminfo_md5(&flac));
+    let mut stream_info =
+        StreamInfo::new(44_100, 1, 16, total_samples as u64, streaminfo_md5(&flac));
     stream_info.update_block_size(512);
     let mut updates = Vec::<RecompressProgress>::new();
     let mut recompressor = RecompressConfig::default()
@@ -401,7 +404,7 @@ fn recompress_source_streams_verified_pcm_without_materializing_samples() {
         .recompress_with_progress(
             FlacRecompressSource::new(
                 Metadata::new(),
-                StreamingOnlyRecompressStream::new(spec, stream_info, samples, 512),
+                StreamingOnlyRecompressStream::new(spec, stream_info, samples, chunk_frames),
                 streaminfo_md5(&flac),
             ),
             |progress| {
@@ -414,7 +417,7 @@ fn recompress_source_streams_verified_pcm_without_materializing_samples() {
     let decoded = DecodeHarness::default()
         .decode_bytes(&recompressor.into_inner().into_inner())
         .unwrap();
-    assert_eq!(summary.total_samples, 2_048);
+    assert_eq!(summary.total_samples, total_samples as u64);
     assert_eq!(updates.first().unwrap().phase, RecompressPhase::Decode);
     assert!(
         updates

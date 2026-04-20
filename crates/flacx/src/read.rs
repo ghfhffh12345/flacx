@@ -226,6 +226,7 @@ pub struct FlacPcmStream<R> {
     next_sample_number: u64,
     threads: usize,
     pending_bytes: Vec<u8>,
+    pending_start: usize,
     eof: bool,
 }
 
@@ -245,6 +246,7 @@ impl<R> FlacPcmStream<R> {
             next_sample_number: 0,
             threads: 1,
             pending_bytes: Vec::new(),
+            pending_start: 0,
             eof: false,
         }
     }
@@ -328,21 +330,15 @@ impl<R: Read + Seek> FlacPcmStreamBuilder<R> {
 }
 
 impl<R: Read + Seek> FlacPcmStream<R> {
-    fn read_next_frame_bytes(&mut self) -> Result<Option<(ParsedFrame, Vec<u8>)>> {
+    fn read_next_frame(&mut self) -> Result<Option<ParsedFrame>> {
         loop {
             match frame::scan_frame(
-                &self.pending_bytes,
+                &self.pending_bytes[self.pending_start..],
                 self.stream_info,
                 self.next_frame_index as u64,
                 self.next_sample_number,
             ) {
-                Ok(parsed) => {
-                    let bytes = self
-                        .pending_bytes
-                        .drain(..parsed.bytes_consumed)
-                        .collect::<Vec<_>>();
-                    return Ok(Some((parsed, bytes)));
-                }
+                Ok(parsed) => return Ok(Some(parsed)),
                 Err(Error::InvalidFlac("unexpected EOF while reading frames")) if !self.eof => {}
                 Err(Error::Io(error))
                     if error.kind() == std::io::ErrorKind::UnexpectedEof && !self.eof => {}
@@ -361,6 +357,22 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             self.pending_bytes.extend_from_slice(&chunk[..read]);
         }
     }
+
+    fn consume_pending_frame_bytes(&mut self, bytes_consumed: usize) {
+        self.pending_start += bytes_consumed;
+        if self.pending_start == self.pending_bytes.len() {
+            self.pending_bytes.clear();
+            self.pending_start = 0;
+            return;
+        }
+
+        if self.pending_start >= FLAC_READ_CHUNK_SIZE
+            && self.pending_start.saturating_mul(2) >= self.pending_bytes.len()
+        {
+            self.pending_bytes.drain(..self.pending_start);
+            self.pending_start = 0;
+        }
+    }
 }
 
 impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
@@ -377,22 +389,23 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
         let mut batch_bytes = Vec::new();
         let mut frames = Vec::new();
         while total_pcm_frames < max_frames && self.next_sample_number < self.spec.total_samples {
-            let Some((parsed, frame_bytes)) = self.read_next_frame_bytes()? else {
+            let Some(parsed) = self.read_next_frame()? else {
                 break;
             };
             let block_size = parsed.block_size;
             if total_pcm_frames > 0 && total_pcm_frames + usize::from(block_size) > max_frames {
-                self.pending_bytes.splice(0..0, frame_bytes);
                 break;
             }
 
+            let frame_start = self.pending_start;
+            let frame_end = frame_start + parsed.bytes_consumed;
             let offset = batch_bytes.len();
-            batch_bytes.extend_from_slice(&frame_bytes);
+            batch_bytes.extend_from_slice(&self.pending_bytes[frame_start..frame_end]);
             frames.push(FrameIndex {
                 header_number: parsed.header_number,
                 offset,
                 header_bytes_consumed: parsed.header_bytes_consumed,
-                bytes_consumed: frame_bytes.len(),
+                bytes_consumed: parsed.bytes_consumed,
                 block_size,
                 bits_per_sample: parsed.bits_per_sample,
                 assignment: parsed.assignment,
@@ -400,6 +413,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             total_pcm_frames += usize::from(block_size);
             self.next_frame_index += 1;
             self.next_sample_number += u64::from(block_size);
+            self.consume_pending_frame_bytes(parsed.bytes_consumed);
         }
 
         if frames.is_empty() {
@@ -437,7 +451,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
     }
 
     fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
-        if self.next_frame_index != 0 || !self.pending_bytes.is_empty() {
+        if self.next_frame_index != 0 || self.pending_start != 0 || !self.pending_bytes.is_empty() {
             return Ok(None);
         }
 

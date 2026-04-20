@@ -14,6 +14,7 @@ use flacx::{
 #[path = "../tests/support/mod.rs"]
 mod support;
 
+use support::{TestDecoder as DecodeHarness, large_streaming_decode_flac_bytes};
 use support::{cue_chunk, info_list_chunk, pcm_wav_bytes, sample_fixture, wav_with_chunks};
 
 fn corpus_root(relative: &str) -> PathBuf {
@@ -105,19 +106,33 @@ fn builtin_bytes_recompress(c: &mut Criterion) {
 }
 
 fn encode_multiframe_streaming_path(c: &mut Criterion) {
-    let corpus = Corpus::load().expect("benchmark corpus");
+    let input = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 10_432));
     let config = EncoderConfig::default()
         .with_threads(shared_thread_count())
         .with_block_schedule(vec![576, 1_152, 576, 2_304, 4_096, 576, 1_152]);
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(
-        corpus.encode_streaming_wav_bytes.len() as u64
-    ));
+    group.throughput(Throughput::Bytes(input.len() as u64));
     group.measurement_time(Duration::from_secs(5));
+    group.sample_size(20);
     group.bench_function("encode_multiframe_streaming_path", |b| {
+        b.iter(|| encode_fixture_bytes(&config, &input).expect("encode multiframe streaming path"))
+    });
+    group.finish();
+}
+
+fn decode_large_streaming_path(c: &mut Criterion) {
+    let threads = shared_thread_count();
+    let input = large_streaming_decode_flac_bytes(threads);
+    let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(threads));
+    let mut group = c.benchmark_group("flacx throughput");
+    group.throughput(Throughput::Bytes(input.len() as u64));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(10);
+    group.bench_function("decode_large_streaming_path", |b| {
         b.iter(|| {
-            encode_fixture_bytes(&config, &corpus.encode_streaming_wav_bytes)
-                .expect("encode multiframe streaming path")
+            decoder
+                .decode_bytes(&input)
+                .expect("decode large streaming path")
         })
     });
     group.finish();
@@ -189,6 +204,7 @@ criterion_group!(
     builtin_bytes_decode,
     builtin_bytes_recompress,
     encode_multiframe_streaming_path,
+    decode_large_streaming_path,
     recompress_streaming_verify_handoff,
     metadata_write_path,
     decode_frame_materialization
@@ -205,7 +221,6 @@ struct Corpus {
     flac_inputs: Vec<CorpusInput>,
     representative_wav_bytes: Vec<u8>,
     representative_flac_bytes: Vec<u8>,
-    encode_streaming_wav_bytes: Vec<u8>,
     recompress_streaming_flac_bytes: Vec<u8>,
     metadata_flac_bytes: Vec<u8>,
     decode_materialization_flac_bytes: Vec<u8>,
@@ -276,7 +291,6 @@ impl Corpus {
             flac_inputs,
             representative_wav_bytes,
             representative_flac_bytes,
-            encode_streaming_wav_bytes,
             recompress_streaming_flac_bytes,
             metadata_flac_bytes,
             decode_materialization_flac_bytes,

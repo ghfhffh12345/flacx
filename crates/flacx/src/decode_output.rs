@@ -23,6 +23,10 @@ static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD: u64 = 8 * 1024 * 1024;
 const DECODE_CHUNK_FRAME_MULTIPLIER: usize = 1_024;
 
+pub(crate) fn should_materialize_decode(total_samples: u64) -> bool {
+    total_samples <= EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD
+}
+
 pub(crate) fn decode_stream_to_container<S, W, P>(
     mut stream: S,
     output: &mut W,
@@ -38,7 +42,7 @@ where
     ensure_output_container_enabled(config.output_container)?;
     let spec = stream.spec();
     let source_info = stream.stream_info();
-    if spec.total_samples <= EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD
+    if should_materialize_decode(spec.total_samples)
         && let Some((samples, frame_count)) = stream.take_decoded_samples()?
     {
         let streaminfo_md5 = write_wav_with_metadata_and_md5_with_options(

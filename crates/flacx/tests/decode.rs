@@ -1,9 +1,11 @@
-use std::{fs, io::Cursor, thread::available_parallelism};
+use std::{fs, io::Cursor, sync::OnceLock, thread::available_parallelism};
 
 use flacx::builtin::{decode_bytes, decode_file};
 use flacx::{DecodeConfig, EncoderConfig, PcmContainer, level::Level};
 #[cfg(feature = "progress")]
 use flacx::{DecodePcmStream, EncodePcmStream, Metadata, PcmSpec, StreamInfo};
+#[cfg(feature = "progress")]
+use flacx::{ProgressSnapshot, read_flac_reader};
 
 mod support;
 use support::TestDecoder as DecodeHarness;
@@ -11,6 +13,11 @@ use support::TestEncoder as Encoder;
 
 #[cfg(feature = "caf")]
 use support::is_caf_bytes;
+#[cfg(feature = "progress")]
+use support::{
+    LARGE_STREAMING_DECODE_SAMPLE_COUNT, large_streaming_decode_flac_bytes,
+    large_streaming_decode_wav_bytes,
+};
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, ParsedMetadataBlock, application_block,
     corrupt_first_flac_frame_sample_number, corrupt_last_frame_crc, corrupt_magic, cue_chunk,
@@ -166,7 +173,7 @@ fn decode_config_with_threads_clamps_to_one() {
 #[cfg(feature = "progress")]
 #[test]
 fn decode_source_prefers_streaming_chunks_over_materialized_samples() {
-    let total_samples = 8_400_000usize;
+    let total_samples = LARGE_STREAMING_DECODE_SAMPLE_COUNT;
     let chunk_frames = 4_194_304usize;
     let samples = sample_fixture(1, total_samples);
     let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
@@ -179,7 +186,8 @@ fn decode_source_prefers_streaming_chunks_over_materialized_samples() {
         bytes_per_sample: 2,
         channel_mask: ordinary_channel_mask(1).expect("mono channel mask"),
     };
-    let mut stream_info = StreamInfo::new(44_100, 1, 16, total_samples as u64, streaminfo_md5(&flac));
+    let mut stream_info =
+        StreamInfo::new(44_100, 1, 16, total_samples as u64, streaminfo_md5(&flac));
     stream_info.update_block_size(4_096);
     let mut output = Cursor::new(Vec::new());
     let mut progress = Vec::new();
@@ -202,9 +210,107 @@ fn decode_source_prefers_streaming_chunks_over_materialized_samples() {
 
     assert_eq!(summary.total_samples, total_samples as u64);
     assert!(progress.len() > 1, "expected multi-chunk progress updates");
-    assert_eq!(progress.first().unwrap().processed_samples, chunk_frames as u64);
-    assert_eq!(progress.last().unwrap().processed_samples, total_samples as u64);
+    assert_eq!(
+        progress.first().unwrap().processed_samples,
+        chunk_frames as u64
+    );
+    assert_eq!(
+        progress.last().unwrap().processed_samples,
+        total_samples as u64
+    );
     assert_eq!(wav_data_bytes(&output.into_inner()), wav_data_bytes(&wav));
+}
+
+#[cfg(feature = "progress")]
+fn decode_large_streaming_fixture_with_progress(
+    threads: usize,
+) -> (Vec<u8>, flacx::DecodeSummary, Vec<ProgressSnapshot>) {
+    let flac = large_streaming_decode_flac_bytes(threads);
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut progress = Vec::new();
+    let mut decoder = DecodeConfig::default()
+        .with_threads(threads)
+        .into_decoder(&mut output);
+    let summary = decoder
+        .decode_source_with_progress(reader.into_decode_source(), |update| {
+            progress.push(update);
+            Ok(())
+        })
+        .unwrap();
+    (output.into_inner(), summary, progress)
+}
+
+#[cfg(feature = "progress")]
+struct LargeStreamingDecodeRun {
+    decoded: Vec<u8>,
+    summary: flacx::DecodeSummary,
+    progress: Vec<ProgressSnapshot>,
+}
+
+#[cfg(feature = "progress")]
+fn cached_large_streaming_decode_run() -> &'static LargeStreamingDecodeRun {
+    static RUN: OnceLock<LargeStreamingDecodeRun> = OnceLock::new();
+    RUN.get_or_init(|| {
+        let (decoded, summary, progress) = decode_large_streaming_fixture_with_progress(1);
+        LargeStreamingDecodeRun {
+            decoded,
+            summary,
+            progress,
+        }
+    })
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn large_streaming_decode_fixture_stays_above_eager_threshold() {
+    let source = include_str!("../src/decode_output.rs");
+    assert!(
+        source.contains("const EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD: u64 = 8 * 1024 * 1024;"),
+        "keep this guard in sync with the large streaming decode fixture"
+    );
+    assert!(
+        (LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64) > 8 * 1024 * 1024,
+        "large streaming decode fixture must remain above the eager materialization threshold"
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn real_reader_large_decode_prefers_streaming_branch() {
+    let run = cached_large_streaming_decode_run();
+
+    assert_eq!(
+        wav_data_bytes(&run.decoded),
+        wav_data_bytes(&large_streaming_decode_wav_bytes())
+    );
+    assert!(
+        run.progress.len() > 1,
+        "real-reader large decode should stream multiple progress updates instead of materializing eagerly"
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn real_reader_large_decode_progress_keeps_total_frames_zero() {
+    let run = cached_large_streaming_decode_run();
+
+    assert_eq!(
+        run.summary.total_samples,
+        LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
+    );
+    assert!(
+        !run.progress.is_empty(),
+        "expected progress updates for the large streaming fixture"
+    );
+    assert!(
+        run.progress.iter().all(|update| update.total_frames == 0),
+        "all progress snapshots should preserve total_frames=0 for the real-reader streaming path"
+    );
+    assert_eq!(
+        run.progress.last().unwrap().processed_samples,
+        LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
+    );
 }
 
 #[test]
