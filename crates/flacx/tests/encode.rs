@@ -1,9 +1,15 @@
 use std::{
-    io::Cursor,
+    collections::BTreeMap,
+    fs,
+    io::{self, Cursor, Seek, Write},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
+    thread,
+    time::Duration,
 };
 
 use flacx::{EncodePcmStream, EncoderConfig, PcmSpec, builtin::decode_bytes};
@@ -14,8 +20,8 @@ use support::TestEncoder as Encoder;
 use support::{
     ParsedFlacBlockingStrategy, ParsedFlacCodedNumberKind, cue_chunk, decode_with_ffmpeg,
     ffmpeg_available, flac_metadata_blocks, info_list_chunk, parse_first_flac_frame_header,
-    parse_wav_format, pcm_wav_bytes, sample_fixture, vorbis_comments, wav_data_bytes,
-    wav_with_chunks,
+    parse_wav_format, pcm_wav_bytes, sample_fixture, unique_temp_path, vorbis_comments,
+    wav_data_bytes, wav_with_chunks,
 };
 
 fn require_ffmpeg_or_skip() -> bool {
@@ -24,6 +30,39 @@ fn require_ffmpeg_or_skip() -> bool {
     } else {
         eprintln!("skipping ffmpeg oracle test: ffmpeg unavailable in PATH");
         false
+    }
+}
+
+struct EncodeProfileGuard {
+    path: PathBuf,
+}
+
+impl EncodeProfileGuard {
+    fn new() -> Self {
+        let path = unique_temp_path("encode-profile");
+        flacx::__set_encode_profile_path_for_current_thread(Some(path.clone()));
+        Self { path }
+    }
+
+    fn summary(&self) -> BTreeMap<String, usize> {
+        fs::read_to_string(&self.path)
+            .unwrap()
+            .lines()
+            .rev()
+            .find(|line| line.starts_with("event=encode_session_summary"))
+            .unwrap()
+            .split('\t')
+            .skip(1)
+            .filter_map(|field| field.split_once('='))
+            .map(|(key, value)| (key.to_string(), value.parse().unwrap()))
+            .collect()
+    }
+}
+
+impl Drop for EncodeProfileGuard {
+    fn drop(&mut self) {
+        flacx::__set_encode_profile_path_for_current_thread(None);
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -593,6 +632,124 @@ impl EncodePcmStream for ValidationProbeEncodeStream {
     }
 }
 
+struct SessionProbeEncodeStream {
+    spec: PcmSpec,
+    samples: Vec<i32>,
+    preferred_max_frames: Option<usize>,
+    preferred_target_pcm_frames: Option<usize>,
+    fail_after_reads: Option<usize>,
+    read_calls: usize,
+    cursor: usize,
+}
+
+impl SessionProbeEncodeStream {
+    fn new(
+        spec: PcmSpec,
+        samples: Vec<i32>,
+        preferred_max_frames: Option<usize>,
+        preferred_target_pcm_frames: Option<usize>,
+    ) -> Self {
+        Self {
+            spec,
+            samples,
+            preferred_max_frames,
+            preferred_target_pcm_frames,
+            fail_after_reads: None,
+            read_calls: 0,
+            cursor: 0,
+        }
+    }
+
+    fn with_fail_after_reads(mut self, fail_after_reads: usize) -> Self {
+        self.fail_after_reads = Some(fail_after_reads);
+        self
+    }
+}
+
+impl EncodePcmStream for SessionProbeEncodeStream {
+    fn spec(&self) -> PcmSpec {
+        self.spec
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> flacx::Result<usize> {
+        if self
+            .fail_after_reads
+            .is_some_and(|fail_after| self.read_calls >= fail_after)
+        {
+            return Err(flacx::Error::Encode("injected source failure".into()));
+        }
+        self.read_calls += 1;
+
+        let channels = usize::from(self.spec.channels);
+        let available_frames = self.samples.len() / channels - self.cursor / channels;
+        if available_frames == 0 {
+            return Ok(0);
+        }
+
+        let frames = available_frames.min(max_frames);
+        let sample_count = frames * channels;
+        let next = self.cursor + sample_count;
+        output.extend_from_slice(&self.samples[self.cursor..next]);
+        self.cursor = next;
+        Ok(frames)
+    }
+
+    fn preferred_encode_chunk_max_frames(&self) -> Option<usize> {
+        self.preferred_max_frames
+    }
+
+    fn preferred_encode_chunk_target_pcm_frames(&self) -> Option<usize> {
+        self.preferred_target_pcm_frames
+    }
+}
+
+struct FailingWriter {
+    inner: Cursor<Vec<u8>>,
+    fail_after_bytes: usize,
+}
+
+impl FailingWriter {
+    fn new(fail_after_bytes: usize) -> Self {
+        Self {
+            inner: Cursor::new(Vec::new()),
+            fail_after_bytes,
+        }
+    }
+}
+
+impl Write for FailingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let position = usize::try_from(self.inner.position()).unwrap();
+        if position.saturating_add(buf.len()) > self.fail_after_bytes {
+            return Err(io::Error::other("injected writer failure"));
+        }
+        self.inner.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for FailingWriter {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+fn run_encode_with_timeout<T: Send + 'static>(
+    job: impl FnOnce() -> flacx::Result<T> + Send + 'static,
+) -> flacx::Result<T> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(job());
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("encode job should complete without deadlock")
+}
+
 #[test]
 fn encode_uses_bounded_pcm_reads_for_multi_frame_inputs() {
     let total_samples = 576 * 300;
@@ -623,9 +780,14 @@ fn encode_uses_bounded_pcm_reads_for_multi_frame_inputs() {
     let summary = encoder.encode(stream).unwrap();
 
     assert_eq!(summary.total_samples, spec.total_samples);
+    let read_call_count = read_calls.load(Ordering::Relaxed);
     assert!(
-        read_calls.load(Ordering::Relaxed) > 1,
+        read_call_count > 1,
         "expected multiple bounded read_chunk calls"
+    );
+    assert!(
+        read_call_count <= 3,
+        "chunked encode should not recursively split the final tail into many tiny reads"
     );
     assert!(
         requested_frames.load(Ordering::Relaxed) < usize::try_from(spec.total_samples).unwrap(),
@@ -729,4 +891,234 @@ fn progress_encode_path_matches_default_output_and_reports_monotonic_updates() {
             .windows(2)
             .all(|pair| pair[0].completed_frames <= pair[1].completed_frames)
     );
+}
+
+#[test]
+fn encode_persistent_session_residency_stays_bounded_by_queue_depth() {
+    let profile = EncodeProfileGuard::new();
+    let block_schedule = vec![400u16; 20];
+    let total_samples = block_schedule
+        .iter()
+        .map(|&block| usize::from(block))
+        .sum::<usize>();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let stream =
+        SessionProbeEncodeStream::new(spec, sample_fixture(1, total_samples), Some(2), Some(800));
+
+    let mut output = Cursor::new(Vec::new());
+    let summary = EncoderConfig::default()
+        .with_threads(3)
+        .with_block_schedule(block_schedule)
+        .into_encoder(&mut output)
+        .encode(stream)
+        .unwrap();
+    assert_eq!(summary.total_samples, total_samples as u64);
+
+    let summary = profile.summary();
+    let queue_limit = summary["queue_limit"];
+    assert_eq!(summary["chunk_policy_max_frames"], 2);
+    assert_eq!(summary["chunk_policy_target_pcm_frames"], 800);
+    assert_eq!(summary["peak_requested_pcm_frames"], 800);
+    assert!(summary["peak_inflight_pcm_frames"] <= queue_limit * 800);
+    assert_eq!(summary["total_chunks"], 10);
+}
+
+#[test]
+fn encode_persistent_session_honors_stream_chunk_policy_hints() {
+    let profile = EncodeProfileGuard::new();
+    let block_schedule = vec![16u16; 9];
+    let total_samples = block_schedule
+        .iter()
+        .map(|&block| usize::from(block))
+        .sum::<usize>();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let stream =
+        SessionProbeEncodeStream::new(spec, sample_fixture(1, total_samples), Some(3), Some(32));
+
+    EncoderConfig::default()
+        .with_threads(3)
+        .with_block_schedule(block_schedule)
+        .into_encoder(Cursor::new(Vec::new()))
+        .encode(stream)
+        .unwrap();
+
+    let summary = profile.summary();
+    assert_eq!(summary["chunk_policy_max_frames"], 3);
+    assert_eq!(summary["chunk_policy_target_pcm_frames"], 32);
+    assert_eq!(summary["peak_requested_pcm_frames"], 32);
+    assert_eq!(summary["total_chunks"], 5);
+}
+
+#[test]
+fn encode_persistent_session_retires_out_of_order_workers_deterministically() {
+    let profile = EncodeProfileGuard::new();
+    let block_schedule = vec![32_768u16, 16, 16, 16, 16, 16, 16, 16];
+    let total_samples = block_schedule
+        .iter()
+        .map(|&block| usize::from(block))
+        .sum::<usize>();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let samples = sample_fixture(1, total_samples);
+    let mut single_threaded = EncoderConfig::default()
+        .with_threads(1)
+        .with_block_schedule(block_schedule.clone())
+        .into_encoder(Cursor::new(Vec::new()));
+    let single_threaded_summary = single_threaded
+        .encode(SessionProbeEncodeStream::new(
+            spec,
+            samples.clone(),
+            Some(1),
+            Some(65_535),
+        ))
+        .unwrap();
+    let single_threaded_bytes = single_threaded.into_inner().into_inner();
+
+    let mut multi_threaded = EncoderConfig::default()
+        .with_threads(2)
+        .with_block_schedule(block_schedule)
+        .into_encoder(Cursor::new(Vec::new()));
+    let multi_threaded_summary = multi_threaded
+        .encode(SessionProbeEncodeStream::new(
+            spec,
+            samples,
+            Some(1),
+            Some(65_535),
+        ))
+        .unwrap();
+    let multi_threaded_bytes = multi_threaded.into_inner().into_inner();
+
+    assert_eq!(
+        single_threaded_summary.total_samples,
+        multi_threaded_summary.total_samples
+    );
+    assert_eq!(single_threaded_bytes, multi_threaded_bytes);
+
+    let summary = profile.summary();
+    assert!(summary["out_of_order_results"] > 0);
+}
+
+#[test]
+fn encode_persistent_session_source_error_cancels_workers_without_deadlock() {
+    let block_schedule = vec![576u16; 64];
+    let total_samples = block_schedule
+        .iter()
+        .map(|&block| usize::from(block))
+        .sum::<usize>();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let samples = sample_fixture(1, total_samples);
+
+    let error = run_encode_with_timeout(move || {
+        EncoderConfig::default()
+            .with_threads(4)
+            .with_block_schedule(block_schedule)
+            .into_encoder(Cursor::new(Vec::new()))
+            .encode(
+                SessionProbeEncodeStream::new(spec, samples, Some(1), Some(576))
+                    .with_fail_after_reads(3),
+            )
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("injected source failure"));
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn encode_persistent_session_progress_error_cancels_workers_without_deadlock() {
+    let block_schedule = vec![576u16; 64];
+    let total_samples = block_schedule
+        .iter()
+        .map(|&block| usize::from(block))
+        .sum::<usize>();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let samples = sample_fixture(1, total_samples);
+
+    let error = run_encode_with_timeout(move || {
+        let mut encoder = EncoderConfig::default()
+            .with_threads(4)
+            .with_block_schedule(block_schedule)
+            .into_encoder(Cursor::new(Vec::new()));
+        encoder.encode_with_progress(
+            SessionProbeEncodeStream::new(spec, samples, Some(1), Some(576)),
+            |progress| {
+                if progress.completed_frames >= 2 {
+                    Err(flacx::Error::Encode("injected progress failure".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("injected progress failure"));
+}
+
+#[test]
+fn encode_persistent_session_writer_error_cancels_workers_without_deadlock() {
+    let block_schedule = vec![576u16; 64];
+    let total_samples = block_schedule
+        .iter()
+        .map(|&block| usize::from(block))
+        .sum::<usize>();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: 0,
+    };
+    let samples = sample_fixture(1, total_samples);
+
+    let error = run_encode_with_timeout(move || {
+        let mut encoder = EncoderConfig::default()
+            .with_threads(4)
+            .with_block_schedule(block_schedule)
+            .into_encoder(FailingWriter::new(512));
+        encoder.encode(SessionProbeEncodeStream::new(
+            spec,
+            samples,
+            Some(1),
+            Some(576),
+        ))
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("injected writer failure"));
 }

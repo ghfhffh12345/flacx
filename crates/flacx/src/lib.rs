@@ -289,6 +289,11 @@ pub mod core {
 #[cfg(feature = "progress")]
 pub use progress::{DecodeProgress, EncodeProgress, ProgressSnapshot};
 
+#[doc(hidden)]
+pub fn __set_encode_profile_path_for_current_thread(path: Option<std::path::PathBuf>) {
+    encode_pipeline::set_encode_profile_path_for_current_thread(path);
+}
+
 #[cfg(not(feature = "progress"))]
 #[doc = r#"```compile_fail
 use flacx::EncodeProgress;
