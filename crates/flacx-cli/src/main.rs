@@ -27,7 +27,9 @@ const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `flacx` is the authoritative command-line reference for this workspace.
 /// Use `encode` to create FLAC from supported PCM containers or raw PCM,
 /// `decode` to write FLAC back to a PCM container, and `recompress` to
-/// rewrite existing FLAC files with a different encoding policy.
+/// rewrite existing FLAC files with a different encoding policy. Batch
+/// directory work stays sequential across files for every command; `--threads`
+/// only adjusts codec threading within the current file.
 ///
 /// Run `flacx <command> --help` for command-specific workflow details,
 /// defaults, and batch-processing rules.
@@ -45,11 +47,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Encode supported PCM-container input or explicit raw PCM to FLAC.
+    /// Encode supported PCM-container input or explicit raw PCM to FLAC, one file at a time.
     Encode(EncodeArgs),
-    /// Decode FLAC into a supported PCM container.
+    /// Decode FLAC into a supported PCM container, one file at a time.
     Decode(DecodeArgs),
-    /// Recompress existing FLAC files into new FLAC output.
+    /// Recompress existing FLAC files into new FLAC output, one file at a time.
     Recompress(RecompressArgs),
 }
 
@@ -89,8 +91,9 @@ enum DecodeOutputFamilyArg {
 
 /// Encode one file or walk a directory of supported PCM inputs into FLAC.
 ///
-/// Single-file runs write `<input>.flac` by default. Directory runs preserve
-/// the relative layout beneath the input root and honor `--depth` when
+/// Single-file runs write `<input>.flac` by default. Directory runs process
+/// matched inputs sequentially, one file at a time, while preserving the
+/// relative layout beneath the input root and honoring `--depth` when
 /// searching for supported source files.
 ///
 /// Add `--raw` to treat the input as headerless signed-integer PCM data. In
@@ -124,10 +127,11 @@ struct EncodeArgs {
         help_heading = "Encoding"
     )]
     level: u8,
-    /// Number of encoding worker threads.
+    /// Number of per-file codec worker threads.
     ///
-    /// Increase this to improve throughput when encoding many files or large
-    /// inputs.
+    /// This only affects work inside the file currently being encoded.
+    /// Directory batches still encode matching files sequentially, one at a
+    /// time.
     #[arg(long, default_value_t = 8usize, help_heading = "Encoding")]
     threads: usize,
     /// Override the FLAC block size.
@@ -199,7 +203,8 @@ struct EncodeArgs {
 /// Decode FLAC into a supported PCM container.
 ///
 /// Single-file runs use the explicit `--output` extension when provided and
-/// otherwise default to `.wav`. Directory runs preserve the relative layout
+/// otherwise default to `.wav`. Directory runs decode matched FLAC inputs
+/// sequentially, one file at a time, while preserving the relative layout
 /// beneath the input root; use `--output-family` to choose which container
 /// extension gets generated for batch output paths.
 #[derive(Debug, Args)]
@@ -225,9 +230,11 @@ struct DecodeArgs {
     /// output-path extension wins.
     #[arg(long, value_enum, help_heading = "Output")]
     output_family: Option<DecodeOutputFamilyArg>,
-    /// Number of decoding worker threads.
+    /// Number of per-file codec worker threads.
     ///
-    /// Leave unset to use the library default.
+    /// Leave unset to use the library default for each decoded file.
+    /// Directory batches still decode matching files sequentially, one at a
+    /// time.
     #[arg(long, help_heading = "Decoding")]
     threads: Option<usize>,
     /// Metadata and validation preset.
@@ -257,7 +264,8 @@ struct DecodeArgs {
 /// Recompress existing FLAC files into new FLAC output.
 ///
 /// Single-file runs write `<input-stem>.recompressed.flac` by default.
-/// Directory runs preserve the relative layout beneath the input root. Use
+/// Directory runs recompress matched FLAC inputs sequentially, one file at a
+/// time, while preserving the relative layout beneath the input root. Use
 /// `--in-place` to replace each source FLAC only after a successful
 /// recompression.
 #[derive(Debug, Args)]
@@ -291,10 +299,11 @@ struct RecompressArgs {
         help_heading = "Recompression"
     )]
     level: u8,
-    /// Number of recompression worker threads.
+    /// Number of per-file codec worker threads.
     ///
-    /// Increase this to improve throughput when processing many files or large
-    /// inputs.
+    /// This only affects work inside the file currently being recompressed.
+    /// Directory batches still recompress matching files sequentially, one at a
+    /// time.
     #[arg(long, default_value_t = 8usize, help_heading = "Recompression")]
     threads: usize,
     /// Override the FLAC block size.

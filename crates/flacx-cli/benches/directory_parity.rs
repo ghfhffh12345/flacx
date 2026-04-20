@@ -13,7 +13,9 @@ use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 #[path = "../../flacx/tests/support/mod.rs"]
 mod support;
 
-use support::{encode_flac_bytes_with_config, pcm_wav_bytes, sample_fixture};
+use support::{
+    encode_flac_bytes_with_config, extensible_pcm_wav_bytes, pcm_wav_bytes, sample_fixture,
+};
 
 const DEFAULT_FIXTURE_FRAMES: usize = 2_048;
 
@@ -76,15 +78,18 @@ impl DirectoryParityCorpus {
             .with_level(Level::Level8)
             .with_threads(threads);
 
-        for (relative, channels, frames) in benchmark_fixtures() {
-            let wav_path = wav_root.path().join(relative).with_extension("wav");
+        for fixture in benchmark_fixtures() {
+            let wav_path = wav_root.path().join(fixture.relative).with_extension("wav");
             if let Some(parent) = wav_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let wav_bytes = pcm_wav_bytes(16, channels, 44_100, &sample_fixture(channels, frames));
+            let wav_bytes = fixture.wav_bytes();
             fs::write(&wav_path, &wav_bytes)?;
 
-            let flac_path = flac_root.path().join(relative).with_extension("flac");
+            let flac_path = flac_root
+                .path()
+                .join(fixture.relative)
+                .with_extension("flac");
             if let Some(parent) = flac_path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -129,13 +134,61 @@ impl DirectoryParityCorpus {
     }
 }
 
-fn benchmark_fixtures() -> [(&'static str, u16, usize); 4] {
+fn benchmark_fixtures() -> [BenchmarkFixture; 4] {
     [
-        ("disc1/track01", 1, DEFAULT_FIXTURE_FRAMES),
-        ("disc1/track02", 2, DEFAULT_FIXTURE_FRAMES * 2),
-        ("disc2/live/track01", 3, DEFAULT_FIXTURE_FRAMES),
-        ("disc2/live/track02", 6, DEFAULT_FIXTURE_FRAMES / 2),
+        BenchmarkFixture::pcm("disc1/track01", 1, DEFAULT_FIXTURE_FRAMES),
+        BenchmarkFixture::pcm("disc1/track02", 2, DEFAULT_FIXTURE_FRAMES * 2),
+        BenchmarkFixture::extensible("disc2/live/track01", 4, DEFAULT_FIXTURE_FRAMES, 0x0001_2104),
+        BenchmarkFixture::extensible(
+            "disc2/live/track02",
+            6,
+            DEFAULT_FIXTURE_FRAMES / 2,
+            0x0000_003f,
+        ),
     ]
+}
+
+#[derive(Clone, Copy)]
+struct BenchmarkFixture {
+    relative: &'static str,
+    channels: u16,
+    frames: usize,
+    channel_mask: Option<u32>,
+}
+
+impl BenchmarkFixture {
+    const fn pcm(relative: &'static str, channels: u16, frames: usize) -> Self {
+        Self {
+            relative,
+            channels,
+            frames,
+            channel_mask: None,
+        }
+    }
+
+    const fn extensible(
+        relative: &'static str,
+        channels: u16,
+        frames: usize,
+        channel_mask: u32,
+    ) -> Self {
+        Self {
+            relative,
+            channels,
+            frames,
+            channel_mask: Some(channel_mask),
+        }
+    }
+
+    fn wav_bytes(&self) -> Vec<u8> {
+        let samples = sample_fixture(self.channels, self.frames);
+        match self.channel_mask {
+            Some(channel_mask) => {
+                extensible_pcm_wav_bytes(16, 16, self.channels, 44_100, channel_mask, &samples)
+            }
+            None => pcm_wav_bytes(16, self.channels, 44_100, &samples),
+        }
+    }
 }
 
 struct TempDir {

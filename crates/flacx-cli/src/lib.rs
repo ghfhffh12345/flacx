@@ -14,11 +14,7 @@ use std::{
     fs::{self, File},
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc,
-    },
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -157,6 +153,22 @@ impl CommandKind {
         }
     }
 
+    fn empty_directory_worklist_error(self, input_root: &Path, depth: usize) -> String {
+        let noun = match self {
+            Self::Encode => "supported PCM input files",
+            Self::Decode | Self::Recompress => "FLAC input files",
+        };
+        let depth_hint = if depth == 0 {
+            "at any depth".to_string()
+        } else {
+            format!("within depth {depth}")
+        };
+        format!(
+            "no {noun} found under '{}' {depth_hint}; check the directory contents or adjust --depth",
+            input_root.display()
+        )
+    }
+
     fn planning_error(self, message: impl Into<String>) -> Error {
         match self {
             Self::Encode => Error::Encode(message.into()),
@@ -245,34 +257,6 @@ impl CurrentFileProgress {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DirectoryEncodeSchedule {
-    max_concurrent_files: usize,
-    file_threads: usize,
-}
-
-impl DirectoryEncodeSchedule {
-    fn new(total_threads: usize, item_count: usize) -> Self {
-        let total_threads = total_threads.max(1);
-        if item_count <= 1 || total_threads < 4 {
-            return Self {
-                max_concurrent_files: 1,
-                file_threads: total_threads,
-            };
-        }
-
-        let max_concurrent_files = item_count.min((total_threads / 4).max(1)).min(4);
-        Self {
-            max_concurrent_files,
-            file_threads: (total_threads / max_concurrent_files).max(1),
-        }
-    }
-
-    fn should_parallelize(self) -> bool {
-        self.max_concurrent_files > 1
-    }
-}
-
 #[derive(Debug)]
 enum ProgressEvent {
     BeginFile {
@@ -315,10 +299,6 @@ pub fn encode_command(
     })?;
     let config = command.config.clone();
     let raw_descriptor = command.raw_descriptor;
-    let schedule = planned
-        .is_directory
-        .then(|| DirectoryEncodeSchedule::new(config.threads, planned.items.len()))
-        .filter(|schedule| schedule.should_parallelize());
 
     run_with_progress_events(
         stderr,
@@ -327,16 +307,6 @@ pub fn encode_command(
         planned.total_samples,
         planned.is_directory,
         move |sender| {
-            if let Some(schedule) = schedule {
-                return run_parallel_directory_encode_work(
-                    planned.items,
-                    config,
-                    raw_descriptor,
-                    schedule,
-                    sender,
-                );
-            }
-
             for (file_id, item) in planned.items.into_iter().enumerate() {
                 run_encode_work_item(item, file_id, config.clone(), raw_descriptor, &sender)?;
             }
@@ -344,63 +314,6 @@ pub fn encode_command(
             Ok(())
         },
     )
-}
-
-fn run_parallel_directory_encode_work(
-    items: Vec<ConversionWorkItem>,
-    config: EncoderConfig,
-    raw_descriptor: Option<RawPcmDescriptor>,
-    schedule: DirectoryEncodeSchedule,
-    sender: mpsc::Sender<ProgressEvent>,
-) -> Result<()> {
-    let next_index = AtomicUsize::new(0);
-    let stop = AtomicBool::new(false);
-    let first_error = Mutex::new(None);
-
-    thread::scope(|scope| {
-        for _ in 0..schedule.max_concurrent_files {
-            let sender = sender.clone();
-            let config = config.clone().with_threads(schedule.file_threads);
-            let items = &items;
-            let next_index = &next_index;
-            let stop = &stop;
-            let first_error = &first_error;
-
-            scope.spawn(move || {
-                loop {
-                    if stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    let file_id = next_index.fetch_add(1, Ordering::Relaxed);
-                    if file_id >= items.len() {
-                        break;
-                    }
-
-                    let item = items[file_id].clone();
-                    if let Err(error) =
-                        run_encode_work_item(item, file_id, config.clone(), raw_descriptor, &sender)
-                    {
-                        stop.store(true, Ordering::Relaxed);
-                        let mut slot = first_error.lock().expect("encode error slot poisoned");
-                        if slot.is_none() {
-                            *slot = Some(error);
-                        }
-                        break;
-                    }
-                }
-            });
-        }
-    });
-
-    if let Some(error) = first_error
-        .into_inner()
-        .expect("encode error slot poisoned")
-    {
-        Err(error)
-    } else {
-        Ok(())
-    }
 }
 
 fn run_encode_work_item(
@@ -804,10 +717,7 @@ fn plan_decode_single_file_work_item(command: &DecodeCommand) -> Result<Conversi
 
 fn plan_decode_directory_worklist(command: &DecodeCommand) -> Result<PlannedWorklist> {
     let output_root = match command.output.as_deref() {
-        Some(output_root) => Some(validate_or_create_output_root(
-            CommandKind::Decode,
-            output_root,
-        )?),
+        Some(output_root) => Some(validate_output_root(CommandKind::Decode, output_root)?),
         None => None,
     };
     let target_extension = decode_target_extension(command.config.output_container);
@@ -860,6 +770,11 @@ fn plan_decode_directory_worklist(command: &DecodeCommand) -> Result<PlannedWork
     }
 
     items.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    if items.is_empty() {
+        return Err(CommandKind::Decode.planning_error(
+            CommandKind::Decode.empty_directory_worklist_error(&command.input, command.depth),
+        ));
+    }
     Ok(PlannedWorklist {
         items,
         total_samples,
@@ -944,7 +859,7 @@ fn plan_directory_worklist(
             .planning_error("folder recompress output root must differ from the input directory"));
     }
     let output_root = match output_root {
-        Some(output_root) => Some(validate_or_create_output_root(kind, output_root)?),
+        Some(output_root) => Some(validate_output_root(kind, output_root)?),
         None => None,
     };
 
@@ -956,6 +871,9 @@ fn plan_directory_worklist(
         inspect_total_samples,
     )?;
     worklist.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    if worklist.is_empty() {
+        return Err(kind.planning_error(kind.empty_directory_worklist_error(input_root, depth)));
+    }
 
     Ok(PlannedWorklist {
         items: worklist,
@@ -964,13 +882,9 @@ fn plan_directory_worklist(
     })
 }
 
-fn validate_or_create_output_root(kind: CommandKind, output_root: &Path) -> Result<PathBuf> {
-    if output_root.exists() {
-        if !output_root.is_dir() {
-            return Err(kind.planning_error(kind.directory_output_error(output_root)));
-        }
-    } else {
-        fs::create_dir_all(output_root)?;
+fn validate_output_root(kind: CommandKind, output_root: &Path) -> Result<PathBuf> {
+    if output_root.exists() && !output_root.is_dir() {
+        return Err(kind.planning_error(kind.directory_output_error(output_root)));
     }
 
     Ok(output_root.to_path_buf())
@@ -1079,10 +993,7 @@ fn plan_recompress_directory_worklist(command: &RecompressCommand) -> Result<Pla
                         "folder recompress output root must differ from the input directory unless --in-place is used",
                     ));
                 }
-                Some(validate_or_create_output_root(
-                    CommandKind::Recompress,
-                    output_root,
-                )?)
+                Some(validate_output_root(CommandKind::Recompress, output_root)?)
             }
             None => None,
         }
@@ -1139,6 +1050,11 @@ fn plan_recompress_directory_worklist(command: &RecompressCommand) -> Result<Pla
     }
 
     items.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    if items.is_empty() {
+        return Err(CommandKind::Recompress.planning_error(
+            CommandKind::Recompress.empty_directory_worklist_error(&command.input, command.depth),
+        ));
+    }
     Ok(PlannedWorklist {
         items,
         total_samples,
@@ -2551,10 +2467,10 @@ mod tests {
     };
 
     use super::{
-        BatchProgressCoordinator, DirectoryEncodeSchedule, ProgressDisplay, ProgressEstimate,
-        ProgressFrame, ProgressRenderer, ProgressState, SampleProgress, display_width,
-        format_progress_frame, format_progress_frame_with_budget, relative_display_name,
-        rendered_row_count, time_until_next_second, truncate_display_text,
+        BatchProgressCoordinator, ProgressDisplay, ProgressEstimate, ProgressFrame,
+        ProgressRenderer, ProgressState, SampleProgress, display_width, format_progress_frame,
+        format_progress_frame_with_budget, relative_display_name, rendered_row_count,
+        time_until_next_second, truncate_display_text,
     };
     use flacx::{ProgressSnapshot, RecompressPhase, RecompressProgress};
 
@@ -3258,31 +3174,6 @@ mod tests {
         assert!(final_lines[0].contains("37.5%"));
         assert!(final_lines[1].contains("disc1/second.wav | File | "));
         assert!(final_lines[1].contains("50.0%"));
-    }
-
-    #[test]
-    fn directory_encode_schedule_preserves_a_bounded_thread_budget() {
-        assert_eq!(
-            DirectoryEncodeSchedule::new(3, 8),
-            DirectoryEncodeSchedule {
-                max_concurrent_files: 1,
-                file_threads: 3,
-            }
-        );
-        assert_eq!(
-            DirectoryEncodeSchedule::new(8, 8),
-            DirectoryEncodeSchedule {
-                max_concurrent_files: 2,
-                file_threads: 4,
-            }
-        );
-        assert_eq!(
-            DirectoryEncodeSchedule::new(8, 2),
-            DirectoryEncodeSchedule {
-                max_concurrent_files: 2,
-                file_threads: 4,
-            }
-        );
     }
 
     #[test]

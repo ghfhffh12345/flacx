@@ -64,12 +64,14 @@ fn assert_wav_audio_eq(actual: &[u8], expected: &[u8]) {
     assert_eq!(wav_data_bytes(actual), wav_data_bytes(expected));
 }
 
-fn final_progress_frame_lines(stderr: &str) -> Vec<&str> {
-    let final_frame = last_cursor_up_escape_end(stderr)
+fn final_progress_frame(stderr: &str) -> &str {
+    last_cursor_up_escape_end(stderr)
         .map(|index| &stderr[index..])
-        .unwrap_or(stderr);
+        .unwrap_or(stderr)
+}
 
-    final_frame
+fn final_progress_frame_lines(stderr: &str) -> Vec<&str> {
+    final_progress_frame(stderr)
         .trim_end_matches('\n')
         .split('\n')
         .map(|line| line.split('\r').next_back().unwrap_or(line))
@@ -97,10 +99,7 @@ fn last_cursor_up_escape_end(text: &str) -> Option<usize> {
 }
 
 fn final_progress_line(stderr: &str) -> &str {
-    let final_frame = last_cursor_up_escape_end(stderr)
-        .map(|index| &stderr[index..])
-        .unwrap_or(stderr);
-
+    let final_frame = final_progress_frame(stderr);
     final_frame
         .trim_end_matches('\n')
         .split('\r')
@@ -108,8 +107,8 @@ fn final_progress_line(stderr: &str) -> &str {
         .unwrap_or(final_frame)
 }
 
-fn decode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
-    let mut command_args = vec!["decode"];
+fn cli_output(subcommand: &str, input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
+    let mut command_args = vec![subcommand];
     command_args.extend_from_slice(args);
     command_args.push(input_path.to_str().unwrap());
     command_args.push("-o");
@@ -118,30 +117,29 @@ fn decode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Ou
         .args(command_args)
         .output()
         .unwrap()
+}
+
+fn decode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
+    cli_output("decode", input_path, output_path, args)
 }
 
 fn encode_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
-    let mut command_args = vec!["encode"];
-    command_args.extend_from_slice(args);
-    command_args.push(input_path.to_str().unwrap());
-    command_args.push("-o");
-    command_args.push(output_path.to_str().unwrap());
-    Command::new(flacx_bin())
-        .args(command_args)
-        .output()
-        .unwrap()
+    cli_output("encode", input_path, output_path, args)
 }
 
 fn recompress_cli_output(input_path: &Path, output_path: &Path, args: &[&str]) -> Output {
-    let mut command_args = vec!["recompress"];
-    command_args.extend_from_slice(args);
-    command_args.push(input_path.to_str().unwrap());
-    command_args.push("-o");
-    command_args.push(output_path.to_str().unwrap());
-    Command::new(flacx_bin())
-        .args(command_args)
-        .output()
-        .unwrap()
+    cli_output("recompress", input_path, output_path, args)
+}
+
+fn assert_trace_progress_order(begin: usize, first_progress: usize, finish: usize, filename: &str) {
+    assert!(
+        begin < first_progress,
+        "trace begin/progress order broke for {filename}"
+    );
+    assert!(
+        first_progress < finish,
+        "trace progress/finish order broke for {filename}"
+    );
 }
 
 fn assert_progress_trace_has_startup_events(trace: &str, kind: &str, filename: &str) {
@@ -176,6 +174,51 @@ fn trace_event_line<'a>(trace: &'a str, event: &str, filename: &str) -> &'a str 
         .unwrap_or_else(|| panic!("missing {event} for {filename} in trace:\n{trace}"))
 }
 
+fn assert_trace_files_do_not_overlap(
+    trace: &str,
+    kind: &str,
+    filenames: &[&str],
+    require_first_progress: bool,
+) {
+    assert!(trace.contains("event=planning_start"));
+    assert!(trace.contains("event=planning_finish"));
+    assert!(trace.contains("event=command"));
+    assert!(trace.contains(&format!("kind={kind}")));
+    assert!(trace.contains("batch_mode=1"));
+
+    for filename in filenames {
+        let begin = trace_event_index(trace, "file_begin", filename);
+        let finish = trace_event_index(trace, "file_finish", filename);
+        let first_progress = trace.lines().position(|line| {
+            line.contains("event=first_progress") && line.contains(&format!("filename={filename}"))
+        });
+
+        if require_first_progress {
+            let first_progress = first_progress.unwrap_or_else(|| {
+                panic!(
+                    "missing first_progress for {filename} in trace:
+{trace}"
+                )
+            });
+            assert_trace_progress_order(begin, first_progress, finish, filename);
+        } else if let Some(first_progress) = first_progress {
+            assert_trace_progress_order(begin, first_progress, finish, filename);
+        }
+    }
+
+    for pair in filenames.windows(2) {
+        let previous_finish = trace_event_index(trace, "file_finish", pair[0]);
+        let next_begin = trace_event_index(trace, "file_begin", pair[1]);
+        assert!(
+            previous_finish < next_begin,
+            "trace overlapped {} and {}:
+{trace}",
+            pair[0],
+            pair[1]
+        );
+    }
+}
+
 #[test]
 fn cli_dispatch_does_not_depend_on_builtin_shortcut_routing() {
     let source = include_str!("../src/lib.rs");
@@ -192,6 +235,13 @@ fn cli_dispatch_uses_buffered_file_boundaries() {
     assert!(source.contains("BufWriter::with_capacity"));
     assert!(source.contains("CLI_READ_BUFFER_CAPACITY"));
     assert!(source.contains("CLI_WRITE_BUFFER_CAPACITY"));
+}
+
+#[test]
+fn cli_dispatch_no_longer_contains_directory_encode_scheduler_symbols() {
+    let source = include_str!("../src/lib.rs");
+    assert!(!source.contains("DirectoryEncodeSchedule"));
+    assert!(!source.contains("run_parallel_directory_encode_work"));
 }
 
 #[test]
@@ -218,7 +268,8 @@ fn encode_help_lists_output_depth_and_default_threads() {
     assert!(stdout.contains("-o, --output <OUTPUT>"));
     assert!(stdout.contains("--depth <DEPTH>"));
     assert!(stdout.contains("[default: 8]"));
-    assert!(stdout.contains("only applies when the input is a directory"));
+    assert!(stdout.contains("one file at a time"));
+    assert!(stdout.contains("per-file codec worker threads"));
 }
 
 #[test]
@@ -235,6 +286,8 @@ fn decode_help_lists_output_depth_and_threads() {
     assert!(stdout.contains("--depth <DEPTH>"));
     assert!(stdout.contains("--mode <MODE>"));
     assert!(stdout.contains("--threads <THREADS>"));
+    assert!(stdout.contains("one file at a time"));
+    assert!(stdout.contains("per-file codec worker threads"));
     assert!(stdout.contains("loose"));
     assert!(stdout.contains("default"));
     assert!(stdout.contains("strict"));
@@ -258,6 +311,8 @@ fn recompress_help_lists_output_depth_mode_and_block_size() {
     assert!(stdout.contains("--level <LEVEL>"));
     assert!(stdout.contains("--block-size <BLOCK_SIZE>"));
     assert!(stdout.contains("--threads <THREADS>"));
+    assert!(stdout.contains("one file at a time"));
+    assert!(stdout.contains("per-file codec worker threads"));
 }
 
 #[test]
@@ -407,7 +462,7 @@ fn encode_command_emits_progress_trace_when_requested() {
 }
 
 #[test]
-fn encode_directory_progress_trace_preserves_per_file_event_order_with_parallel_budget() {
+fn encode_directory_progress_trace_keeps_files_globally_non_overlapping() {
     let input_dir = unique_temp_dir();
     let output_dir = unique_temp_dir();
     let trace_path = input_dir.join("directory-progress.trace");
@@ -441,19 +496,56 @@ fn encode_directory_progress_trace_preserves_per_file_event_order_with_parallel_
 
     let trace = fs::read_to_string(&trace_path).unwrap();
     assert!(trace.contains("batch_mode=1"));
-    for filename in ["disc1/first.wav", "disc1/second.wav"] {
-        let begin = trace_event_index(&trace, "file_begin", filename);
-        let first_progress = trace_event_index(&trace, "first_progress", filename);
-        let finish = trace_event_index(&trace, "file_finish", filename);
-        assert!(
-            begin < first_progress,
-            "trace begin/progress order broke for {filename}"
-        );
-        assert!(
-            first_progress < finish,
-            "trace progress/finish order broke for {filename}"
-        );
-    }
+    assert_trace_files_do_not_overlap(
+        &trace,
+        "encode",
+        &["disc1/first.wav", "disc1/second.wav"],
+        true,
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn decode_directory_progress_trace_keeps_files_globally_non_overlapping() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_dir();
+    let trace_path = input_dir.join("directory-progress.trace");
+    write_flac_file(&input_dir.join("disc1/first.flac"), 1, 4_096);
+    write_flac_file(&input_dir.join("disc1/second.flac"), 2, 8_192);
+
+    let output = Command::new(flacx_bin())
+        .env("FLACX_PROGRESS_TRACE", &trace_path)
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--depth",
+            "0",
+            "--threads",
+            "4",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_dir.join("disc1/first.wav").exists());
+    assert!(output_dir.join("disc1/second.wav").exists());
+
+    let trace = fs::read_to_string(&trace_path).unwrap();
+    assert!(trace.contains("batch_mode=1"));
+    assert_trace_files_do_not_overlap(
+        &trace,
+        "decode",
+        &["disc1/first.flac", "disc1/second.flac"],
+        true,
+    );
 
     let _ = fs::remove_dir_all(input_dir);
     let _ = fs::remove_dir_all(output_dir);
@@ -540,6 +632,50 @@ fn recompress_command_emits_decode_first_progress_trace_when_requested() {
     assert!(begin_line.contains("overall_total_samples=16384"));
 
     let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_directory_progress_trace_keeps_files_globally_non_overlapping() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_dir();
+    let trace_path = input_dir.join("directory-progress.trace");
+    write_flac_file(&input_dir.join("disc1/first.flac"), 1, 4_096);
+    write_flac_file(&input_dir.join("disc1/second.flac"), 2, 8_192);
+
+    let output = Command::new(flacx_bin())
+        .env("FLACX_PROGRESS_TRACE", &trace_path)
+        .args([
+            "recompress",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--depth",
+            "0",
+            "--threads",
+            "4",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_dir.join("disc1/first.flac").exists());
+    assert!(output_dir.join("disc1/second.flac").exists());
+
+    let trace = fs::read_to_string(&trace_path).unwrap();
+    assert!(trace.contains("batch_mode=1"));
+    assert_trace_files_do_not_overlap(
+        &trace,
+        "recompress",
+        &["disc1/first.flac", "disc1/second.flac"],
+        false,
+    );
+
+    let _ = fs::remove_dir_all(input_dir);
+    let _ = fs::remove_dir_all(output_dir);
 }
 
 #[test]
@@ -760,6 +896,33 @@ fn recompress_directory_without_output_writes_sibling_flacs_at_default_depth() {
             .join("deep.recompressed.flac")
             .exists()
     );
+
+    let _ = fs::remove_dir_all(input_dir);
+}
+
+#[test]
+fn recompress_directory_fails_cleanly_when_default_depth_matches_nothing() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_path("outdir");
+    let nested_flac = input_dir.join("disc1").join("set").join("song.flac");
+    write_flac_file(&nested_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "recompress",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("adjust --depth"), "stderr: {stderr}");
+    assert!(!output_dir.exists());
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -1103,6 +1266,33 @@ fn encode_directory_with_output_root_preserves_relative_subpaths_and_creates_par
 
     let _ = fs::remove_dir_all(input_dir);
     let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn encode_directory_fails_cleanly_when_default_depth_matches_nothing() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_path("outdir");
+    let nested_wav = input_dir.join("disc1").join("set").join("song.wav");
+    write_wav_file(&nested_wav, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "encode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("adjust --depth"), "stderr: {stderr}");
+    assert!(!output_dir.exists());
+
+    let _ = fs::remove_dir_all(input_dir);
 }
 
 #[test]
@@ -2103,6 +2293,33 @@ fn decode_directory_with_output_root_preserves_relative_subpaths_and_creates_par
 
     let _ = fs::remove_dir_all(input_dir);
     let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn decode_directory_fails_cleanly_when_default_depth_matches_nothing() {
+    let input_dir = unique_temp_dir();
+    let output_dir = unique_temp_path("outdir");
+    let nested_flac = input_dir.join("disc1").join("set").join("song.flac");
+    write_flac_file(&nested_flac, 1, 2_048);
+
+    let output = Command::new(flacx_bin())
+        .args([
+            "decode",
+            input_dir.to_str().unwrap(),
+            "-o",
+            output_dir.to_str().unwrap(),
+            "--threads",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("adjust --depth"), "stderr: {stderr}");
+    assert!(!output_dir.exists());
+
+    let _ = fs::remove_dir_all(input_dir);
 }
 
 #[test]
