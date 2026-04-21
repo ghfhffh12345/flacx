@@ -16,10 +16,10 @@ pub struct ProgressSnapshot {
     pub completed_frames: usize,
     /// Total frames planned for the current input.
     pub total_frames: usize,
-    /// Input bytes processed so far.
-    pub input_bytes_processed: u64,
-    /// Output bytes processed so far.
-    pub output_bytes_processed: u64,
+    /// Input bytes read so far.
+    pub input_bytes_read: u64,
+    /// Output bytes written so far.
+    pub output_bytes_written: u64,
 }
 
 #[cfg(feature = "progress")]
@@ -69,17 +69,17 @@ mod tests {
     use super::ProgressSnapshot;
 
     #[test]
-    fn progress_snapshot_carries_input_and_output_bytes() {
+    fn progress_snapshot_carries_input_bytes_read_and_output_bytes_written() {
         let snapshot = ProgressSnapshot {
             processed_samples: 128,
             total_samples: 256,
             completed_frames: 2,
             total_frames: 4,
-            input_bytes_processed: 4_096,
-            output_bytes_processed: 1_024,
+            input_bytes_read: 4_096,
+            output_bytes_written: 1_024,
         };
 
-        assert_eq!(snapshot.input_bytes_processed, 4_096);
-        assert_eq!(snapshot.output_bytes_processed, 1_024);
+        assert_eq!(snapshot.input_bytes_read, 4_096);
+        assert_eq!(snapshot.output_bytes_written, 1_024);
     }
 }

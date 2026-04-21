@@ -782,8 +782,8 @@ where
             total_samples,
             completed_frames: frame_index + 1,
             total_frames,
-            input_bytes_processed: current_input_bytes_processed(),
-            output_bytes_processed: writer.bytes_written(),
+            input_bytes_read: current_input_bytes_processed(),
+            output_bytes_written: writer.bytes_written(),
         })?;
     }
     Ok(processed_samples)

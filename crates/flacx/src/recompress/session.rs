@@ -234,10 +234,10 @@ where
             overall_total_samples: overall_total_samples(total_samples),
             completed_frames: 0,
             total_frames: 0,
-            phase_input_bytes_processed: 0,
-            phase_output_bytes_processed: 0,
-            overall_input_bytes_processed: 0,
-            overall_output_bytes_processed: 0,
+            phase_input_bytes_read: 0,
+            phase_output_bytes_written: 0,
+            overall_input_bytes_read: 0,
+            overall_output_bytes_written: 0,
         })?;
 
         if total_samples <= EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD {
@@ -254,17 +254,17 @@ where
                 overall_total_samples: overall_total_samples(total_samples),
                 completed_frames: 0,
                 total_frames: encode_plan.total_frames,
-                phase_input_bytes_processed: 0,
-                phase_output_bytes_processed: 0,
-                overall_input_bytes_processed: decode_input_bytes,
-                overall_output_bytes_processed: decode_output_bytes,
+                phase_input_bytes_read: 0,
+                phase_output_bytes_written: 0,
+                overall_input_bytes_read: decode_input_bytes,
+                overall_output_bytes_written: decode_output_bytes,
             })?;
 
             let mut encode_progress = EncodePhaseProgress {
                 sink: progress,
                 total_samples,
-                decode_input_bytes,
-                decode_output_bytes,
+                decode_input_bytes_read: decode_input_bytes,
+                decode_output_bytes_written: decode_output_bytes,
             };
             let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
             let summary = encoder.encode_source_with_sink(
@@ -298,17 +298,17 @@ where
             overall_total_samples: overall_total_samples(total_samples),
             completed_frames: 0,
             total_frames: encode_plan.total_frames,
-            phase_input_bytes_processed: 0,
-            phase_output_bytes_processed: 0,
-            overall_input_bytes_processed: decode_input_bytes,
-            overall_output_bytes_processed: decode_output_bytes,
+            phase_input_bytes_read: 0,
+            phase_output_bytes_written: 0,
+            overall_input_bytes_read: decode_input_bytes,
+            overall_output_bytes_written: decode_output_bytes,
         })?;
 
         let mut encode_progress = EncodePhaseProgress {
             sink: progress,
             total_samples,
-            decode_input_bytes,
-            decode_output_bytes,
+            decode_input_bytes_read: decode_input_bytes,
+            decode_output_bytes_written: decode_output_bytes,
         };
         let stream = CountedEncodePcmStream::new(stream);
         let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);

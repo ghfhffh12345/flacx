@@ -144,7 +144,8 @@
 //! - `caf` enables CAF support
 //! - `progress` enables callback-based progress reporting via
 //!   [`ProgressSnapshot`], [`EncodeProgress`], [`DecodeProgress`], and
-//!   recompress progress helpers
+//!   recompress progress helpers with explicit input-read and output-write
+//!   counters
 //!
 //! ## Navigating the docs
 //!

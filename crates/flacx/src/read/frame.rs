@@ -225,8 +225,8 @@ where
                 total_samples: stream_info.total_samples,
                 completed_frames: frame_offset + 1,
                 total_frames,
-                input_bytes_processed,
-                output_bytes_processed: pcm_output_bytes(stream_info, processed_samples),
+                input_bytes_read: input_bytes_processed,
+                output_bytes_written: pcm_output_bytes(stream_info, processed_samples),
             })?;
         }
         debug_assert_eq!(processed_samples, indexed_total_samples);
@@ -357,8 +357,8 @@ where
             total_samples: progress_window.stream_info.total_samples,
             completed_frames: progress_window.start_index + frame_offset + 1,
             total_frames: progress_window.total_frames,
-            input_bytes_processed: *input_bytes_processed,
-            output_bytes_processed: pcm_output_bytes(
+            input_bytes_read: *input_bytes_processed,
+            output_bytes_written: pcm_output_bytes(
                 progress_window.stream_info,
                 processed_samples,
             ),

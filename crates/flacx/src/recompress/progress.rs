@@ -41,14 +41,14 @@ pub struct RecompressProgress {
     pub completed_frames: usize,
     /// Total frames expected within the active phase when known.
     pub total_frames: usize,
-    /// Input bytes processed so far within the active phase.
-    pub phase_input_bytes_processed: u64,
-    /// Output bytes processed so far within the active phase.
-    pub phase_output_bytes_processed: u64,
-    /// Input bytes processed so far across the full decode+encode operation.
-    pub overall_input_bytes_processed: u64,
-    /// Output bytes processed so far across the full decode+encode operation.
-    pub overall_output_bytes_processed: u64,
+    /// Input bytes read so far within the active phase.
+    pub phase_input_bytes_read: u64,
+    /// Output bytes written so far within the active phase.
+    pub phase_output_bytes_written: u64,
+    /// Input bytes read so far across the full decode+encode operation.
+    pub overall_input_bytes_read: u64,
+    /// Output bytes written so far across the full decode+encode operation.
+    pub overall_output_bytes_written: u64,
 }
 
 pub(crate) trait RecompressProgressSink {
@@ -74,8 +74,8 @@ where
 pub(crate) struct EncodePhaseProgress<'a, P> {
     pub(crate) sink: &'a mut P,
     pub(crate) total_samples: u64,
-    pub(crate) decode_input_bytes: u64,
-    pub(crate) decode_output_bytes: u64,
+    pub(crate) decode_input_bytes_read: u64,
+    pub(crate) decode_output_bytes_written: u64,
 }
 
 impl<P> ProgressSink for EncodePhaseProgress<'_, P>
@@ -93,14 +93,14 @@ where
             overall_total_samples: overall_total_samples(self.total_samples),
             completed_frames: progress.completed_frames,
             total_frames: progress.total_frames,
-            phase_input_bytes_processed: progress.input_bytes_processed,
-            phase_output_bytes_processed: progress.output_bytes_processed,
-            overall_input_bytes_processed: self
-                .decode_input_bytes
-                .saturating_add(progress.input_bytes_processed),
-            overall_output_bytes_processed: self
-                .decode_output_bytes
-                .saturating_add(progress.output_bytes_processed),
+            phase_input_bytes_read: progress.input_bytes_read,
+            phase_output_bytes_written: progress.output_bytes_written,
+            overall_input_bytes_read: self
+                .decode_input_bytes_read
+                .saturating_add(progress.input_bytes_read),
+            overall_output_bytes_written: self
+                .decode_output_bytes_written
+                .saturating_add(progress.output_bytes_written),
         })
     }
 }
@@ -114,7 +114,7 @@ mod tests {
     use super::{RecompressPhase, RecompressProgress};
 
     #[test]
-    fn recompress_progress_carries_phase_and_overall_byte_counters() {
+    fn recompress_progress_carries_phase_and_overall_read_write_counters() {
         let progress = RecompressProgress {
             phase: RecompressPhase::Decode,
             phase_processed_samples: 512,
@@ -123,13 +123,13 @@ mod tests {
             overall_total_samples: 2_048,
             completed_frames: 3,
             total_frames: 6,
-            phase_input_bytes_processed: 8_192,
-            phase_output_bytes_processed: 16_384,
-            overall_input_bytes_processed: 8_192,
-            overall_output_bytes_processed: 16_384,
+            phase_input_bytes_read: 8_192,
+            phase_output_bytes_written: 16_384,
+            overall_input_bytes_read: 8_192,
+            overall_output_bytes_written: 16_384,
         };
 
-        assert_eq!(progress.phase_input_bytes_processed, 8_192);
-        assert_eq!(progress.overall_output_bytes_processed, 16_384);
+        assert_eq!(progress.phase_input_bytes_read, 8_192);
+        assert_eq!(progress.overall_output_bytes_written, 16_384);
     }
 }
