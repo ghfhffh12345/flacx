@@ -1,4 +1,5 @@
 /target
 /test-wavs
-.omx/
+.codex/
 /test-flacs
+docs/
