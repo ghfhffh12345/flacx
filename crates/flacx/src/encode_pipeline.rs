@@ -759,6 +759,8 @@ where
             total_samples,
             completed_frames: frame_index + 1,
             total_frames,
+            input_bytes_processed: 0,
+            output_bytes_processed: 0,
         })?;
     }
     Ok(processed_samples)

@@ -221,6 +221,8 @@ where
                 total_samples: stream_info.total_samples,
                 completed_frames: frame_offset + 1,
                 total_frames,
+                input_bytes_processed: 0,
+                output_bytes_processed: 0,
             })?;
         }
         debug_assert_eq!(processed_samples, indexed_total_samples);
@@ -345,6 +347,8 @@ where
             total_samples: progress_window.stream_info.total_samples,
             completed_frames: progress_window.start_index + frame_offset + 1,
             total_frames: progress_window.total_frames,
+            input_bytes_processed: 0,
+            output_bytes_processed: 0,
         })?;
     }
     Ok(processed_samples)

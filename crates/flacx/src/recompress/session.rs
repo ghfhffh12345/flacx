@@ -177,6 +177,10 @@ where
             overall_total_samples: overall_total_samples(total_samples),
             completed_frames: 0,
             total_frames: 0,
+            phase_input_bytes_processed: 0,
+            phase_output_bytes_processed: 0,
+            overall_input_bytes_processed: 0,
+            overall_output_bytes_processed: 0,
         })?;
 
         if total_samples <= EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD {
@@ -191,11 +195,17 @@ where
                 overall_total_samples: overall_total_samples(total_samples),
                 completed_frames: 0,
                 total_frames: encode_plan.total_frames,
+                phase_input_bytes_processed: 0,
+                phase_output_bytes_processed: 0,
+                overall_input_bytes_processed: 0,
+                overall_output_bytes_processed: 0,
             })?;
 
             let mut encode_progress = EncodePhaseProgress {
                 sink: progress,
                 total_samples,
+                decode_input_bytes: 0,
+                decode_output_bytes: 0,
             };
             let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
             let summary = encoder.encode_buffered_pcm_with_sink(
@@ -223,11 +233,17 @@ where
             overall_total_samples: overall_total_samples(total_samples),
             completed_frames: 0,
             total_frames: encode_plan.total_frames,
+            phase_input_bytes_processed: 0,
+            phase_output_bytes_processed: 0,
+            overall_input_bytes_processed: 0,
+            overall_output_bytes_processed: 0,
         })?;
 
         let mut encode_progress = EncodePhaseProgress {
             sink: progress,
             total_samples,
+            decode_input_bytes: 0,
+            decode_output_bytes: 0,
         };
         let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
         let summary = encoder
