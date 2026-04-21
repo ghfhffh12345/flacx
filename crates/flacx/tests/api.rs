@@ -154,8 +154,15 @@ fn recompress_public_exports_remain_stable() {
     assert!(source.contains("pub mod builtin {"));
     assert!(source.contains("recompress_bytes, recompress_file,"));
     assert!(source.contains("pub use recompress::{"));
-    assert!(source.contains("FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,"));
-    assert!(source.contains("RecompressProgress, RecompressSummary, Recompressor,"));
+    assert!(
+        source.contains(
+            "FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressSummary,"
+        )
+    );
+    assert!(source.contains("Recompressor,"));
+    assert!(source.contains(
+        "#[cfg(feature = \"progress\")]\npub use recompress::{RecompressPhase, RecompressProgress};"
+    ));
 }
 
 #[test]

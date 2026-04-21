@@ -22,8 +22,26 @@ macro_rules! emit_progress {
 pub(crate) use emit_progress;
 
 /// A monotonic snapshot of encode or decode progress.
+#[cfg(feature = "progress")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressSnapshot {
+    /// Samples processed so far.
+    pub processed_samples: u64,
+    /// Total samples expected for the current input.
+    pub total_samples: u64,
+    /// Frames completed so far.
+    pub completed_frames: usize,
+    /// Total frames planned for the current input.
+    pub total_frames: usize,
+    /// Input bytes read so far.
+    pub input_bytes_read: u64,
+    /// Output bytes written so far.
+    pub output_bytes_written: u64,
+}
+
+#[cfg(not(feature = "progress"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProgressSnapshot {
     /// Samples processed so far.
     pub processed_samples: u64,
     /// Total samples expected for the current input.

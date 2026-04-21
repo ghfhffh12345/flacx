@@ -20,8 +20,18 @@ macro_rules! emit_recompress_progress {
 pub(crate) use emit_recompress_progress;
 
 /// Phase marker for recompress progress reporting.
+#[cfg(feature = "progress")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecompressPhase {
+    /// The source FLAC is being decoded and verified.
+    Decode,
+    /// The verified PCM is being encoded back to FLAC.
+    Encode,
+}
+
+#[cfg(not(feature = "progress"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecompressPhase {
     /// The source FLAC is being decoded and verified.
     Decode,
     /// The verified PCM is being encoded back to FLAC.
@@ -41,8 +51,36 @@ impl RecompressPhase {
 }
 
 /// A phase-aware recompress progress snapshot.
+#[cfg(feature = "progress")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecompressProgress {
+    /// The active recompress phase.
+    pub phase: RecompressPhase,
+    /// Samples processed so far within the active phase.
+    pub phase_processed_samples: u64,
+    /// Total samples expected within the active phase.
+    pub phase_total_samples: u64,
+    /// Samples processed so far across the full decode+encode operation.
+    pub overall_processed_samples: u64,
+    /// Total samples expected across the full decode+encode operation.
+    pub overall_total_samples: u64,
+    /// Frames completed so far within the active phase.
+    pub completed_frames: usize,
+    /// Total frames expected within the active phase when known.
+    pub total_frames: usize,
+    /// Input bytes read so far within the active phase.
+    pub phase_input_bytes_read: u64,
+    /// Output bytes written so far within the active phase.
+    pub phase_output_bytes_written: u64,
+    /// Input bytes read so far across the full decode+encode operation.
+    pub overall_input_bytes_read: u64,
+    /// Output bytes written so far across the full decode+encode operation.
+    pub overall_output_bytes_written: u64,
+}
+
+#[cfg(not(feature = "progress"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecompressProgress {
     /// The active recompress phase.
     pub phase: RecompressPhase,
     /// Samples processed so far within the active phase.

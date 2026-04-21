@@ -13,8 +13,10 @@ mod source;
 mod verify;
 
 pub use config::{RecompressBuilder, RecompressConfig, RecompressMode};
-pub use progress::{RecompressPhase, RecompressProgress};
 pub use session::{RecompressSummary, Recompressor};
 pub use source::FlacRecompressSource;
+
+#[cfg(feature = "progress")]
+pub use progress::{RecompressPhase, RecompressProgress};
 
 pub(crate) use progress::RecompressProgressSink;
