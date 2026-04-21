@@ -205,7 +205,7 @@ where
     let worker_count = config.threads.max(1).min(frames.len());
     if worker_count == 1 || frames.len() <= FRAME_CHUNK_SIZE {
         let mut processed_samples = 0u64;
-        let mut input_bytes_processed = 0u64;
+        let mut input_bytes_read = 0u64;
         let total_frames = frames.len();
         let indexed_total_samples = frames
             .iter()
@@ -218,14 +218,13 @@ where
             let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
             decode_frame_samples_into(frame_bytes, frame, samples)?;
             processed_samples += u64::from(frame.block_size);
-            input_bytes_processed =
-                input_bytes_processed.saturating_add(frame.bytes_consumed as u64);
+            input_bytes_read = input_bytes_read.saturating_add(frame.bytes_consumed as u64);
             progress.on_frame(ProgressSnapshot {
                 processed_samples,
                 total_samples: stream_info.total_samples,
                 completed_frames: frame_offset + 1,
                 total_frames,
-                input_bytes_read: input_bytes_processed,
+                input_bytes_read,
                 output_bytes_written: pcm_output_bytes(stream_info, processed_samples),
             })?;
         }
@@ -284,7 +283,7 @@ where
 
         let mut next_expected = 0usize;
         let mut processed_samples = 0u64;
-        let mut input_bytes_processed = 0u64;
+        let mut input_bytes_read = 0u64;
         let mut pending: HashMap<usize, FrameChunkResult> = HashMap::new();
 
         while next_expected < frames.len() {
@@ -295,7 +294,7 @@ where
                     chunk_result,
                     &frames[next_expected..next_expected + chunk_len],
                     processed_samples,
-                    &mut input_bytes_processed,
+                    &mut input_bytes_read,
                     progress,
                     FrameProgressWindow {
                         stream_info,
@@ -319,7 +318,7 @@ where
                     chunk_result,
                     &frames[next_expected..next_expected + chunk_len],
                     processed_samples,
-                    &mut input_bytes_processed,
+                    &mut input_bytes_read,
                     progress,
                     FrameProgressWindow {
                         stream_info,
@@ -340,7 +339,7 @@ fn process_frame_chunk_result<P>(
     chunk: FrameChunkResult,
     frames: &[FrameIndex],
     mut processed_samples: u64,
-    input_bytes_processed: &mut u64,
+    input_bytes_read: &mut u64,
     progress: &mut P,
     progress_window: FrameProgressWindow,
 ) -> Result<u64>
@@ -350,14 +349,13 @@ where
     samples.extend(chunk.decoded_samples);
     for (frame_offset, frame) in frames.iter().enumerate() {
         processed_samples += u64::from(frame.block_size);
-        *input_bytes_processed =
-            (*input_bytes_processed).saturating_add(frame.bytes_consumed as u64);
+        *input_bytes_read = (*input_bytes_read).saturating_add(frame.bytes_consumed as u64);
         progress.on_frame(ProgressSnapshot {
             processed_samples,
             total_samples: progress_window.stream_info.total_samples,
             completed_frames: progress_window.start_index + frame_offset + 1,
             total_frames: progress_window.total_frames,
-            input_bytes_read: *input_bytes_processed,
+            input_bytes_read: *input_bytes_read,
             output_bytes_written: pcm_output_bytes(
                 progress_window.stream_info,
                 processed_samples,

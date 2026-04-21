@@ -45,6 +45,7 @@ where
     if should_materialize_decode(spec.total_samples)
         && let Some((samples, frame_count)) = stream.take_decoded_samples()?
     {
+        let input_bytes_read = crate::read::DecodePcmStream::input_bytes_processed(&stream);
         let streaminfo_md5 = write_wav_with_metadata_and_md5_with_options(
             output,
             spec,
@@ -60,7 +61,7 @@ where
             total_samples: spec.total_samples,
             completed_frames: frame_count,
             total_frames: frame_count,
-            input_bytes_read: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+            input_bytes_read,
             output_bytes_written: output.stream_position()?,
         })?;
         verify_streaminfo_digest(streaminfo_md5, source_info.md5)?;
@@ -92,23 +93,25 @@ where
         writer.write_samples_and_update_md5(&chunk, &mut streaminfo_md5)?;
         crate::read::release_decode_output_buffer_for_current_thread();
         processed_samples += frames as u64;
+        let input_bytes_read = crate::read::DecodePcmStream::input_bytes_processed(&stream);
         progress.on_frame(ProgressSnapshot {
             processed_samples,
             total_samples: spec.total_samples,
             completed_frames: stream.completed_input_frames(),
             total_frames,
-            input_bytes_read: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+            input_bytes_read,
             output_bytes_written: writer.bytes_written(),
         })?;
     }
 
     let output = writer.finish(Some(&mut streaminfo_md5))?;
+    let input_bytes_read = crate::read::DecodePcmStream::input_bytes_processed(&stream);
     progress.on_frame(ProgressSnapshot {
         processed_samples,
         total_samples: spec.total_samples,
         completed_frames: stream.completed_input_frames(),
         total_frames,
-        input_bytes_read: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+        input_bytes_read,
         output_bytes_written: output.stream_position()?,
     })?;
     verify_streaminfo_digest(streaminfo_md5.finalize()?, source_info.md5)?;

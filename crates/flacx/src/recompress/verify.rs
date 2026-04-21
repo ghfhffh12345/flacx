@@ -61,10 +61,11 @@ where
             .expect("md5 state present")
             .update_samples(&samples)?;
         self.finish_verification()?;
+        let input_bytes_read = DecodePcmStream::input_bytes_processed(&self.inner);
         Ok((
             PcmStream { spec, samples },
             self.expected_md5,
-            DecodePcmStream::input_bytes_processed(&self.inner),
+            input_bytes_read,
         ))
     }
 }

@@ -73,14 +73,9 @@ where
     pub(super) fn into_verified_pcm_stream(
         self,
     ) -> Result<(Metadata, crate::input::PcmStream, [u8; 16], u64)> {
-        let (pcm_stream, streaminfo_md5, input_bytes_processed) =
+        let (pcm_stream, streaminfo_md5, input_bytes_read) =
             self.stream.into_verified_pcm_stream()?;
-        Ok((
-            self.metadata,
-            pcm_stream,
-            streaminfo_md5,
-            input_bytes_processed,
-        ))
+        Ok((self.metadata, pcm_stream, streaminfo_md5, input_bytes_read))
     }
 }
 

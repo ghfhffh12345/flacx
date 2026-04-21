@@ -268,7 +268,7 @@ where
         // keep verification incremental and stream the verified PCM into encode instead.
         let (metadata, mut stream) = source.into_encode_parts();
         let encode_config = self.config.encode_config();
-        let decode_input_bytes = stream.input_bytes_processed();
+        let decode_input_bytes_read = stream.input_bytes_processed();
         let encode_plan = crate::plan::EncodePlan::new(stream.spec(), encode_config.clone())?;
         if total_samples == 0 {
             stream.finish_verification()?;
@@ -276,13 +276,13 @@ where
         progress.on_progress(encode_phase_transition_progress(
             total_samples,
             encode_plan.total_frames,
-            decode_input_bytes,
+            decode_input_bytes_read,
         ))?;
 
         let mut encode_progress = EncodePhaseProgress {
             sink: progress,
             total_samples,
-            decode_input_bytes_read: decode_input_bytes,
+            decode_input_bytes_read,
         };
         let stream = CountedEncodePcmStream::new(stream);
         let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);

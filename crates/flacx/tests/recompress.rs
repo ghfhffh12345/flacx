@@ -119,8 +119,9 @@ impl DecodePcmStream for StreamingOnlyRecompressStream {
     }
 
     fn input_bytes_processed(&self) -> u64 {
+        let total_input_bytes_read = self.total_input_bytes;
         if self.cursor == self.samples.len() {
-            self.total_input_bytes
+            total_input_bytes_read
         } else {
             0
         }
