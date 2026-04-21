@@ -321,6 +321,36 @@ fn decode_progress_reports_exact_input_and_output_bytes() {
     assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
 }
 
+#[cfg(all(feature = "progress", feature = "aiff", feature = "caf"))]
+#[test]
+fn decode_progress_reports_exact_output_bytes_for_aiff_aifc_and_caf() {
+    let flac = large_streaming_decode_flac_bytes(1);
+
+    for container in [PcmContainer::Aiff, PcmContainer::Aifc, PcmContainer::Caf] {
+        let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+        let mut output = Cursor::new(Vec::new());
+        let mut progress_updates = Vec::new();
+        let mut decoder = DecodeConfig::default()
+            .with_threads(1)
+            .with_output_container(container)
+            .into_decoder(&mut output);
+
+        decoder
+            .decode_source_with_progress(reader.into_decode_source(), |progress| {
+                progress_updates.push(progress);
+                Ok(())
+            })
+            .unwrap();
+
+        let last = progress_updates.last().unwrap();
+        assert_eq!(
+            last.output_bytes_processed,
+            output.get_ref().len() as u64,
+            "container={container:?}"
+        );
+    }
+}
+
 #[cfg(feature = "progress")]
 fn decode_large_streaming_fixture_with_progress(
     threads: usize,

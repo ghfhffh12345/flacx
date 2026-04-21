@@ -241,7 +241,8 @@ where
         })?;
 
         if total_samples <= EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD {
-            let (metadata, pcm_stream, streaminfo_md5) = source.into_verified_pcm_stream()?;
+            let (metadata, pcm_stream, streaminfo_md5, decode_input_bytes) =
+                source.into_verified_pcm_stream()?;
             let decode_output_bytes = pcm_stream_bytes(pcm_stream.spec);
             let encode_config = self.config.encode_config();
             let encode_plan = crate::plan::EncodePlan::new(pcm_stream.spec, encode_config.clone())?;
@@ -255,14 +256,14 @@ where
                 total_frames: encode_plan.total_frames,
                 phase_input_bytes_processed: 0,
                 phase_output_bytes_processed: 0,
-                overall_input_bytes_processed: 0,
+                overall_input_bytes_processed: decode_input_bytes,
                 overall_output_bytes_processed: decode_output_bytes,
             })?;
 
             let mut encode_progress = EncodePhaseProgress {
                 sink: progress,
                 total_samples,
-                decode_input_bytes: 0,
+                decode_input_bytes,
                 decode_output_bytes,
             };
             let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
@@ -283,6 +284,7 @@ where
         // keep verification incremental and stream the verified PCM into encode instead.
         let (metadata, mut stream) = source.into_encode_parts();
         let encode_config = self.config.encode_config();
+        let decode_input_bytes = stream.input_bytes_processed();
         let decode_output_bytes = pcm_stream_bytes(stream.spec());
         let encode_plan = crate::plan::EncodePlan::new(stream.spec(), encode_config.clone())?;
         if total_samples == 0 {
@@ -298,14 +300,14 @@ where
             total_frames: encode_plan.total_frames,
             phase_input_bytes_processed: 0,
             phase_output_bytes_processed: 0,
-            overall_input_bytes_processed: 0,
+            overall_input_bytes_processed: decode_input_bytes,
             overall_output_bytes_processed: decode_output_bytes,
         })?;
 
         let mut encode_progress = EncodePhaseProgress {
             sink: progress,
             total_samples,
-            decode_input_bytes: 0,
+            decode_input_bytes,
             decode_output_bytes,
         };
         let stream = CountedEncodePcmStream::new(stream);

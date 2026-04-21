@@ -287,9 +287,9 @@ impl<W: Write> StreamingPcmWriter<W> {
         match self {
             Self::Riff(writer) => writer.bytes_written(),
             #[cfg(feature = "aiff")]
-            Self::Aiff(_) => 0,
+            Self::Aiff(writer) => writer.bytes_written(),
             #[cfg(feature = "caf")]
-            Self::Caf(_) => 0,
+            Self::Caf(writer) => writer.bytes_written(),
         }
     }
 }
