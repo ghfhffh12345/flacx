@@ -235,20 +235,20 @@ where
         })?;
 
         if total_samples <= EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD {
-            let (metadata, pcm_stream, streaminfo_md5, decode_input_bytes) =
+            let (metadata, pcm_stream, streaminfo_md5, decode_input_bytes_read) =
                 source.into_verified_pcm_stream()?;
             let encode_config = self.config.encode_config();
             let encode_plan = crate::plan::EncodePlan::new(pcm_stream.spec, encode_config.clone())?;
             progress.on_progress(encode_phase_transition_progress(
                 total_samples,
                 encode_plan.total_frames,
-                decode_input_bytes,
+                decode_input_bytes_read,
             ))?;
 
             let mut encode_progress = EncodePhaseProgress {
                 sink: progress,
                 total_samples,
-                decode_input_bytes_read: decode_input_bytes,
+                decode_input_bytes_read,
             };
             let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
             let summary = encoder.encode_source_with_sink(
