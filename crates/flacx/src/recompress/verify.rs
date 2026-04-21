@@ -50,7 +50,7 @@ where
         Ok(())
     }
 
-    pub(super) fn into_verified_pcm_stream(mut self) -> Result<(PcmStream, [u8; 16])> {
+    pub(super) fn into_verified_pcm_stream(mut self) -> Result<(PcmStream, [u8; 16], u64)> {
         let spec = self.spec();
         let (samples, _frame_count) = self
             .inner
@@ -61,7 +61,11 @@ where
             .expect("md5 state present")
             .update_samples(&samples)?;
         self.finish_verification()?;
-        Ok((PcmStream { spec, samples }, self.expected_md5))
+        Ok((
+            PcmStream { spec, samples },
+            self.expected_md5,
+            DecodePcmStream::input_bytes_processed(&self.inner),
+        ))
     }
 }
 
@@ -71,6 +75,10 @@ where
 {
     fn spec(&self) -> PcmSpec {
         self.spec()
+    }
+
+    fn input_bytes_processed(&self) -> u64 {
+        DecodePcmStream::input_bytes_processed(&self.inner)
     }
 
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {

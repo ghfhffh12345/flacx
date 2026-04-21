@@ -15,6 +15,40 @@ use crate::{
     pcm::{PcmContainer, is_supported_channel_mask},
 };
 
+struct CountingWrite<W> {
+    inner: W,
+    bytes_written: u64,
+}
+
+impl<W> CountingWrite<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+        }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: Write> Write for CountingWrite<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes_written = self.bytes_written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 const PCM_FMT_CHUNK_SIZE: u32 = 16;
 const EXTENSIBLE_FMT_CHUNK_SIZE: u32 = 40;
 const PCM_SUBFORMAT_GUID: [u8; 16] = [
@@ -46,7 +80,7 @@ pub(crate) enum StreamingPcmWriter<W: Write> {
 }
 
 pub(crate) struct RiffStreamWriter<W: Write> {
-    writer: W,
+    writer: CountingWrite<W>,
     envelope: PcmEnvelope,
     w64_padding: usize,
     buffer: Vec<u8>,
@@ -54,7 +88,7 @@ pub(crate) struct RiffStreamWriter<W: Write> {
 
 impl<W: Write> StreamingPcmWriter<W> {
     pub(crate) fn new(
-        mut writer: W,
+        writer: W,
         spec: PcmSpec,
         metadata: &Metadata,
         options: WavMetadataWriteOptions,
@@ -107,6 +141,8 @@ impl<W: Write> StreamingPcmWriter<W> {
         {
             return Err(feature_disabled_output_error(PcmContainer::Wave));
         }
+
+        let mut writer = CountingWrite::new(writer);
 
         if !(1..=8).contains(&spec.channels) {
             return Err(Error::UnsupportedWav(format!(
@@ -246,9 +282,23 @@ impl<W: Write> StreamingPcmWriter<W> {
             Self::Caf(writer) => writer.finish(),
         }
     }
+
+    pub(crate) fn bytes_written(&self) -> u64 {
+        match self {
+            Self::Riff(writer) => writer.bytes_written(),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(writer) => writer.bytes_written(),
+            #[cfg(feature = "caf")]
+            Self::Caf(writer) => writer.bytes_written(),
+        }
+    }
 }
 
 impl<W: Write> RiffStreamWriter<W> {
+    fn bytes_written(&self) -> u64 {
+        self.writer.bytes_written()
+    }
+
     fn write_samples_and_update_md5(
         &mut self,
         samples: &[i32],
@@ -277,7 +327,7 @@ impl<W: Write> RiffStreamWriter<W> {
             self.writer.write_all(&vec![0u8; self.w64_padding])?;
         }
         self.writer.flush()?;
-        Ok(self.writer)
+        Ok(self.writer.into_inner())
     }
 
     fn write_8_bit_samples(

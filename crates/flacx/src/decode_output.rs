@@ -60,6 +60,8 @@ where
             total_samples: spec.total_samples,
             completed_frames: frame_count,
             total_frames: frame_count,
+            input_bytes_processed: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+            output_bytes_processed: output.stream_position()?,
         })?;
         verify_streaminfo_digest(streaminfo_md5, source_info.md5)?;
         return Ok(summary_from_stream_info(source_info, frame_count));
@@ -95,10 +97,20 @@ where
             total_samples: spec.total_samples,
             completed_frames: stream.completed_input_frames(),
             total_frames,
+            input_bytes_processed: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+            output_bytes_processed: writer.bytes_written(),
         })?;
     }
 
-    writer.finish(Some(&mut streaminfo_md5))?;
+    let output = writer.finish(Some(&mut streaminfo_md5))?;
+    progress.on_frame(ProgressSnapshot {
+        processed_samples,
+        total_samples: spec.total_samples,
+        completed_frames: stream.completed_input_frames(),
+        total_frames,
+        input_bytes_processed: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+        output_bytes_processed: output.stream_position()?,
+    })?;
     verify_streaminfo_digest(streaminfo_md5.finalize()?, source_info.md5)?;
     crate::read::finish_successful_decode_profile_for_current_thread();
     Ok(summary_from_stream_info(

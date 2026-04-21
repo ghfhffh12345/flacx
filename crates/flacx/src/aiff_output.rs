@@ -23,6 +23,40 @@ const AIFC_NONE_COMPRESSION_TYPE: [u8; 4] = *b"NONE";
 const AIFC_NONE_COMPRESSION_NAME: &[u8] = b"not compressed";
 const AIFC_FVER_VERSION: u32 = 0xA280_5140;
 
+struct CountingWrite<W> {
+    inner: W,
+    bytes_written: u64,
+}
+
+impl<W> CountingWrite<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+        }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: Write> Write for CountingWrite<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes_written = self.bytes_written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Canonical AIFF/AIFC output families supported by the Stage 4 slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum AiffContainer {
@@ -81,18 +115,19 @@ pub(crate) fn write_aiff_with_metadata_and_md5<W: Write>(
 }
 
 pub(crate) struct AiffStreamWriter<W: Write> {
-    writer: W,
+    writer: CountingWrite<W>,
     envelope: PcmEnvelope,
     pad_final: bool,
 }
 
 impl<W: Write> AiffStreamWriter<W> {
     pub(crate) fn new(
-        mut writer: W,
+        writer: W,
         spec: PcmSpec,
         metadata: &Metadata,
         container: AiffContainer,
     ) -> Result<Self> {
+        let mut writer = CountingWrite::new(writer);
         let envelope = validate_aiff_output_spec(spec)?;
         let container = resolve_container(container);
         let mut chunks = Vec::<([u8; 4], Vec<u8>)>::new();
@@ -151,7 +186,11 @@ impl<W: Write> AiffStreamWriter<W> {
             self.writer.write_all(&[0])?;
         }
         self.writer.flush()?;
-        Ok(self.writer)
+        Ok(self.writer.into_inner())
+    }
+
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.writer.bytes_written()
     }
 }
 

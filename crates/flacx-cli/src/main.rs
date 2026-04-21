@@ -232,10 +232,10 @@ struct DecodeArgs {
     output_family: Option<DecodeOutputFamilyArg>,
     /// Number of per-file codec worker threads.
     ///
-    /// Leave unset to use the library default for each decoded file.
+    /// Defaults to `8` to match the CLI's encode-side threading policy.
     /// Directory batches still decode matching files sequentially, one at a
     /// time.
-    #[arg(long, help_heading = "Decoding")]
+    #[arg(long, default_value = "8", help_heading = "Decoding")]
     threads: Option<usize>,
     /// Metadata and validation preset.
     ///
@@ -691,13 +691,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_command_defaults_output_and_depth() {
+    fn decode_command_defaults_output_depth_and_threads() {
         let cli = Cli::parse_from(["flacx", "decode", "input.flac"]);
 
         match cli.command {
             Commands::Decode(args) => {
                 assert_eq!(args.input, std::path::PathBuf::from("input.flac"));
                 assert_eq!(args.output, None);
+                assert_eq!(args.threads, Some(8));
                 assert_eq!(args.mode, ModePreset::Default);
                 assert_eq!(args.depth, 1);
             }

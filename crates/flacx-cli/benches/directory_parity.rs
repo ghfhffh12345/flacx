@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use flacx::{DecodeConfig, EncoderConfig, level::Level};
 use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 
@@ -14,7 +14,8 @@ use flacx_cli::{DecodeCommand, EncodeCommand, decode_command, encode_command};
 mod support;
 
 use support::{
-    encode_flac_bytes_with_config, extensible_pcm_wav_bytes, pcm_wav_bytes, sample_fixture,
+    encode_flac_bytes_with_config, extensible_pcm_wav_bytes, large_streaming_decode_flac_bytes,
+    pcm_wav_bytes, sample_fixture,
 };
 
 const DEFAULT_FIXTURE_FRAMES: usize = 2_048;
@@ -31,6 +32,7 @@ fn benchmark_thread_count() -> usize {
 
 fn criterion_benches(c: &mut Criterion) {
     let corpus = DirectoryParityCorpus::prepare().expect("prepare CLI benchmark corpus");
+    let large_decode = LargeDecodeFixture::prepare().expect("prepare large CLI decode fixture");
 
     let mut group = c.benchmark_group("directory_parity");
     group.bench_function("encode_directory_parity", |b| {
@@ -58,6 +60,23 @@ fn criterion_benches(c: &mut Criterion) {
         );
     });
     group.finish();
+
+    let mut large_group = c.benchmark_group("streaming_throughput");
+    large_group.throughput(Throughput::Bytes(large_decode.input_bytes));
+    large_group.sample_size(20);
+    large_group.bench_function("decode_large_streaming_single_file", |b| {
+        b.iter_batched(
+            || TempDir::new("flacx-cli-bench-large-decode-output").expect("create decode output"),
+            |output_dir| {
+                large_decode
+                    .run(output_dir.path())
+                    .expect("large decode benchmark run");
+                black_box(())
+            },
+            BatchSize::PerIteration,
+        );
+    });
+    large_group.finish();
 }
 
 criterion_group!(benches, criterion_benches);
@@ -67,6 +86,43 @@ struct DirectoryParityCorpus {
     wav_root: TempDir,
     flac_root: TempDir,
     threads: usize,
+}
+
+struct LargeDecodeFixture {
+    _input_dir: TempDir,
+    input_path: PathBuf,
+    input_bytes: u64,
+    threads: usize,
+}
+
+impl LargeDecodeFixture {
+    fn prepare() -> Result<Self, Box<dyn Error>> {
+        let input_dir = TempDir::new("flacx-cli-bench-large-decode-input")?;
+        let input_path = input_dir.path().join("large-input.flac");
+        let threads = benchmark_thread_count();
+        let flac_bytes = large_streaming_decode_flac_bytes(threads);
+        let input_bytes = flac_bytes.len() as u64;
+        fs::write(&input_path, flac_bytes)?;
+        Ok(Self {
+            _input_dir: input_dir,
+            input_path,
+            input_bytes,
+            threads,
+        })
+    }
+
+    fn run(&self, output_root: &Path) -> Result<(), Box<dyn Error>> {
+        let command = DecodeCommand {
+            input: self.input_path.clone(),
+            output: Some(output_root.join("large-output.wav")),
+            depth: 0,
+            config: DecodeConfig::default().with_threads(self.threads),
+        };
+        let mut stderr = Vec::new();
+        decode_command(&command, false, &mut stderr)?;
+        black_box(stderr);
+        Ok(())
+    }
 }
 
 impl DirectoryParityCorpus {

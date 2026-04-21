@@ -22,6 +22,40 @@ const CAF_MARKER_TYPE_GENERIC: u32 = 0;
 const CAF_INVALID_SMPTE_TIME: [u8; 8] = [0xFF; 8];
 const CAF_MARKER_SIZE: usize = 28;
 
+struct CountingWrite<W> {
+    inner: W,
+    bytes_written: u64,
+}
+
+impl<W> CountingWrite<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+        }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: Write> Write for CountingWrite<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes_written = self.bytes_written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn write_caf<W: Write>(
     writer: &mut W,
@@ -91,12 +125,13 @@ pub(crate) fn write_caf<W: Write>(
 }
 
 pub(crate) struct CafStreamWriter<W: Write> {
-    writer: W,
+    writer: CountingWrite<W>,
     envelope: PcmEnvelope,
 }
 
 impl<W: Write> CafStreamWriter<W> {
-    pub(crate) fn new(mut writer: W, spec: PcmSpec, metadata: &Metadata) -> Result<Self> {
+    pub(crate) fn new(writer: W, spec: PcmSpec, metadata: &Metadata) -> Result<Self> {
+        let mut writer = CountingWrite::new(writer);
         if !(1..=8).contains(&spec.channels) {
             return Err(Error::UnsupportedWav(format!(
                 "only the ordinary 1..8 channel envelope is supported, found {} channels",
@@ -157,7 +192,11 @@ impl<W: Write> CafStreamWriter<W> {
 
     pub(crate) fn finish(mut self) -> Result<W> {
         self.writer.flush()?;
-        Ok(self.writer)
+        Ok(self.writer.into_inner())
+    }
+
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.writer.bytes_written()
     }
 }
 

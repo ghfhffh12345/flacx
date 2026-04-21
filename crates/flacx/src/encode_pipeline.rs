@@ -36,6 +36,7 @@ const ENCODE_SESSION_WINDOW_DEPTH: usize =
 
 thread_local! {
     static TEST_PROFILE_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+    static CURRENT_INPUT_BYTES_PROCESSED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 #[derive(Clone, Copy)]
@@ -90,6 +91,20 @@ fn active_encode_profile_path() -> Option<std::path::PathBuf> {
         .or_else(|| env::var_os("FLACX_ENCODE_PROFILE").map(std::path::PathBuf::from))
 }
 
+fn set_current_input_bytes_processed(bytes: u64) {
+    CURRENT_INPUT_BYTES_PROCESSED.with(|current| current.set(Some(bytes)));
+}
+
+fn clear_current_input_bytes_processed() {
+    CURRENT_INPUT_BYTES_PROCESSED.with(|current| current.set(None));
+}
+
+fn current_input_bytes_processed() -> u64 {
+    CURRENT_INPUT_BYTES_PROCESSED
+        .with(std::cell::Cell::get)
+        .unwrap_or(0)
+}
+
 pub(crate) fn encode_stream<W, S, P>(
     config: &EncoderConfig,
     metadata: Metadata,
@@ -102,6 +117,7 @@ where
     S: EncodePcmStream,
     P: ProgressSink,
 {
+    clear_current_input_bytes_processed();
     let spec = stream.spec();
     let chunk_policy = EncodeChunkPolicy {
         max_frames: stream
@@ -128,6 +144,7 @@ where
     if plan.total_frames == 0 {
         writer.set_streaminfo_md5(stream.finish_streaminfo_md5(md5)?);
         let (_, stream_info) = writer.finalize()?;
+        clear_current_input_bytes_processed();
         return Ok(summary_from_stream_info(stream_info, 0));
     }
 
@@ -151,6 +168,7 @@ where
 
     writer.set_streaminfo_md5(stream.finish_streaminfo_md5(md5)?);
     let (_, stream_info) = writer.finalize()?;
+    clear_current_input_bytes_processed();
     Ok(summary_from_stream_info(stream_info, plan.total_frames))
 }
 
@@ -352,6 +370,7 @@ where
                                 plan.spec.total_samples,
                                 &mut next_expected,
                                 plan.total_frames,
+                                stream.input_bytes_processed(),
                                 &mut inflight_pcm_frames,
                                 &mut profile,
                             )?;
@@ -379,6 +398,7 @@ where
                     plan.spec.total_samples,
                     &mut next_expected,
                     plan.total_frames,
+                    stream.input_bytes_processed(),
                     &mut inflight_pcm_frames,
                     &mut profile,
                 )?;
@@ -446,6 +466,7 @@ where
         profile.worker_encode_cpu += encode_start.elapsed();
 
         let write_start = Instant::now();
+        set_current_input_bytes_processed(stream.input_bytes_processed());
         processed_samples = write_encoded_chunk(
             writer,
             encoded,
@@ -501,6 +522,7 @@ fn receive_and_drain_ready<W, P>(
     total_samples: u64,
     next_expected: &mut usize,
     total_frames: usize,
+    input_bytes_processed: u64,
     inflight_pcm_frames: &mut usize,
     profile: &mut EncodeProfileSummary,
 ) -> Result<()>
@@ -520,6 +542,7 @@ where
     pending.insert(chunk.start_frame, chunk);
 
     let write_start = Instant::now();
+    set_current_input_bytes_processed(input_bytes_processed);
     while let Some(mut chunk) = pending.remove(next_expected) {
         let frame_count = chunk.frame_count;
         *processed_samples = write_encoded_chunk(
@@ -759,6 +782,8 @@ where
             total_samples,
             completed_frames: frame_index + 1,
             total_frames,
+            input_bytes_processed: current_input_bytes_processed(),
+            output_bytes_processed: writer.bytes_written(),
         })?;
     }
     Ok(processed_samples)

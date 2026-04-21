@@ -298,6 +298,103 @@ fn decode_source_prefers_streaming_chunks_over_materialized_samples() {
 }
 
 #[cfg(feature = "progress")]
+#[test]
+fn decode_progress_reports_exact_input_and_output_bytes() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 8_192));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut progress_updates = Vec::new();
+    let mut decoder = DecodeConfig::default()
+        .with_threads(1)
+        .into_decoder(&mut output);
+
+    decoder
+        .decode_source_with_progress(reader.into_decode_source(), |progress| {
+            progress_updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    let last = progress_updates.last().unwrap();
+    assert_eq!(last.input_bytes_processed, flac.len() as u64);
+    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+}
+
+#[cfg(all(feature = "progress", feature = "aiff", feature = "caf"))]
+#[test]
+fn decode_progress_reports_exact_output_bytes_for_aiff_aifc_and_caf() {
+    let flac = large_streaming_decode_flac_bytes(1);
+
+    for container in [PcmContainer::Aiff, PcmContainer::Aifc, PcmContainer::Caf] {
+        let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+        let mut output = Cursor::new(Vec::new());
+        let mut progress_updates = Vec::new();
+        let mut decoder = DecodeConfig::default()
+            .with_threads(1)
+            .with_output_container(container)
+            .into_decoder(&mut output);
+
+        decoder
+            .decode_source_with_progress(reader.into_decode_source(), |progress| {
+                progress_updates.push(progress);
+                Ok(())
+            })
+            .unwrap();
+
+        let last = progress_updates.last().unwrap();
+        assert_eq!(
+            last.output_bytes_processed,
+            output.get_ref().len() as u64,
+            "container={container:?}"
+        );
+    }
+}
+
+#[cfg(all(feature = "progress", feature = "aiff"))]
+#[test]
+fn streamed_decode_progress_reports_post_finish_aiff_padding_bytes() {
+    let total_samples = (8 * 1024 * 1024) + 1usize;
+    let samples = vec![0; total_samples];
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 8,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 1,
+        channel_mask: ordinary_channel_mask(1).expect("mono channel mask"),
+    };
+    let mut stream_info = StreamInfo::new(44_100, 1, 8, total_samples as u64, [0; 16]);
+    stream_info.update_block_size(4_096);
+    let mut output = Cursor::new(Vec::new());
+    let mut progress_updates = Vec::new();
+    let mut decoder = DecodeConfig::default()
+        .with_threads(1)
+        .with_output_container(PcmContainer::Aiff)
+        .into_decoder(&mut output);
+
+    decoder
+        .decode_source_with_progress(
+            flacx::DecodeSource::new(
+                Metadata::new(),
+                StreamingOnlyDecodeStream::new(spec, stream_info, samples, 4_194_304),
+            ),
+            |progress| {
+                progress_updates.push(progress);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert!(
+        output.get_ref().len() > total_samples,
+        "AIFF output should include container overhead and final padding"
+    );
+    let last = progress_updates.last().unwrap();
+    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+}
+
+#[cfg(feature = "progress")]
 fn decode_large_streaming_fixture_with_progress(
     threads: usize,
 ) -> (Vec<u8>, flacx::DecodeSummary, Vec<ProgressSnapshot>) {

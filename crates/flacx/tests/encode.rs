@@ -893,6 +893,29 @@ fn progress_encode_path_matches_default_output_and_reports_monotonic_updates() {
     );
 }
 
+#[cfg(feature = "progress")]
+#[test]
+fn encode_progress_reports_exact_input_and_output_bytes() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192));
+    let reader = flacx::PcmReader::new(Cursor::new(&wav)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut progress_updates = Vec::new();
+    let mut encoder = EncoderConfig::default()
+        .with_threads(1)
+        .into_encoder(&mut output);
+
+    encoder
+        .encode_source_with_progress(reader.into_source(), |progress| {
+            progress_updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    let last = progress_updates.last().unwrap();
+    assert_eq!(last.input_bytes_processed, wav_data_bytes(&wav).len() as u64);
+    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+}
+
 #[test]
 fn encode_persistent_session_residency_stays_bounded_by_queue_depth() {
     let profile = EncodeProfileGuard::new();

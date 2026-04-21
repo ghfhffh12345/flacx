@@ -52,18 +52,26 @@ struct StreamingOnlyRecompressStream {
     stream_info: StreamInfo,
     samples: Vec<i32>,
     chunk_frames: usize,
+    total_input_bytes: u64,
     cursor: usize,
     completed_frames: usize,
 }
 
 #[cfg(feature = "progress")]
 impl StreamingOnlyRecompressStream {
-    fn new(spec: PcmSpec, stream_info: StreamInfo, samples: Vec<i32>, chunk_frames: usize) -> Self {
+    fn new(
+        spec: PcmSpec,
+        stream_info: StreamInfo,
+        samples: Vec<i32>,
+        chunk_frames: usize,
+        total_input_bytes: u64,
+    ) -> Self {
         Self {
             spec,
             stream_info,
             samples,
             chunk_frames,
+            total_input_bytes,
             cursor: 0,
             completed_frames: 0,
         }
@@ -108,6 +116,14 @@ impl DecodePcmStream for StreamingOnlyRecompressStream {
 
     fn stream_info(&self) -> StreamInfo {
         self.stream_info
+    }
+
+    fn input_bytes_processed(&self) -> u64 {
+        if self.cursor == self.samples.len() {
+            self.total_input_bytes
+        } else {
+            0
+        }
     }
 
     fn take_decoded_samples(&mut self) -> flacx::Result<Option<(Vec<i32>, usize)>> {
@@ -370,7 +386,9 @@ fn recompress_session_avoids_buffered_encode_handoff() {
     let source = include_str!("../src/recompress/session.rs");
     assert!(source.contains("into_verified_pcm_stream()?"));
     assert!(source.contains("into_encode_parts()"));
-    assert!(source.contains("encode_buffered_pcm_with_sink"));
+    assert!(source.contains("BufferedRecompressPcmStream"));
+    assert!(source.contains("CountedEncodePcmStream::new"));
+    assert!(!source.contains("encode_buffered_pcm_with_sink"));
 }
 
 #[cfg(feature = "progress")]
@@ -404,7 +422,13 @@ fn recompress_source_streams_verified_pcm_without_materializing_samples() {
         .recompress_with_progress(
             FlacRecompressSource::new(
                 Metadata::new(),
-                StreamingOnlyRecompressStream::new(spec, stream_info, samples, chunk_frames),
+                StreamingOnlyRecompressStream::new(
+                    spec,
+                    stream_info,
+                    samples,
+                    chunk_frames,
+                    flac.len() as u64,
+                ),
                 streaminfo_md5(&flac),
             ),
             |progress| {
@@ -466,4 +490,89 @@ fn recompress_progress_reports_decode_then_encode_phases() {
         previous_overall = progress.overall_processed_samples;
     }
     assert_eq!(previous_overall, 4_096);
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn recompress_progress_reports_exact_phase_and_overall_output_bytes() {
+    let total_samples = LARGE_STREAMING_DECODE_SAMPLE_COUNT;
+    let samples = sample_fixture(1, total_samples);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
+    let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: ordinary_channel_mask(1).expect("mono channel mask"),
+    };
+    let mut stream_info =
+        StreamInfo::new(44_100, 1, 16, total_samples as u64, streaminfo_md5(&flac));
+    stream_info.update_block_size(512);
+    let source = FlacRecompressSource::new(
+        Metadata::new(),
+        StreamingOnlyRecompressStream::new(
+            spec,
+            stream_info,
+            samples,
+            4_194_304,
+            flac.len() as u64,
+        ),
+        streaminfo_md5(&flac),
+    );
+    let config = RecompressConfig::default()
+        .with_threads(1)
+        .with_block_size(576);
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+    let mut updates = Vec::<RecompressProgress>::new();
+
+    recompressor
+        .recompress_with_progress(source, |progress| {
+            updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    let recompressed = recompressor.into_inner().into_inner();
+    let last = updates.last().unwrap();
+    assert_eq!(
+        last.phase_input_bytes_processed,
+        wav_data_bytes(&wav).len() as u64
+    );
+    assert_eq!(
+        last.phase_output_bytes_processed,
+        recompressed.len() as u64
+    );
+    assert_eq!(
+        last.overall_output_bytes_processed,
+        wav_data_bytes(&wav).len() as u64 + recompressed.len() as u64
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn recompress_progress_reports_exact_overall_input_bytes_across_decode_and_encode() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let config = RecompressConfig::default().with_threads(1);
+    let reader = read_flac_reader_with_options(Cursor::new(&flac), reader_options(config)).unwrap();
+    let source = reader.into_recompress_source();
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+    let mut updates = Vec::<RecompressProgress>::new();
+
+    recompressor
+        .recompress_with_progress(source, |progress| {
+            updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    let last = updates.last().unwrap();
+    assert_eq!(
+        last.overall_input_bytes_processed,
+        flac.len() as u64 + wav_data_bytes(&wav).len() as u64
+    );
 }
