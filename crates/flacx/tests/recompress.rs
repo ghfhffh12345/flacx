@@ -386,12 +386,14 @@ fn recompress_verifier_limits_take_decoded_samples_to_bounded_small_inputs() {
 
 #[test]
 fn recompress_session_avoids_buffered_encode_handoff() {
-    let source = include_str!("../src/recompress/session.rs");
-    assert!(source.contains("into_verified_pcm_stream()?"));
-    assert!(source.contains("into_encode_parts()"));
-    assert!(source.contains("BufferedRecompressPcmStream"));
-    assert!(source.contains("counted_encode_pcm_stream"));
-    assert!(!source.contains("encode_buffered_pcm_with_sink"));
+    let session_source = include_str!("../src/recompress/session.rs");
+    let encoder_source = include_str!("../src/encoder.rs");
+    assert!(session_source.contains("into_verified_pcm_stream()?"));
+    assert!(session_source.contains("into_encode_parts()"));
+    assert!(session_source.contains("BufferedRecompressPcmStream"));
+    assert!(session_source.contains("counted_encode_pcm_stream"));
+    assert!(!encoder_source.contains("encode_buffered_pcm_with_sink"));
+    assert!(!encoder_source.contains("encode_buffered_frames"));
 }
 
 #[cfg(feature = "progress")]
