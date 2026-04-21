@@ -1,5 +1,5 @@
 #[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
-use flacx::{DecodeConfig, PcmContainer, PcmReader};
+use flacx::{DecodeConfig, EncoderConfig, PcmContainer, PcmReader, RawPcmByteOrder, RawPcmReader};
 
 mod support;
 #[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
@@ -12,7 +12,24 @@ use support::caf_lpcm_bytes;
 #[cfg(not(feature = "aiff"))]
 use support::{aifc_pcm_bytes, aiff_pcm_bytes};
 #[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
-use support::{pcm_wav_bytes, sample_fixture, unique_temp_path};
+use support::{raw_pcm_fixture, sample_fixture, unique_temp_path};
+
+#[cfg(any(not(feature = "aiff"), not(feature = "caf")))]
+fn flac_fixture() -> Vec<u8> {
+    let (raw_bytes, descriptor) = raw_pcm_fixture(
+        44_100,
+        1,
+        16,
+        16,
+        RawPcmByteOrder::LittleEndian,
+        None,
+        &sample_fixture(1, 256),
+    );
+    let reader = RawPcmReader::new(std::io::Cursor::new(raw_bytes), descriptor).unwrap();
+    let mut encoder = EncoderConfig::default().into_encoder(std::io::Cursor::new(Vec::new()));
+    encoder.encode(reader.into_pcm_stream().unwrap()).unwrap();
+    encoder.into_inner().into_inner()
+}
 
 #[cfg(not(feature = "aiff"))]
 #[test]
@@ -57,8 +74,7 @@ fn pcm_reader_new_rejects_caf_inputs_when_feature_is_disabled() {
 #[cfg(not(feature = "aiff"))]
 #[test]
 fn decode_rejects_aiff_family_outputs_when_feature_is_disabled() {
-    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 256));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = flac_fixture();
 
     for container in [PcmContainer::Aiff, PcmContainer::Aifc] {
         let error = DecodeHarness::new(DecodeConfig::default().with_output_container(container))
@@ -71,8 +87,7 @@ fn decode_rejects_aiff_family_outputs_when_feature_is_disabled() {
 #[cfg(not(feature = "caf"))]
 #[test]
 fn decode_rejects_caf_output_when_feature_is_disabled() {
-    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 256));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = flac_fixture();
 
     let error =
         DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Caf))
@@ -84,8 +99,7 @@ fn decode_rejects_caf_output_when_feature_is_disabled() {
 #[cfg(not(feature = "aiff"))]
 #[test]
 fn decode_file_rejects_aiff_extensions_when_feature_is_disabled() {
-    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 256));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = flac_fixture();
     let input_path = unique_temp_path("flac");
     std::fs::write(&input_path, flac).unwrap();
 
@@ -103,8 +117,7 @@ fn decode_file_rejects_aiff_extensions_when_feature_is_disabled() {
 #[cfg(not(feature = "caf"))]
 #[test]
 fn decode_file_rejects_caf_extension_when_feature_is_disabled() {
-    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 256));
-    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let flac = flac_fixture();
     let input_path = unique_temp_path("flac");
     let output_path = unique_temp_path("caf");
     std::fs::write(&input_path, flac).unwrap();

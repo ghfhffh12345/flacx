@@ -1174,6 +1174,7 @@ mod tests {
         payload
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn writes_canonical_16bit_wav() {
         let spec = PcmSpec {
@@ -1197,6 +1198,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn writes_extensible_wav_for_padded_container() {
         let spec = PcmSpec {
@@ -1219,6 +1221,7 @@ mod tests {
         assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 0xFFFE);
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn metadata_wav_layout_is_fixed_and_padded() {
         let spec = PcmSpec {
@@ -1279,6 +1282,7 @@ mod tests {
         assert_eq!(padded_byte, 0);
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn metadata_output_can_omit_fxmd_while_preserving_other_chunks() {
         let spec = PcmSpec {
@@ -1328,6 +1332,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn writes_non_ordinary_channel_masks_in_extensible_fmt() {
         let spec = PcmSpec {
@@ -1354,6 +1359,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn writes_zero_channel_mask_in_extensible_fmt() {
         let spec = PcmSpec {

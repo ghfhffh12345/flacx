@@ -1,3 +1,5 @@
+#![cfg(feature = "wav")]
+
 use flacx::{EncoderConfig, builtin::decode_bytes};
 
 mod support;

@@ -1,3 +1,5 @@
+#![cfg(feature = "wav")]
+
 use std::{fs, io::Cursor};
 
 #[cfg(feature = "progress")]

@@ -1,3 +1,5 @@
+#![cfg(feature = "wav")]
+
 use std::{
     collections::BTreeMap,
     fs,
