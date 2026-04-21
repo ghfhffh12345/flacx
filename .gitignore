@@ -1,5 +1,6 @@
 /target
 /test-wavs
+.worktrees/
 .codex/
 /test-flacs
 docs/
