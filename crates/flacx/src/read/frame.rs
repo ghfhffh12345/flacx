@@ -38,12 +38,6 @@ pub(super) struct DecodedWorkPacket {
     pub(super) decoded_samples: Vec<i32>,
 }
 
-impl DecodedWorkPacket {
-    pub(super) fn frame_count(&self) -> usize {
-        self.frame_block_sizes.len()
-    }
-}
-
 pub(super) enum DecodeWorkerRecv {
     Empty,
     Packet(Result<DecodedWorkPacket>),
@@ -86,16 +80,26 @@ impl FrameDecodeWorkerPool {
         }
     }
 
-    pub(super) fn worker_count(&self) -> usize {
-        self.worker_senders.len()
-    }
-
     pub(super) fn submit(&mut self, packet: DecodeWorkPacket) -> Result<()> {
         let sender = &self.worker_senders[self.next_worker % self.worker_senders.len()];
         self.next_worker = self.next_worker.wrapping_add(1);
         sender
             .send(packet)
             .map_err(|_| Error::Thread("decode worker channel closed unexpectedly".into()))
+    }
+
+    pub(super) fn try_submit(
+        &mut self,
+        packet: DecodeWorkPacket,
+    ) -> std::result::Result<(), mpsc::TrySendError<DecodeWorkPacket>> {
+        let sender = &self.worker_senders[self.next_worker % self.worker_senders.len()];
+        match sender.try_send(packet) {
+            Ok(()) => {
+                self.next_worker = self.next_worker.wrapping_add(1);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn try_recv(&self) -> DecodeWorkerRecv {

@@ -451,6 +451,18 @@ fn failed_streaming_decode_does_not_emit_session_summary() {
     );
 }
 
+#[cfg(feature = "progress")]
+#[test]
+fn large_streaming_decode_uses_background_session_and_matches_single_thread_output() {
+    let threads = 4;
+    let flac = large_streaming_decode_flac_bytes(threads);
+
+    let single_threaded = decode_bytes_with_threads(&flac, 1);
+    let multi_threaded = decode_bytes_with_threads(&flac, threads);
+
+    assert_eq!(wav_data_bytes(&single_threaded), wav_data_bytes(&multi_threaded));
+}
+
 #[test]
 fn round_trips_16bit_mono_wav_bytes_exactly() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
