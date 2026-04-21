@@ -1,6 +1,6 @@
 #[cfg(feature = "progress")]
 use std::{collections::BTreeMap, path::PathBuf, sync::OnceLock};
-use std::{fs, io::Cursor, thread::available_parallelism};
+use std::{fs, io::Cursor, sync::mpsc, thread, thread::available_parallelism, time::Duration};
 
 use flacx::builtin::{decode_bytes, decode_file};
 use flacx::{DecodeConfig, EncoderConfig, PcmContainer, level::Level};
@@ -85,6 +85,18 @@ fn decoder_for_threads(threads: usize) -> DecodeHarness {
 
 fn decode_bytes_with_threads(flac: &[u8], threads: usize) -> Vec<u8> {
     decoder_for_threads(threads).decode_bytes(flac).unwrap()
+}
+
+fn run_decode_with_timeout<T: Send + 'static>(
+    job: impl FnOnce() -> flacx::Result<T> + Send + 'static,
+) -> flacx::Result<T> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(job());
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("decode job should complete without deadlock")
 }
 
 fn assert_round_trips_bytes_exactly(wav: &[u8], flac: &[u8]) {
@@ -461,6 +473,44 @@ fn large_streaming_decode_uses_background_session_and_matches_single_thread_outp
     let multi_threaded = decode_bytes_with_threads(&flac, threads);
 
     assert_eq!(wav_data_bytes(&single_threaded), wav_data_bytes(&multi_threaded));
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn streaming_decode_source_error_cancels_background_session_without_deadlock() {
+    let flac = truncate_bytes(&large_streaming_decode_flac_bytes(4), 4096);
+
+    let error = run_decode_with_timeout(move || decoder_for_threads(4).decode_bytes(&flac))
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("invalid flac") || error.to_string().contains("decode error"),
+        "{error}"
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn streaming_decode_progress_error_cancels_background_session_without_deadlock() {
+    let flac = large_streaming_decode_flac_bytes(4);
+
+    let error = run_decode_with_timeout(move || {
+        let reader = read_flac_reader(Cursor::new(flac)).unwrap();
+        let mut output = Cursor::new(Vec::new());
+        let mut decoder = DecodeConfig::default()
+            .with_threads(4)
+            .into_decoder(&mut output);
+        decoder.decode_source_with_progress(reader.into_decode_source(), |progress| {
+            if progress.completed_frames >= 2 {
+                Err(flacx::Error::Decode("injected progress failure".into()))
+            } else {
+                Ok(())
+            }
+        })
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("injected progress failure"));
 }
 
 #[test]
