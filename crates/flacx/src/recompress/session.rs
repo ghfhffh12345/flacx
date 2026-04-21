@@ -238,9 +238,15 @@ where
         )?;
 
         if total_samples <= EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD {
+            #[cfg(feature = "progress")]
             let (metadata, pcm_stream, streaminfo_md5, decode_input_bytes_read) =
                 source.into_verified_pcm_stream()?;
+            #[cfg(not(feature = "progress"))]
+            let (metadata, pcm_stream, streaminfo_md5) = source.into_verified_pcm_stream()?;
+            #[cfg(not(feature = "progress"))]
+            let decode_input_bytes_read = 0;
             let encode_config = self.config.encode_config();
+            #[cfg(feature = "progress")]
             let encode_plan = crate::plan::EncodePlan::new(pcm_stream.spec, encode_config.clone())?;
             emit_recompress_progress!(
                 progress,
@@ -271,7 +277,11 @@ where
         // keep verification incremental and stream the verified PCM into encode instead.
         let (metadata, mut stream) = source.into_encode_parts();
         let encode_config = self.config.encode_config();
+        #[cfg(feature = "progress")]
         let decode_input_bytes_read = stream.input_bytes_processed();
+        #[cfg(not(feature = "progress"))]
+        let decode_input_bytes_read = 0;
+        #[cfg(feature = "progress")]
         let encode_plan = crate::plan::EncodePlan::new(stream.spec(), encode_config.clone())?;
         if total_samples == 0 {
             stream.finish_verification()?;

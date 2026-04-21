@@ -22,9 +22,12 @@ use crate::{
     metadata::Metadata,
     model::encode_frame,
     plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
-    progress::{ProgressSink, emit_progress},
+    progress::ProgressSink,
     write::{EncodedFrame, FlacWriter, FrameHeaderNumber},
 };
+
+#[cfg(feature = "progress")]
+use crate::progress::emit_progress;
 
 const FRAME_CHUNK_SIZE: usize = 32;
 const ENCODE_CHUNK_MAX_FRAMES: usize = 256;
@@ -97,27 +100,16 @@ fn set_current_input_bytes_read(bytes: u64) {
     CURRENT_INPUT_BYTES_READ.with(|current| current.set(Some(bytes)));
 }
 
-#[cfg(not(feature = "progress"))]
-fn set_current_input_bytes_read(_bytes: u64) {}
-
 #[cfg(feature = "progress")]
 fn clear_current_input_bytes_read() {
     CURRENT_INPUT_BYTES_READ.with(|current| current.set(None));
 }
-
-#[cfg(not(feature = "progress"))]
-fn clear_current_input_bytes_read() {}
 
 #[cfg(feature = "progress")]
 fn current_input_bytes_read() -> u64 {
     CURRENT_INPUT_BYTES_READ
         .with(std::cell::Cell::get)
         .unwrap_or(0)
-}
-
-#[cfg(not(feature = "progress"))]
-fn current_input_bytes_read() -> u64 {
-    0
 }
 
 pub(crate) fn encode_stream<W, S, P>(
@@ -132,6 +124,7 @@ where
     S: EncodePcmStream,
     P: ProgressSink,
 {
+    #[cfg(feature = "progress")]
     clear_current_input_bytes_read();
     let spec = stream.spec();
     let chunk_policy = EncodeChunkPolicy {
@@ -159,6 +152,7 @@ where
     if plan.total_frames == 0 {
         writer.set_streaminfo_md5(stream.finish_streaminfo_md5(md5)?);
         let (_, stream_info) = writer.finalize()?;
+        #[cfg(feature = "progress")]
         clear_current_input_bytes_read();
         return Ok(summary_from_stream_info(stream_info, 0));
     }
@@ -183,6 +177,7 @@ where
 
     writer.set_streaminfo_md5(stream.finish_streaminfo_md5(md5)?);
     let (_, stream_info) = writer.finalize()?;
+    #[cfg(feature = "progress")]
     clear_current_input_bytes_read();
     Ok(summary_from_stream_info(stream_info, plan.total_frames))
 }
@@ -375,6 +370,7 @@ where
                         }
                         Err(DispatchError::Full(returned)) => {
                             job = returned;
+                            #[cfg(feature = "progress")]
                             receive_and_drain_ready(
                                 &result_receiver,
                                 &mut pending,
@@ -386,6 +382,20 @@ where
                                 &mut next_expected,
                                 plan.total_frames,
                                 stream.input_bytes_processed(),
+                                &mut inflight_pcm_frames,
+                                &mut profile,
+                            )?;
+                            #[cfg(not(feature = "progress"))]
+                            receive_and_drain_ready(
+                                &result_receiver,
+                                &mut pending,
+                                writer,
+                                progress,
+                                &mut reusable_buffers,
+                                &mut processed_samples,
+                                plan.spec.total_samples,
+                                &mut next_expected,
+                                plan.total_frames,
                                 &mut inflight_pcm_frames,
                                 &mut profile,
                             )?;
@@ -403,6 +413,7 @@ where
             }
 
             while next_expected < plan.total_frames {
+                #[cfg(feature = "progress")]
                 receive_and_drain_ready(
                     &result_receiver,
                     &mut pending,
@@ -414,6 +425,20 @@ where
                     &mut next_expected,
                     plan.total_frames,
                     stream.input_bytes_processed(),
+                    &mut inflight_pcm_frames,
+                    &mut profile,
+                )?;
+                #[cfg(not(feature = "progress"))]
+                receive_and_drain_ready(
+                    &result_receiver,
+                    &mut pending,
+                    writer,
+                    progress,
+                    &mut reusable_buffers,
+                    &mut processed_samples,
+                    plan.spec.total_samples,
+                    &mut next_expected,
+                    plan.total_frames,
                     &mut inflight_pcm_frames,
                     &mut profile,
                 )?;
@@ -481,6 +506,7 @@ where
         profile.worker_encode_cpu += encode_start.elapsed();
 
         let write_start = Instant::now();
+        #[cfg(feature = "progress")]
         set_current_input_bytes_read(stream.input_bytes_processed());
         processed_samples = write_encoded_chunk(
             writer,
@@ -527,6 +553,7 @@ fn try_dispatch_job(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "progress")]
 fn receive_and_drain_ready<W, P>(
     result_receiver: &mpsc::Receiver<Result<EncodedWorkChunk>>,
     pending: &mut BTreeMap<usize, EncodedWorkChunk>,
@@ -558,6 +585,60 @@ where
 
     let write_start = Instant::now();
     set_current_input_bytes_read(input_bytes_read);
+    while let Some(mut chunk) = pending.remove(next_expected) {
+        let frame_count = chunk.frame_count;
+        *processed_samples = write_encoded_chunk(
+            writer,
+            EncodedChunk {
+                start_frame: chunk.start_frame,
+                frames: std::mem::take(&mut chunk.frames),
+            },
+            *processed_samples,
+            total_samples,
+            chunk.start_frame,
+            total_frames,
+            progress,
+        )?;
+        *next_expected += frame_count;
+        *inflight_pcm_frames = inflight_pcm_frames.saturating_sub(chunk.pcm_frames);
+        chunk.samples.clear();
+        reusable_buffers.push(chunk.samples);
+    }
+    profile.write_progress += write_start.elapsed();
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(not(feature = "progress"))]
+fn receive_and_drain_ready<W, P>(
+    result_receiver: &mpsc::Receiver<Result<EncodedWorkChunk>>,
+    pending: &mut BTreeMap<usize, EncodedWorkChunk>,
+    writer: &mut FlacWriter<W>,
+    progress: &mut P,
+    reusable_buffers: &mut Vec<Vec<i32>>,
+    processed_samples: &mut u64,
+    total_samples: u64,
+    next_expected: &mut usize,
+    total_frames: usize,
+    inflight_pcm_frames: &mut usize,
+    profile: &mut EncodeProfileSummary,
+) -> Result<()>
+where
+    W: Write + Seek,
+    P: ProgressSink,
+{
+    let wait_start = Instant::now();
+    let chunk = result_receiver.recv().map_err(|_| {
+        Error::Thread("encode result channel closed before the session completed".into())
+    })??;
+    profile.wait_for_results += wait_start.elapsed();
+    profile.worker_encode_cpu += chunk.encode_elapsed;
+    if chunk.start_frame != *next_expected {
+        profile.out_of_order_results += 1;
+    }
+    pending.insert(chunk.start_frame, chunk);
+
+    let write_start = Instant::now();
     while let Some(mut chunk) = pending.remove(next_expected) {
         let frame_count = chunk.frame_count;
         *processed_samples = write_encoded_chunk(
@@ -770,6 +851,7 @@ fn drain_chunk(
     next_expected
 }
 
+#[cfg(feature = "progress")]
 pub(crate) fn write_encoded_chunk<W, P>(
     writer: &mut FlacWriter<W>,
     chunk: EncodedChunk,
@@ -803,6 +885,33 @@ where
                 output_bytes_written: writer.bytes_written(),
             }
         )?;
+    }
+    Ok(processed_samples)
+}
+
+#[cfg(not(feature = "progress"))]
+pub(crate) fn write_encoded_chunk<W, P>(
+    writer: &mut FlacWriter<W>,
+    chunk: EncodedChunk,
+    mut processed_samples: u64,
+    _total_samples: u64,
+    chunk_start: usize,
+    _total_frames: usize,
+    _progress: &mut P,
+) -> Result<u64>
+where
+    W: Write + Seek,
+    P: ProgressSink,
+{
+    for (offset, frame) in chunk.frames.iter().enumerate() {
+        let frame_index = chunk_start + offset;
+        writer.write_frame(
+            frame_index,
+            processed_samples,
+            frame.sample_count,
+            &frame.bytes,
+        )?;
+        processed_samples += u64::from(frame.sample_count);
     }
     Ok(processed_samples)
 }

@@ -130,6 +130,8 @@ pub struct AiffPcmStream<R> {
     endianness: SampleEndianness,
     remaining_frames: u64,
     frame_bytes: usize,
+    #[cfg(feature = "progress")]
+    input_bytes_processed: u64,
 }
 
 impl<R: Read + Seek> AiffPcmStream<R> {
@@ -156,6 +158,8 @@ impl<R: Read + Seek> AiffPcmStream<R> {
             endianness,
             remaining_frames: spec.total_samples,
             frame_bytes,
+            #[cfg(feature = "progress")]
+            input_bytes_processed: 0,
         })
     }
 }
@@ -179,7 +183,16 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for AiffPcmStream<R> {
         let samples = decode_aiff_samples(&data, self.envelope, self.endianness)?;
         output.extend(samples);
         self.remaining_frames -= frames as u64;
+        #[cfg(feature = "progress")]
+        {
+            self.input_bytes_processed = self.input_bytes_processed.saturating_add(byte_len as u64);
+        }
         Ok(frames)
+    }
+
+    #[cfg(feature = "progress")]
+    fn input_bytes_processed(&self) -> u64 {
+        self.input_bytes_processed
     }
 }
 

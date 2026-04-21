@@ -3,8 +3,10 @@
 //! The encoder and decoder both report the same [`ProgressSnapshot`] shape.
 //! [`EncodeProgress`] and [`DecodeProgress`] are aliases of that snapshot type.
 
+#[cfg(feature = "progress")]
 use crate::error::Result;
 
+#[cfg(feature = "progress")]
 macro_rules! emit_progress {
     ($progress:expr, $snapshot:expr) => {{
         #[cfg(feature = "progress")]
@@ -19,29 +21,13 @@ macro_rules! emit_progress {
     }};
 }
 
+#[cfg(feature = "progress")]
 pub(crate) use emit_progress;
 
 /// A monotonic snapshot of encode or decode progress.
 #[cfg(feature = "progress")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressSnapshot {
-    /// Samples processed so far.
-    pub processed_samples: u64,
-    /// Total samples expected for the current input.
-    pub total_samples: u64,
-    /// Frames completed so far.
-    pub completed_frames: usize,
-    /// Total frames planned for the current input.
-    pub total_frames: usize,
-    /// Input bytes read so far.
-    pub input_bytes_read: u64,
-    /// Output bytes written so far.
-    pub output_bytes_written: u64,
-}
-
-#[cfg(not(feature = "progress"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProgressSnapshot {
     /// Samples processed so far.
     pub processed_samples: u64,
     /// Total samples expected for the current input.
@@ -64,17 +50,25 @@ pub type EncodeProgress = ProgressSnapshot;
 /// Progress snapshot reported by decoder callbacks.
 pub type DecodeProgress = ProgressSnapshot;
 
+#[cfg(feature = "progress")]
 pub(crate) trait ProgressSink {
     fn on_frame(&mut self, progress: ProgressSnapshot) -> Result<()>;
 }
 
+#[cfg(not(feature = "progress"))]
+pub(crate) trait ProgressSink {}
+
 pub(crate) struct NoProgress;
 
+#[cfg(feature = "progress")]
 impl ProgressSink for NoProgress {
     fn on_frame(&mut self, _progress: ProgressSnapshot) -> Result<()> {
         Ok(())
     }
 }
+
+#[cfg(not(feature = "progress"))]
+impl ProgressSink for NoProgress {}
 
 #[cfg(feature = "progress")]
 pub(crate) struct CallbackProgress<F> {
@@ -100,8 +94,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "progress")]
     use super::ProgressSnapshot;
 
+    #[cfg(feature = "progress")]
     #[test]
     fn progress_snapshot_carries_input_bytes_read_and_output_bytes_written() {
         let snapshot = ProgressSnapshot {

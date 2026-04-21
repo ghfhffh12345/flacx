@@ -10,7 +10,7 @@ use crate::{
     decode::DecodeSummary,
     error::{Error, Result},
     md5::{StreaminfoMd5, verify_streaminfo_digest},
-    progress::{ProgressSink, emit_progress},
+    progress::ProgressSink,
     read::DecodePcmStream,
     stream_info::StreamInfo,
     wav_output::{
@@ -18,6 +18,9 @@ use crate::{
         write_wav_with_metadata_and_md5_with_options,
     },
 };
+
+#[cfg(feature = "progress")]
+use crate::progress::emit_progress;
 
 static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD: u64 = 8 * 1024 * 1024;
@@ -39,6 +42,8 @@ where
     W: Write + Seek,
     P: ProgressSink,
 {
+    #[cfg(not(feature = "progress"))]
+    let _ = progress;
     ensure_output_container_enabled(config.output_container)?;
     let spec = stream.spec();
     let source_info = stream.stream_info();
@@ -55,6 +60,7 @@ where
                 container: config.output_container,
             },
         )?;
+        #[cfg(feature = "progress")]
         emit_progress!(
             progress,
             crate::progress::ProgressSnapshot {
@@ -84,6 +90,7 @@ where
         },
     )?;
 
+    #[cfg(feature = "progress")]
     let mut processed_samples = 0u64;
     let mut chunk = Vec::new();
     let chunk_frames = chunk_frames_for_stream(source_info);
@@ -95,7 +102,11 @@ where
         }
         writer.write_samples_and_update_md5(&chunk, &mut streaminfo_md5)?;
         crate::read::release_decode_output_buffer_for_current_thread();
-        processed_samples += frames as u64;
+        #[cfg(feature = "progress")]
+        {
+            processed_samples += frames as u64;
+        }
+        #[cfg(feature = "progress")]
         emit_progress!(
             progress,
             crate::progress::ProgressSnapshot {
@@ -110,6 +121,9 @@ where
     }
 
     let output = writer.finish(Some(&mut streaminfo_md5))?;
+    #[cfg(not(feature = "progress"))]
+    let _ = &output;
+    #[cfg(feature = "progress")]
     emit_progress!(
         progress,
         crate::progress::ProgressSnapshot {

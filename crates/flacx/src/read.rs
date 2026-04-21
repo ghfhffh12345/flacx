@@ -134,6 +134,7 @@ pub trait DecodePcmStream: EncodePcmStream {
     fn completed_input_frames(&self) -> usize;
     /// Return the parsed STREAMINFO block for the input stream.
     fn stream_info(&self) -> StreamInfo;
+    #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
         EncodePcmStream::input_bytes_processed(self)
     }
@@ -269,6 +270,7 @@ pub struct FlacPcmStream<R> {
     reader: R,
     stream_info: StreamInfo,
     spec: PcmSpec,
+    #[cfg(feature = "progress")]
     frame_offset: u64,
     discovered_input_frames: usize,
     discovered_sample_number: u64,
@@ -295,10 +297,13 @@ impl<R> FlacPcmStream<R> {
     }
 
     fn from_parts(reader: R, stream_info: StreamInfo, spec: PcmSpec, frame_offset: u64) -> Self {
+        #[cfg(not(feature = "progress"))]
+        let _ = frame_offset;
         Self {
             reader,
             stream_info,
             spec,
+            #[cfg(feature = "progress")]
             frame_offset,
             discovered_input_frames: 0,
             discovered_sample_number: 0,

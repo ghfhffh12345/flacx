@@ -19,6 +19,7 @@ pub trait EncodePcmStream {
     /// Returns the number of frames appended to `output`.
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize>;
 
+    #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
         0
     }
@@ -87,6 +88,7 @@ impl<S: EncodePcmStream> EncodePcmStream for CountedEncodePcmStream<S> {
         Ok(frames)
     }
 
+    #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
         self.input_bytes_processed
     }
@@ -288,6 +290,7 @@ impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
         }
     }
 
+    #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
         match self {
             Self::Wav(stream) => stream.input_bytes_processed(),
@@ -313,6 +316,7 @@ impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
     }
 }
 
+#[cfg(feature = "progress")]
 fn pcm_bytes_for_frames(spec: PcmSpec, frames: usize) -> u64 {
     (frames as u64)
         .saturating_mul(u64::from(spec.channels))

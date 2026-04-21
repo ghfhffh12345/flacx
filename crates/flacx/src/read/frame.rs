@@ -6,12 +6,14 @@ use super::{
 use crate::{
     DecodeConfig,
     crc::{crc8, crc16},
-    input::container_bits_from_valid_bits,
-    progress::{ProgressSink, emit_progress},
+    progress::ProgressSink,
     reconstruct::{
         append_fixed_residual, append_lpc_residual, interleave_channels_into, unfold_residual,
     },
 };
+
+#[cfg(feature = "progress")]
+use crate::{input::container_bits_from_valid_bits, progress::emit_progress};
 use bitstream_io::{BigEndian, BitRead, BitReader};
 use std::{
     collections::HashMap,
@@ -197,6 +199,8 @@ pub(super) fn decode_frames_parallel<P>(
 where
     P: ProgressSink,
 {
+    #[cfg(not(feature = "progress"))]
+    let _ = stream_info;
     if frames.is_empty() {
         return Ok(());
     }
@@ -205,7 +209,9 @@ where
     let worker_count = config.threads.max(1).min(frames.len());
     if worker_count == 1 || frames.len() <= FRAME_CHUNK_SIZE {
         let mut processed_samples = 0u64;
+        #[cfg(feature = "progress")]
         let mut input_bytes_read = 0u64;
+        #[cfg(feature = "progress")]
         let total_frames = frames.len();
         let indexed_total_samples = frames
             .iter()
@@ -214,6 +220,7 @@ where
         // The frame index is the authoritative decode schedule here, so the
         // single-threaded fast path should validate against its summed block
         // sizes instead of assuming STREAMINFO's advertised total still matches.
+        #[cfg(feature = "progress")]
         for (frame_offset, frame) in frames.iter().enumerate() {
             let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
             decode_frame_samples_into(frame_bytes, frame, samples)?;
@@ -230,6 +237,12 @@ where
                     output_bytes_written: pcm_output_bytes(stream_info, processed_samples),
                 }
             )?;
+        }
+        #[cfg(not(feature = "progress"))]
+        for frame in frames.iter() {
+            let frame_bytes = &bytes[frame.offset..frame.offset + frame.bytes_consumed];
+            decode_frame_samples_into(frame_bytes, frame, samples)?;
+            processed_samples += u64::from(frame.block_size);
         }
         debug_assert_eq!(processed_samples, indexed_total_samples);
         return Ok(());
@@ -286,25 +299,39 @@ where
 
         let mut next_expected = 0usize;
         let mut processed_samples = 0u64;
+        #[cfg(feature = "progress")]
         let mut input_bytes_read = 0u64;
         let mut pending: HashMap<usize, FrameChunkResult> = HashMap::new();
 
         while next_expected < frames.len() {
             if let Some(chunk_result) = pending.remove(&next_expected) {
                 let chunk_len = chunk_result.frame_count;
-                processed_samples = process_frame_chunk_result(
-                    samples,
-                    chunk_result,
-                    &frames[next_expected..next_expected + chunk_len],
-                    processed_samples,
-                    &mut input_bytes_read,
-                    progress,
-                    FrameProgressWindow {
-                        stream_info,
-                        start_index: next_expected,
-                        total_frames: frames.len(),
-                    },
-                )?;
+                #[cfg(feature = "progress")]
+                {
+                    processed_samples = process_frame_chunk_result(
+                        samples,
+                        chunk_result,
+                        &frames[next_expected..next_expected + chunk_len],
+                        processed_samples,
+                        &mut input_bytes_read,
+                        progress,
+                        FrameProgressWindow {
+                            stream_info,
+                            start_index: next_expected,
+                            total_frames: frames.len(),
+                        },
+                    )?;
+                }
+                #[cfg(not(feature = "progress"))]
+                {
+                    processed_samples = process_frame_chunk_result(
+                        samples,
+                        chunk_result,
+                        &frames[next_expected..next_expected + chunk_len],
+                        processed_samples,
+                        progress,
+                    )?;
+                }
                 next_expected += chunk_len;
                 continue;
             }
@@ -316,19 +343,32 @@ where
 
             while let Some(chunk_result) = pending.remove(&next_expected) {
                 let chunk_len = chunk_result.frame_count;
-                processed_samples = process_frame_chunk_result(
-                    samples,
-                    chunk_result,
-                    &frames[next_expected..next_expected + chunk_len],
-                    processed_samples,
-                    &mut input_bytes_read,
-                    progress,
-                    FrameProgressWindow {
-                        stream_info,
-                        start_index: next_expected,
-                        total_frames: frames.len(),
-                    },
-                )?;
+                #[cfg(feature = "progress")]
+                {
+                    processed_samples = process_frame_chunk_result(
+                        samples,
+                        chunk_result,
+                        &frames[next_expected..next_expected + chunk_len],
+                        processed_samples,
+                        &mut input_bytes_read,
+                        progress,
+                        FrameProgressWindow {
+                            stream_info,
+                            start_index: next_expected,
+                            total_frames: frames.len(),
+                        },
+                    )?;
+                }
+                #[cfg(not(feature = "progress"))]
+                {
+                    processed_samples = process_frame_chunk_result(
+                        samples,
+                        chunk_result,
+                        &frames[next_expected..next_expected + chunk_len],
+                        processed_samples,
+                        progress,
+                    )?;
+                }
                 next_expected += chunk_len;
             }
         }
@@ -337,6 +377,7 @@ where
     })
 }
 
+#[cfg(feature = "progress")]
 fn process_frame_chunk_result<P>(
     samples: &mut Vec<i32>,
     chunk: FrameChunkResult,
@@ -371,6 +412,25 @@ where
     Ok(processed_samples)
 }
 
+#[cfg(not(feature = "progress"))]
+fn process_frame_chunk_result<P>(
+    samples: &mut Vec<i32>,
+    chunk: FrameChunkResult,
+    frames: &[FrameIndex],
+    mut processed_samples: u64,
+    _progress: &mut P,
+) -> Result<u64>
+where
+    P: ProgressSink,
+{
+    samples.extend(chunk.decoded_samples);
+    for frame in frames {
+        processed_samples += u64::from(frame.block_size);
+    }
+    Ok(processed_samples)
+}
+
+#[cfg(feature = "progress")]
 #[derive(Clone, Copy)]
 struct FrameProgressWindow {
     stream_info: StreamInfo,
@@ -385,6 +445,7 @@ fn total_interleaved_sample_count(frames: &[FrameIndex]) -> usize {
         .sum()
 }
 
+#[cfg(feature = "progress")]
 fn pcm_output_bytes(stream_info: StreamInfo, processed_samples: u64) -> u64 {
     let bytes_per_sample = u64::from(container_bits_from_valid_bits(u16::from(
         stream_info.bits_per_sample,

@@ -126,6 +126,11 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for CafPcmStream<R> {
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
         self.inner.read_chunk(max_frames, output)
     }
+
+    #[cfg(feature = "progress")]
+    fn input_bytes_processed(&self) -> u64 {
+        self.inner.input_bytes_processed()
+    }
 }
 
 fn validate_direct_descriptor(descriptor: RawPcmDescriptor) -> Result<()> {

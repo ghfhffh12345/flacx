@@ -100,6 +100,8 @@ pub struct RawPcmStream<R> {
     spec: PcmSpec,
     validated: ValidatedRawDescriptor,
     remaining_frames: u64,
+    #[cfg(feature = "progress")]
+    input_bytes_processed: u64,
     last_chunk_bytes: Vec<u8>,
 }
 
@@ -113,6 +115,8 @@ impl<R: Read + Seek> RawPcmStream<R> {
             spec: spec_from_validated_descriptor(validated, total_samples),
             validated,
             remaining_frames: total_samples,
+            #[cfg(feature = "progress")]
+            input_bytes_processed: 0,
             last_chunk_bytes: Vec::new(),
         })
     }
@@ -147,7 +151,16 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for RawPcmStream<R> {
         self.reader.read_exact(&mut self.last_chunk_bytes)?;
         decode_raw_samples_into(&self.last_chunk_bytes, self.validated, output)?;
         self.remaining_frames -= frames as u64;
+        #[cfg(feature = "progress")]
+        {
+            self.input_bytes_processed = self.input_bytes_processed.saturating_add(byte_len as u64);
+        }
         Ok(frames)
+    }
+
+    #[cfg(feature = "progress")]
+    fn input_bytes_processed(&self) -> u64 {
+        self.input_bytes_processed
     }
 
     fn update_streaminfo_md5(

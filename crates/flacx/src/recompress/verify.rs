@@ -50,6 +50,7 @@ where
         Ok(())
     }
 
+    #[cfg(feature = "progress")]
     pub(super) fn into_verified_pcm_stream(mut self) -> Result<(PcmStream, [u8; 16], u64)> {
         let spec = self.spec();
         let (samples, _frame_count) = self
@@ -68,6 +69,21 @@ where
             input_bytes_read,
         ))
     }
+
+    #[cfg(not(feature = "progress"))]
+    pub(super) fn into_verified_pcm_stream(mut self) -> Result<(PcmStream, [u8; 16])> {
+        let spec = self.spec();
+        let (samples, _frame_count) = self
+            .inner
+            .take_decoded_samples()?
+            .expect("small-input recompress path requires materialized samples");
+        self.md5
+            .as_mut()
+            .expect("md5 state present")
+            .update_samples(&samples)?;
+        self.finish_verification()?;
+        Ok((PcmStream { spec, samples }, self.expected_md5))
+    }
 }
 
 impl<S> EncodePcmStream for VerifyingPcmStream<S>
@@ -78,6 +94,7 @@ where
         self.spec()
     }
 
+    #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
         DecodePcmStream::input_bytes_processed(&self.inner)
     }

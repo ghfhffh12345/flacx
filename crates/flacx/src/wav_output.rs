@@ -28,6 +28,7 @@ impl<W> CountingWrite<W> {
         }
     }
 
+    #[cfg(feature = "progress")]
     fn bytes_written(&self) -> u64 {
         self.bytes_written
     }
@@ -283,6 +284,7 @@ impl<W: Write> StreamingPcmWriter<W> {
         }
     }
 
+    #[cfg(feature = "progress")]
     pub(crate) fn bytes_written(&self) -> u64 {
         match self {
             Self::Riff(writer) => writer.bytes_written(),
@@ -295,6 +297,7 @@ impl<W: Write> StreamingPcmWriter<W> {
 }
 
 impl<W: Write> RiffStreamWriter<W> {
+    #[cfg(feature = "progress")]
     fn bytes_written(&self) -> u64 {
         self.writer.bytes_written()
     }

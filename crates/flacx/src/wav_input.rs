@@ -176,6 +176,8 @@ pub struct WavPcmStream<R> {
     envelope: PcmEnvelope,
     remaining_frames: u64,
     frame_bytes: usize,
+    #[cfg(feature = "progress")]
+    input_bytes_processed: u64,
     last_chunk_bytes: Vec<u8>,
 }
 
@@ -196,6 +198,8 @@ impl<R: Read + Seek> WavPcmStream<R> {
             envelope,
             remaining_frames: spec.total_samples,
             frame_bytes,
+            #[cfg(feature = "progress")]
+            input_bytes_processed: 0,
             last_chunk_bytes: Vec::new(),
         })
     }
@@ -340,7 +344,16 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
         self.reader.read_exact(&mut self.last_chunk_bytes)?;
         decode_samples_into(&self.last_chunk_bytes, self.envelope, output)?;
         self.remaining_frames -= frames as u64;
+        #[cfg(feature = "progress")]
+        {
+            self.input_bytes_processed = self.input_bytes_processed.saturating_add(byte_len as u64);
+        }
         Ok(frames)
+    }
+
+    #[cfg(feature = "progress")]
+    fn input_bytes_processed(&self) -> u64 {
+        self.input_bytes_processed
     }
 
     fn update_streaminfo_md5(

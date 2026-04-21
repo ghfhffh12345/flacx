@@ -918,6 +918,59 @@ fn encode_progress_reports_exact_input_and_output_bytes() {
     assert_eq!(last.output_bytes_written, output.get_ref().len() as u64);
 }
 
+#[cfg(feature = "progress")]
+#[test]
+fn encode_progress_reports_exact_input_bytes_for_direct_wav_reader_source() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192));
+    let reader = flacx::WavReader::new(Cursor::new(&wav)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut progress_updates = Vec::new();
+    let mut encoder = EncoderConfig::default()
+        .with_threads(1)
+        .into_encoder(&mut output);
+
+    encoder
+        .encode_source_with_progress(reader.into_source(), |progress| {
+            progress_updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    let last = progress_updates.last().unwrap();
+    assert_eq!(last.input_bytes_read, wav_data_bytes(&wav).len() as u64);
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn encode_progress_reports_exact_input_bytes_for_raw_streams() {
+    let (raw_bytes, descriptor) = support::raw_pcm_fixture(
+        44_100,
+        2,
+        16,
+        16,
+        flacx::RawPcmByteOrder::LittleEndian,
+        None,
+        &sample_fixture(2, 8_192),
+    );
+    let reader = flacx::RawPcmReader::new(Cursor::new(&raw_bytes), descriptor).unwrap();
+    let stream = reader.into_pcm_stream().unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut progress_updates = Vec::new();
+    let mut encoder = EncoderConfig::default()
+        .with_threads(1)
+        .into_encoder(&mut output);
+
+    encoder
+        .encode_with_progress(stream, |progress| {
+            progress_updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    let last = progress_updates.last().unwrap();
+    assert_eq!(last.input_bytes_read, raw_bytes.len() as u64);
+}
+
 #[test]
 fn encode_persistent_session_residency_stays_bounded_by_queue_depth() {
     let profile = EncodeProfileGuard::new();

@@ -129,6 +129,7 @@ impl<W: Seek + Write> FlacWriter<W> {
         self.stream_info.md5 = md5;
     }
 
+    #[cfg(feature = "progress")]
     pub(crate) fn bytes_written(&self) -> u64 {
         self.position
     }
