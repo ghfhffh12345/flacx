@@ -912,8 +912,8 @@ fn encode_progress_reports_exact_input_and_output_bytes() {
         .unwrap();
 
     let last = progress_updates.last().unwrap();
-    assert_eq!(last.input_bytes_processed, wav_data_bytes(&wav).len() as u64);
-    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+    assert_eq!(last.input_bytes_read, wav_data_bytes(&wav).len() as u64);
+    assert_eq!(last.output_bytes_written, output.get_ref().len() as u64);
 }
 
 #[test]

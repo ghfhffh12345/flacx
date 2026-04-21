@@ -539,16 +539,16 @@ fn recompress_progress_reports_exact_phase_and_overall_output_bytes() {
     let recompressed = recompressor.into_inner().into_inner();
     let last = updates.last().unwrap();
     assert_eq!(
-        last.phase_input_bytes_processed,
+        last.phase_input_bytes_read,
         wav_data_bytes(&wav).len() as u64
     );
     assert_eq!(
-        last.phase_output_bytes_processed,
+        last.phase_output_bytes_written,
         recompressed.len() as u64
     );
     assert_eq!(
-        last.overall_output_bytes_processed,
-        wav_data_bytes(&wav).len() as u64 + recompressed.len() as u64
+        last.overall_output_bytes_written,
+        recompressed.len() as u64
     );
 }
 
@@ -572,7 +572,7 @@ fn recompress_progress_reports_exact_overall_input_bytes_across_decode_and_encod
 
     let last = updates.last().unwrap();
     assert_eq!(
-        last.overall_input_bytes_processed,
+        last.overall_input_bytes_read,
         flac.len() as u64 + wav_data_bytes(&wav).len() as u64
     );
 }

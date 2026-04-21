@@ -317,8 +317,8 @@ fn decode_progress_reports_exact_input_and_output_bytes() {
         .unwrap();
 
     let last = progress_updates.last().unwrap();
-    assert_eq!(last.input_bytes_processed, flac.len() as u64);
-    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+    assert_eq!(last.input_bytes_read, flac.len() as u64);
+    assert_eq!(last.output_bytes_written, output.get_ref().len() as u64);
 }
 
 #[cfg(all(feature = "progress", feature = "aiff", feature = "caf"))]
@@ -344,7 +344,7 @@ fn decode_progress_reports_exact_output_bytes_for_aiff_aifc_and_caf() {
 
         let last = progress_updates.last().unwrap();
         assert_eq!(
-            last.output_bytes_processed,
+            last.output_bytes_written,
             output.get_ref().len() as u64,
             "container={container:?}"
         );
@@ -391,7 +391,7 @@ fn streamed_decode_progress_reports_post_finish_aiff_padding_bytes() {
         "AIFF output should include container overhead and final padding"
     );
     let last = progress_updates.last().unwrap();
-    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+    assert_eq!(last.output_bytes_written, output.get_ref().len() as u64);
 }
 
 #[cfg(feature = "progress")]
