@@ -477,6 +477,16 @@ fn large_streaming_decode_uses_background_session_and_matches_single_thread_outp
 
 #[cfg(feature = "progress")]
 #[test]
+fn matched_large_streaming_decode_stays_bit_exact_across_thread_counts() {
+    let flac = large_streaming_decode_flac_bytes(8);
+    let single_threaded = decode_bytes_with_threads(&flac, 1);
+    let eight_threaded = decode_bytes_with_threads(&flac, 8);
+
+    assert_eq!(single_threaded, eight_threaded);
+}
+
+#[cfg(feature = "progress")]
+#[test]
 fn streaming_decode_source_error_cancels_background_session_without_deadlock() {
     let flac = truncate_bytes(&large_streaming_decode_flac_bytes(4), 4096);
 
