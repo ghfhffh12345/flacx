@@ -87,6 +87,7 @@ where
             break;
         }
         writer.write_samples_and_update_md5(&chunk, &mut streaminfo_md5)?;
+        stream.release_decode_output_buffer();
         processed_samples += frames as u64;
         progress.on_frame(ProgressSnapshot {
             processed_samples,
@@ -98,6 +99,7 @@ where
 
     writer.finish(Some(&mut streaminfo_md5))?;
     verify_streaminfo_digest(streaminfo_md5.finalize()?, source_info.md5)?;
+    stream.finish_successful_decode_profile();
     Ok(summary_from_stream_info(
         source_info,
         stream.completed_input_frames(),

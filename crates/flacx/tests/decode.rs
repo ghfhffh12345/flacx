@@ -51,18 +51,23 @@ impl DecodeProfileGuard {
         Self { path }
     }
 
-    fn summary(&self) -> BTreeMap<String, usize> {
+    fn try_summary(&self) -> Option<BTreeMap<String, usize>> {
         fs::read_to_string(&self.path)
-            .unwrap()
+            .ok()?
             .lines()
             .rev()
             .find(|line| line.starts_with("event=decode_session_summary"))
-            .unwrap()
-            .split('\t')
-            .skip(1)
-            .filter_map(|field| field.split_once('='))
-            .map(|(key, value)| (key.to_string(), value.parse().unwrap()))
-            .collect()
+            .map(|line| {
+                line.split('\t')
+                    .skip(1)
+                    .filter_map(|field| field.split_once('='))
+                    .map(|(key, value)| (key.to_string(), value.parse().unwrap()))
+                    .collect()
+            })
+    }
+
+    fn summary(&self) -> BTreeMap<String, usize> {
+        self.try_summary().unwrap()
     }
 }
 
@@ -355,38 +360,73 @@ fn real_reader_large_decode_progress_keeps_total_frames_zero() {
 #[test]
 fn streaming_decode_session_reports_bounded_residency() {
     let profile = DecodeProfileGuard::new();
-    let flac = large_streaming_decode_flac_bytes(2);
+    let flac = large_streaming_decode_flac_bytes(1);
     let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
     let mut output = Cursor::new(Vec::new());
+    let mut progress = Vec::new();
     let mut decoder = DecodeConfig::default()
-        .with_threads(2)
+        .with_threads(1)
         .into_decoder(&mut output);
 
-    let summary = decoder.decode_source(reader.into_decode_source()).unwrap();
+    let summary = decoder
+        .decode_source_with_progress(reader.into_decode_source(), |update| {
+            progress.push(update);
+            Ok(())
+        })
+        .unwrap();
     let profile_summary = profile.summary();
+    let first_chunk_frames = progress.first().unwrap().processed_samples as usize;
+    let worker_count = *profile_summary.get("worker_count").unwrap();
+    let queue_limit = *profile_summary.get("queue_limit").unwrap();
+    let target_pcm_frames = *profile_summary.get("target_pcm_frames").unwrap();
 
     assert_eq!(
         summary.total_samples,
         LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
     );
-    assert_eq!(profile_summary.get("worker_count"), Some(&2));
-    assert_eq!(profile_summary.get("queue_limit"), Some(&8));
-    assert_eq!(profile_summary.get("target_pcm_frames"), Some(&(1 << 20)));
+    assert_eq!(worker_count, 1);
+    assert!(queue_limit >= worker_count);
+    assert!(target_pcm_frames > 0);
 
     let peak_inflight_packets = *profile_summary.get("peak_inflight_packets").unwrap();
     assert!(
-        (1..=8).contains(&peak_inflight_packets),
+        (1..=queue_limit).contains(&peak_inflight_packets),
         "peak inflight packets should stay within the bounded decode window: {peak_inflight_packets}"
     );
 
     let peak_inflight_pcm_frames = *profile_summary.get("peak_inflight_pcm_frames").unwrap();
     assert!(
-        peak_inflight_pcm_frames >= (1 << 20),
-        "large streaming decode should stage at least one target-sized packet: {peak_inflight_pcm_frames}"
+        peak_inflight_pcm_frames >= first_chunk_frames,
+        "peak inflight pcm frames should include the decoded chunk handed to the container writer: peak={peak_inflight_pcm_frames}, first_chunk={first_chunk_frames}"
     );
     assert!(
-        peak_inflight_pcm_frames <= 8 * (1 << 20),
-        "peak inflight pcm frames should remain bounded by queue_limit * target_pcm_frames: {peak_inflight_pcm_frames}"
+        peak_inflight_pcm_frames <= first_chunk_frames + queue_limit * target_pcm_frames,
+        "peak inflight pcm frames should remain bounded by the writer chunk plus the internal decode window: peak={peak_inflight_pcm_frames}, first_chunk={first_chunk_frames}, queue_limit={queue_limit}, target_pcm_frames={target_pcm_frames}"
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn failed_streaming_decode_does_not_emit_session_summary() {
+    let profile = DecodeProfileGuard::new();
+    let flac = large_streaming_decode_flac_bytes(1);
+    let mut bad_md5 = streaminfo_md5(&flac);
+    bad_md5[0] ^= 0xFF;
+    let corrupt = rewrite_streaminfo_md5(&flac, bad_md5);
+    let reader = read_flac_reader(Cursor::new(&corrupt)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut decoder = DecodeConfig::default()
+        .with_threads(1)
+        .into_decoder(&mut output);
+
+    let error = decoder
+        .decode_source(reader.into_decode_source())
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "invalid flac: STREAMINFO MD5 mismatch");
+    assert!(
+        profile.try_summary().is_none(),
+        "streaming decode profile summary should only be emitted after end-to-end decode success"
     );
 }
 

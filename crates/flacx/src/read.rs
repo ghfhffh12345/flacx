@@ -134,6 +134,12 @@ pub trait DecodePcmStream: EncodePcmStream {
     fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
         Ok(None)
     }
+    /// Hint that the caller has finished consuming the last streamed chunk.
+    #[doc(hidden)]
+    fn release_decode_output_buffer(&mut self) {}
+    /// Finish decode-side profiling after end-to-end streaming decode success.
+    #[doc(hidden)]
+    fn finish_successful_decode_profile(&mut self) {}
 }
 
 /// Owned decode-side handoff that keeps metadata and the PCM stream together.
@@ -268,7 +274,8 @@ pub struct FlacPcmStream<R> {
     pending_start: usize,
     ordered_drain: session::OrderedDrainState,
     inflight_packets: usize,
-    buffered_pcm_frames: usize,
+    resident_pcm_frames: usize,
+    handed_out_pcm_frames: usize,
     decoder_pool: Option<frame::FrameDecodeWorkerPool>,
     profile_summary: profile::DecodeProfileSummary,
     profile_emitted: bool,
@@ -296,7 +303,8 @@ impl<R> FlacPcmStream<R> {
             pending_start: 0,
             ordered_drain: session::OrderedDrainState::new(),
             inflight_packets: 0,
-            buffered_pcm_frames: 0,
+            resident_pcm_frames: 0,
+            handed_out_pcm_frames: 0,
             decoder_pool: None,
             profile_summary: profile::DecodeProfileSummary::new(
                 1,
@@ -490,8 +498,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         }
 
         let packet = frame::decode_work_packet(packet)?;
-        self.ordered_drain.push_ready(packet);
-        self.observe_decode_residency();
+        self.accept_ready_packet(packet);
         Ok(())
     }
 
@@ -546,9 +553,6 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             bytes: Arc::from(packet_bytes),
             frames: Arc::from(frames),
         })?;
-        self.buffered_pcm_frames = self.buffered_pcm_frames.saturating_add(total_pcm_frames);
-        self.profile_summary
-            .observe_inflight_pcm_frames(self.buffered_pcm_frames);
         Ok(true)
     }
 
@@ -574,8 +578,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
                 frame::DecodeWorkerRecv::Empty => return Ok(()),
                 frame::DecodeWorkerRecv::Packet(packet) => {
                     self.inflight_packets = self.inflight_packets.saturating_sub(1);
-                    let packet = packet?;
-                    self.ordered_drain.push_ready(packet);
+                    self.accept_ready_packet(packet?);
                 }
             }
         }
@@ -587,7 +590,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         };
         self.inflight_packets = self.inflight_packets.saturating_sub(1);
         let packet = pool.recv()?;
-        self.ordered_drain.push_ready(packet);
+        self.accept_ready_packet(packet);
         Ok(())
     }
 
@@ -595,23 +598,43 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         let channels = usize::from(self.spec.channels);
         let (drained_frames, _) = self.ordered_drain.drain_into(max_frames, channels, output);
         self.drained_pcm_frames += drained_frames as u64;
-        self.buffered_pcm_frames = self.buffered_pcm_frames.saturating_sub(drained_frames);
+        self.handed_out_pcm_frames = self.handed_out_pcm_frames.saturating_add(drained_frames);
         drained_frames
+    }
+
+    fn accept_ready_packet(&mut self, packet: frame::DecodedWorkPacket) {
+        let pcm_frames = packet
+            .frame_block_sizes
+            .iter()
+            .map(|&block_size| usize::from(block_size))
+            .sum::<usize>();
+        self.ordered_drain.push_ready(packet);
+        self.resident_pcm_frames = self.resident_pcm_frames.saturating_add(pcm_frames);
+        self.observe_decode_residency();
+    }
+
+    fn release_decode_output_buffer(&mut self) {
+        self.resident_pcm_frames = self
+            .resident_pcm_frames
+            .saturating_sub(self.handed_out_pcm_frames);
+        self.handed_out_pcm_frames = 0;
     }
 
     fn observe_decode_residency(&mut self) {
         self.profile_summary
             .observe_inflight_packets(self.active_packet_count());
         self.profile_summary
-            .observe_inflight_pcm_frames(self.buffered_pcm_frames);
+            .observe_inflight_pcm_frames(self.resident_pcm_frames);
     }
 
-    fn maybe_emit_decode_session_summary(&mut self) {
+    fn finish_successful_decode_profile(&mut self) {
         if self.profile_emitted
             || self.inflight_packets != 0
             || !self.ordered_drain.is_idle()
             || self.discovered_sample_number < self.spec.total_samples
             || self.drained_pcm_frames < self.spec.total_samples
+            || self.resident_pcm_frames != 0
+            || self.handed_out_pcm_frames != 0
         {
             return;
         }
@@ -628,13 +651,13 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
     }
 
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        self.release_decode_output_buffer();
         if max_frames == 0
             || (self.drained_pcm_frames >= self.spec.total_samples
                 && self.ordered_drain.is_idle()
                 && self.inflight_packets == 0
                 && self.eof)
         {
-            self.maybe_emit_decode_session_summary();
             return Ok(0);
         }
         self.materialization_eligible = false;
@@ -676,7 +699,6 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             }
         }
 
-        self.maybe_emit_decode_session_summary();
         Ok(total_pcm_frames)
     }
 }
@@ -752,6 +774,14 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         self.drained_pcm_frames = self.spec.total_samples;
         self.materialization_eligible = false;
         Ok(Some((samples, frame_count)))
+    }
+
+    fn release_decode_output_buffer(&mut self) {
+        FlacPcmStream::release_decode_output_buffer(self);
+    }
+
+    fn finish_successful_decode_profile(&mut self) {
+        FlacPcmStream::finish_successful_decode_profile(self);
     }
 }
 
