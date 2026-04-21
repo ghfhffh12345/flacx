@@ -140,6 +140,9 @@ pub trait DecodePcmStream: EncodePcmStream {
     fn completed_input_frames(&self) -> usize;
     /// Return the parsed STREAMINFO block for the input stream.
     fn stream_info(&self) -> StreamInfo;
+    fn input_bytes_processed(&self) -> u64 {
+        EncodePcmStream::input_bytes_processed(self)
+    }
     /// Update the worker-thread count when the implementation supports it.
     fn set_threads(&mut self, _threads: usize) {}
     /// Optionally hand buffered decoded samples to the caller.
@@ -263,7 +266,7 @@ impl<R: Read + Seek> FlacReader<R> {
             self.metadata,
             self.stream_info,
             self.spec,
-            FlacPcmStream::from_parts(self.reader, self.stream_info, self.spec),
+            FlacPcmStream::from_parts(self.reader, self.stream_info, self.spec, self.frame_offset),
         )
     }
 }
@@ -272,9 +275,12 @@ pub struct FlacPcmStream<R> {
     reader: R,
     stream_info: StreamInfo,
     spec: PcmSpec,
+    frame_offset: u64,
     discovered_input_frames: usize,
     discovered_sample_number: u64,
+    discovered_input_byte_totals: Vec<u64>,
     completed_input_frames: usize,
+    input_bytes_processed: u64,
     drained_pcm_frames: u64,
     threads: usize,
     pending_bytes: Vec<u8>,
@@ -292,14 +298,17 @@ impl<R> FlacPcmStream<R> {
         FlacPcmStreamBuilder::new(reader)
     }
 
-    fn from_parts(reader: R, stream_info: StreamInfo, spec: PcmSpec) -> Self {
+    fn from_parts(reader: R, stream_info: StreamInfo, spec: PcmSpec, frame_offset: u64) -> Self {
         Self {
             reader,
             stream_info,
             spec,
+            frame_offset,
             discovered_input_frames: 0,
             discovered_sample_number: 0,
+            discovered_input_byte_totals: Vec::new(),
             completed_input_frames: 0,
+            input_bytes_processed: 0,
             drained_pcm_frames: 0,
             threads: 1,
             pending_bytes: Vec::new(),
@@ -385,6 +394,7 @@ impl<R: Read + Seek> FlacPcmStreamBuilder<R> {
             self.reader,
             stream_info,
             direct_spec_from_stream_info(stream_info, self.channel_mask)?,
+            self.frame_offset.unwrap_or(0),
         ))
     }
 }
@@ -400,6 +410,24 @@ impl<R> FlacPcmStream<R> {
 }
 
 impl<R: Read + Seek> FlacPcmStream<R> {
+    fn record_discovered_input_bytes(&mut self, frame_bytes: usize) {
+        let completed = self
+            .discovered_input_byte_totals
+            .last()
+            .copied()
+            .unwrap_or(self.frame_offset);
+        self.discovered_input_byte_totals
+            .push(completed.saturating_add(frame_bytes as u64));
+    }
+
+    fn sync_completed_input_progress(&mut self, completed_input_frames: usize) {
+        self.completed_input_frames = completed_input_frames;
+        self.input_bytes_processed = completed_input_frames
+            .checked_sub(1)
+            .and_then(|index| self.discovered_input_byte_totals.get(index).copied())
+            .unwrap_or(0);
+    }
+
     fn read_next_frame(&mut self) -> Result<Option<ParsedFrame>> {
         loop {
             match frame::scan_frame(
@@ -523,6 +551,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             total_pcm_frames += block_size;
             self.discovered_input_frames += 1;
             self.discovered_sample_number += u64::from(parsed.block_size);
+            self.record_discovered_input_bytes(parsed.bytes_consumed);
             self.pending_start = frame_end;
         }
 
@@ -556,8 +585,9 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             return Ok(());
         };
         let collected = session.collect_ready_packets()?;
+        let completed_input_frames = session.completed_input_frames();
         self.inflight_packets = self.inflight_packets.saturating_sub(collected);
-        self.completed_input_frames = session.completed_input_frames();
+        self.sync_completed_input_progress(completed_input_frames);
         Ok(())
     }
 
@@ -566,8 +596,9 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             return Ok(());
         };
         if session.wait_for_ready_packet()? {
+            let completed_input_frames = session.completed_input_frames();
             self.inflight_packets = self.inflight_packets.saturating_sub(1);
-            self.completed_input_frames = session.completed_input_frames();
+            self.sync_completed_input_progress(completed_input_frames);
         }
         Ok(())
     }
@@ -578,8 +609,9 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         };
         let channels = usize::from(self.spec.channels);
         let (drained_frames, _) = session.drain_into(max_frames, channels, output);
+        let completed_input_frames = session.completed_input_frames();
         self.drained_pcm_frames += drained_frames as u64;
-        self.completed_input_frames = session.completed_input_frames();
+        self.sync_completed_input_progress(completed_input_frames);
         profile::hand_out_pcm_frames_for_current_thread(drained_frames);
         drained_frames
     }
@@ -588,6 +620,10 @@ impl<R: Read + Seek> FlacPcmStream<R> {
 impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
     fn spec(&self) -> PcmSpec {
         self.spec
+    }
+
+    fn input_bytes_processed(&self) -> u64 {
+        self.input_bytes_processed
     }
 
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
@@ -668,6 +704,10 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         self.stream_info
     }
 
+    fn input_bytes_processed(&self) -> u64 {
+        self.input_bytes_processed
+    }
+
     fn set_threads(&mut self, threads: usize) {
         FlacPcmStream::set_threads(self, threads);
     }
@@ -685,6 +725,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         let read_elapsed = read_start.elapsed();
         self.eof = true;
         if bytes.is_empty() {
+            self.input_bytes_processed = self.frame_offset;
             profile::append_decode_phase(profile_path.as_deref(), "read_to_end", read_elapsed);
             return Ok(Some((Vec::new(), 0)));
         }
@@ -693,6 +734,15 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         let frames = frame::index_frames(&bytes, 0, self.stream_info)?;
         let index_elapsed = index_start.elapsed();
         let frame_count = frames.len();
+        let mut cumulative_input_bytes = self.frame_offset;
+        self.discovered_input_byte_totals = frames
+            .iter()
+            .map(|frame| {
+                cumulative_input_bytes =
+                    cumulative_input_bytes.saturating_add(frame.bytes_consumed as u64);
+                cumulative_input_bytes
+            })
+            .collect();
         let total_output_samples = usize::try_from(self.spec.total_samples)
             .unwrap_or(0)
             .saturating_mul(usize::from(self.spec.channels));
@@ -720,7 +770,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
             "total_take_decoded_samples",
             profile_start.elapsed(),
         );
-        self.completed_input_frames = frame_count;
+        self.sync_completed_input_progress(frame_count);
         self.drained_pcm_frames = self.spec.total_samples;
         self.materialization_eligible = false;
         Ok(Some((samples, frame_count)))

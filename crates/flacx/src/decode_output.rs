@@ -60,8 +60,8 @@ where
             total_samples: spec.total_samples,
             completed_frames: frame_count,
             total_frames: frame_count,
-            input_bytes_processed: 0,
-            output_bytes_processed: 0,
+            input_bytes_processed: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+            output_bytes_processed: output.stream_position()?,
         })?;
         verify_streaminfo_digest(streaminfo_md5, source_info.md5)?;
         return Ok(summary_from_stream_info(source_info, frame_count));
@@ -97,8 +97,8 @@ where
             total_samples: spec.total_samples,
             completed_frames: stream.completed_input_frames(),
             total_frames,
-            input_bytes_processed: 0,
-            output_bytes_processed: 0,
+            input_bytes_processed: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+            output_bytes_processed: writer.bytes_written(),
         })?;
     }
 

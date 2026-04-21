@@ -298,6 +298,30 @@ fn decode_source_prefers_streaming_chunks_over_materialized_samples() {
 }
 
 #[cfg(feature = "progress")]
+#[test]
+fn decode_progress_reports_exact_input_and_output_bytes() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 8_192));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut progress_updates = Vec::new();
+    let mut decoder = DecodeConfig::default()
+        .with_threads(1)
+        .into_decoder(&mut output);
+
+    decoder
+        .decode_source_with_progress(reader.into_decode_source(), |progress| {
+            progress_updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    let last = progress_updates.last().unwrap();
+    assert_eq!(last.input_bytes_processed, flac.len() as u64);
+    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+}
+
+#[cfg(feature = "progress")]
 fn decode_large_streaming_fixture_with_progress(
     threads: usize,
 ) -> (Vec<u8>, flacx::DecodeSummary, Vec<ProgressSnapshot>) {

@@ -19,6 +19,10 @@ pub trait EncodePcmStream {
     /// Returns the number of frames appended to `output`.
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize>;
 
+    fn input_bytes_processed(&self) -> u64 {
+        0
+    }
+
     fn update_streaminfo_md5(
         &mut self,
         md5: &mut crate::md5::StreaminfoMd5,
@@ -37,6 +41,58 @@ pub trait EncodePcmStream {
 
     fn preferred_encode_chunk_target_pcm_frames(&self) -> Option<usize> {
         None
+    }
+}
+
+pub(crate) struct CountedEncodePcmStream<S> {
+    stream: S,
+    input_bytes_processed: u64,
+}
+
+impl<S> CountedEncodePcmStream<S> {
+    pub(crate) fn new(stream: S) -> Self {
+        Self {
+            stream,
+            input_bytes_processed: 0,
+        }
+    }
+}
+
+impl<S: EncodePcmStream> EncodePcmStream for CountedEncodePcmStream<S> {
+    fn spec(&self) -> PcmSpec {
+        self.stream.spec()
+    }
+
+    fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
+        let frames = self.stream.read_chunk(max_frames, output)?;
+        self.input_bytes_processed = self
+            .input_bytes_processed
+            .saturating_add(pcm_bytes_for_frames(self.stream.spec(), frames));
+        Ok(frames)
+    }
+
+    fn input_bytes_processed(&self) -> u64 {
+        self.input_bytes_processed
+    }
+
+    fn update_streaminfo_md5(
+        &mut self,
+        md5: &mut crate::md5::StreaminfoMd5,
+        samples: &[i32],
+    ) -> Result<()> {
+        self.stream.update_streaminfo_md5(md5, samples)
+    }
+
+    fn finish_streaminfo_md5(&mut self, md5: crate::md5::StreaminfoMd5) -> Result<[u8; 16]> {
+        self.stream.finish_streaminfo_md5(md5)
+    }
+
+    fn preferred_encode_chunk_max_frames(&self) -> Option<usize> {
+        self.stream.preferred_encode_chunk_max_frames()
+    }
+
+    fn preferred_encode_chunk_target_pcm_frames(&self) -> Option<usize> {
+        self.stream.preferred_encode_chunk_target_pcm_frames()
     }
 }
 
@@ -160,17 +216,17 @@ impl<R: Read + Seek> PcmReader<R> {
         match self {
             Self::Wav(reader) => {
                 let (metadata, stream) = reader.into_session_parts();
-                (metadata, AnyPcmStream::Wav(stream))
+                (metadata, AnyPcmStream::Wav(CountedEncodePcmStream::new(stream)))
             }
             #[cfg(feature = "aiff")]
             Self::Aiff(reader) => {
                 let (metadata, stream) = reader.into_session_parts();
-                (metadata, AnyPcmStream::Aiff(stream))
+                (metadata, AnyPcmStream::Aiff(CountedEncodePcmStream::new(stream)))
             }
             #[cfg(feature = "caf")]
             Self::Caf(reader) => {
                 let (metadata, stream) = reader.into_session_parts();
-                (metadata, AnyPcmStream::Caf(stream))
+                (metadata, AnyPcmStream::Caf(CountedEncodePcmStream::new(stream)))
             }
         }
     }
@@ -178,11 +234,11 @@ impl<R: Read + Seek> PcmReader<R> {
 
 /// Family-dispatched single-pass PCM stream.
 pub(crate) enum AnyPcmStream<R: Read + Seek> {
-    Wav(crate::wav_input::WavPcmStream<R>),
+    Wav(CountedEncodePcmStream<crate::wav_input::WavPcmStream<R>>),
     #[cfg(feature = "aiff")]
-    Aiff(crate::aiff::AiffPcmStream<R>),
+    Aiff(CountedEncodePcmStream<crate::aiff::AiffPcmStream<R>>),
     #[cfg(feature = "caf")]
-    Caf(crate::caf::CafPcmStream<R>),
+    Caf(CountedEncodePcmStream<crate::caf::CafPcmStream<R>>),
 }
 
 impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
@@ -206,6 +262,16 @@ impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
         }
     }
 
+    fn input_bytes_processed(&self) -> u64 {
+        match self {
+            Self::Wav(stream) => stream.input_bytes_processed(),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(stream) => stream.input_bytes_processed(),
+            #[cfg(feature = "caf")]
+            Self::Caf(stream) => stream.input_bytes_processed(),
+        }
+    }
+
     fn update_streaminfo_md5(
         &mut self,
         md5: &mut crate::md5::StreaminfoMd5,
@@ -219,6 +285,12 @@ impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
             Self::Caf(stream) => stream.update_streaminfo_md5(md5, samples),
         }
     }
+}
+
+fn pcm_bytes_for_frames(spec: PcmSpec, frames: usize) -> u64 {
+    (frames as u64)
+        .saturating_mul(u64::from(spec.channels))
+        .saturating_mul(u64::from(spec.bytes_per_sample))
 }
 
 /// Parse a supported PCM container and return a family-specific reader for the

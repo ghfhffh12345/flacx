@@ -129,6 +129,10 @@ impl<W: Seek + Write> FlacWriter<W> {
         self.stream_info.md5 = md5;
     }
 
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.position
+    }
+
     pub(crate) fn finalize(mut self) -> io::Result<(W, StreamInfo)> {
         let end_position = self.position;
         if let Some(seektable) = &self.seektable {

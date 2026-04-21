@@ -370,7 +370,9 @@ fn recompress_session_avoids_buffered_encode_handoff() {
     let source = include_str!("../src/recompress/session.rs");
     assert!(source.contains("into_verified_pcm_stream()?"));
     assert!(source.contains("into_encode_parts()"));
-    assert!(source.contains("encode_buffered_pcm_with_sink"));
+    assert!(source.contains("BufferedRecompressPcmStream"));
+    assert!(source.contains("CountedEncodePcmStream::new"));
+    assert!(!source.contains("encode_buffered_pcm_with_sink"));
 }
 
 #[cfg(feature = "progress")]
@@ -466,4 +468,58 @@ fn recompress_progress_reports_decode_then_encode_phases() {
         previous_overall = progress.overall_processed_samples;
     }
     assert_eq!(previous_overall, 4_096);
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn recompress_progress_reports_exact_phase_and_overall_output_bytes() {
+    let total_samples = LARGE_STREAMING_DECODE_SAMPLE_COUNT;
+    let samples = sample_fixture(1, total_samples);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &samples);
+    let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
+    let spec = PcmSpec {
+        sample_rate: 44_100,
+        channels: 1,
+        bits_per_sample: 16,
+        total_samples: total_samples as u64,
+        bytes_per_sample: 2,
+        channel_mask: ordinary_channel_mask(1).expect("mono channel mask"),
+    };
+    let mut stream_info =
+        StreamInfo::new(44_100, 1, 16, total_samples as u64, streaminfo_md5(&flac));
+    stream_info.update_block_size(512);
+    let source = FlacRecompressSource::new(
+        Metadata::new(),
+        StreamingOnlyRecompressStream::new(spec, stream_info, samples, 4_194_304),
+        streaminfo_md5(&flac),
+    );
+    let config = RecompressConfig::default()
+        .with_threads(1)
+        .with_block_size(576);
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+    let mut updates = Vec::<RecompressProgress>::new();
+
+    recompressor
+        .recompress_with_progress(source, |progress| {
+            updates.push(progress);
+            Ok(())
+        })
+        .unwrap();
+
+    let recompressed = recompressor.into_inner().into_inner();
+    let last = updates.last().unwrap();
+    assert_eq!(
+        last.phase_input_bytes_processed,
+        wav_data_bytes(&wav).len() as u64
+    );
+    assert_eq!(
+        last.phase_output_bytes_processed,
+        recompressed.len() as u64
+    );
+    assert_eq!(
+        last.overall_output_bytes_processed,
+        wav_data_bytes(&wav).len() as u64 + recompressed.len() as u64
+    );
 }
