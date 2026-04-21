@@ -1029,7 +1029,9 @@ fn encode_command_renders_filename_elapsed_and_progress_when_interactive() {
     assert!(stderr.contains("100.0%"));
     assert!(stderr.contains("Elapsed"));
     assert!(stderr.contains("ETA"));
-    assert!(stderr.contains("Rate"));
+    assert!(stderr.contains("In "));
+    assert!(stderr.contains("Out "));
+    assert!(stderr.contains("Total "));
     assert!(stderr.ends_with('\n'));
 
     let _ = fs::remove_file(input_path);
@@ -1064,9 +1066,13 @@ fn encode_command_renders_unicode_filename_cleanly_when_interactive() {
     assert!(final_line.contains("100.0%"));
     assert!(final_line.contains("Elapsed"));
     assert!(final_line.contains("ETA"));
-    assert!(final_line.contains("Rate"));
+    assert!(final_line.contains("In "));
+    assert!(final_line.contains("Out "));
+    assert!(final_line.contains("Total "));
     assert_eq!(final_line.matches("Elapsed").count(), 1);
-    assert_eq!(final_line.matches("Rate").count(), 1);
+    assert_eq!(final_line.matches("In ").count(), 1);
+    assert_eq!(final_line.matches("Out ").count(), 1);
+    assert_eq!(final_line.matches("Total ").count(), 1);
     assert!(
         final_line.contains("『世界") || final_line.contains("テスト") || final_line.contains('…')
     );
@@ -1099,14 +1105,18 @@ fn encode_directory_progress_shows_overall_and_file_progress() {
     assert!(final_lines[0].starts_with("Batch | "));
     assert!(final_lines[0].contains("Elapsed"));
     assert!(final_lines[0].contains("ETA"));
-    assert!(final_lines[0].contains("Rate"));
+    assert!(final_lines[0].contains("In "));
+    assert!(final_lines[0].contains("Out "));
+    assert!(final_lines[0].contains("Total "));
     assert!(
         final_lines[1].contains("disc1/first.wav | File | ")
             || final_lines[1].contains("disc1/second.wav | File | ")
     );
     assert!(final_lines[1].contains("Elapsed"));
     assert!(final_lines[1].contains("ETA"));
-    assert!(final_lines[1].contains("Rate"));
+    assert!(final_lines[1].contains("In "));
+    assert!(final_lines[1].contains("Out "));
+    assert!(final_lines[1].contains("Total "));
 
     let _ = fs::remove_dir_all(input_dir);
 }
@@ -1967,7 +1977,9 @@ fn decode_command_function_renders_filename_elapsed_and_progress_when_interactiv
     assert!(stderr.contains('\r'));
     assert!(stderr.contains("Elapsed"));
     assert!(stderr.contains("ETA"));
-    assert!(stderr.contains("Rate"));
+    assert!(stderr.contains("In "));
+    assert!(stderr.contains("Out "));
+    assert!(stderr.contains("Total "));
     assert!(stderr.contains("100.0%"));
     assert_wav_audio_eq(&fs::read(&output_path).unwrap(), &wav);
 
@@ -1999,14 +2011,18 @@ fn decode_directory_progress_shows_overall_and_file_progress() {
     assert!(final_lines[0].starts_with("Batch | "));
     assert!(final_lines[0].contains("Elapsed"));
     assert!(final_lines[0].contains("ETA"));
-    assert!(final_lines[0].contains("Rate"));
+    assert!(final_lines[0].contains("In "));
+    assert!(final_lines[0].contains("Out "));
+    assert!(final_lines[0].contains("Total "));
     assert!(
         final_lines[1].contains("disc1/first.flac | File | ")
             || final_lines[1].contains("disc1/second.flac | File | ")
     );
     assert!(final_lines[1].contains("Elapsed"));
     assert!(final_lines[1].contains("ETA"));
-    assert!(final_lines[1].contains("Rate"));
+    assert!(final_lines[1].contains("In "));
+    assert!(final_lines[1].contains("Out "));
+    assert!(final_lines[1].contains("Total "));
 
     let _ = fs::remove_dir_all(input_dir);
 }
