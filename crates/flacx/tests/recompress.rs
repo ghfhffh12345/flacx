@@ -388,7 +388,7 @@ fn recompress_session_avoids_buffered_encode_handoff() {
     assert!(source.contains("into_verified_pcm_stream()?"));
     assert!(source.contains("into_encode_parts()"));
     assert!(source.contains("BufferedRecompressPcmStream"));
-    assert!(source.contains("CountedEncodePcmStream::new"));
+    assert!(source.contains("counted_encode_pcm_stream"));
     assert!(!source.contains("encode_buffered_pcm_with_sink"));
 }
 
@@ -543,14 +543,8 @@ fn recompress_progress_reports_exact_phase_and_overall_output_bytes() {
         last.phase_input_bytes_read,
         wav_data_bytes(&wav).len() as u64
     );
-    assert_eq!(
-        last.phase_output_bytes_written,
-        recompressed.len() as u64
-    );
-    assert_eq!(
-        last.overall_output_bytes_written,
-        recompressed.len() as u64
-    );
+    assert_eq!(last.phase_output_bytes_written, recompressed.len() as u64);
+    assert_eq!(last.overall_output_bytes_written, recompressed.len() as u64);
 }
 
 #[cfg(feature = "progress")]

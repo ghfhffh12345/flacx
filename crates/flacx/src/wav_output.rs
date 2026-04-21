@@ -774,6 +774,41 @@ fn resolve_pcm_container(
     }
 }
 
+#[cfg(not(feature = "wav"))]
+fn resolve_pcm_container_without_wav(requested: PcmContainer) -> Result<PcmContainer> {
+    match requested {
+        PcmContainer::Auto => {
+            #[cfg(feature = "aiff")]
+            {
+                return Ok(PcmContainer::Aiff);
+            }
+            #[cfg(all(not(feature = "aiff"), feature = "caf"))]
+            {
+                return Ok(PcmContainer::Caf);
+            }
+            #[cfg(all(not(feature = "aiff"), not(feature = "caf")))]
+            {
+                return Err(wav_feature_disabled_error());
+            }
+        }
+        PcmContainer::Wave | PcmContainer::Rf64 | PcmContainer::Wave64 => {
+            Err(wav_feature_disabled_error())
+        }
+        PcmContainer::Aiff => {
+            ensure_output_container_enabled(PcmContainer::Aiff)?;
+            Ok(PcmContainer::Aiff)
+        }
+        PcmContainer::Aifc => {
+            ensure_output_container_enabled(PcmContainer::Aifc)?;
+            Ok(PcmContainer::Aifc)
+        }
+        PcmContainer::Caf => {
+            ensure_output_container_enabled(PcmContainer::Caf)?;
+            Ok(PcmContainer::Caf)
+        }
+    }
+}
+
 fn feature_disabled_output_error(container: PcmContainer) -> Error {
     Error::UnsupportedWav(format!(
         "{} output requires the `{}` cargo feature",

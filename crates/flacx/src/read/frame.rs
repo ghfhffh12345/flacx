@@ -7,7 +7,7 @@ use crate::{
     DecodeConfig,
     crc::{crc8, crc16},
     input::container_bits_from_valid_bits,
-    progress::{ProgressSink, ProgressSnapshot},
+    progress::{ProgressSink, emit_progress},
     reconstruct::{
         append_fixed_residual, append_lpc_residual, interleave_channels_into, unfold_residual,
     },
@@ -219,14 +219,17 @@ where
             decode_frame_samples_into(frame_bytes, frame, samples)?;
             processed_samples += u64::from(frame.block_size);
             input_bytes_read = input_bytes_read.saturating_add(frame.bytes_consumed as u64);
-            progress.on_frame(ProgressSnapshot {
-                processed_samples,
-                total_samples: stream_info.total_samples,
-                completed_frames: frame_offset + 1,
-                total_frames,
-                input_bytes_read,
-                output_bytes_written: pcm_output_bytes(stream_info, processed_samples),
-            })?;
+            emit_progress!(
+                progress,
+                crate::progress::ProgressSnapshot {
+                    processed_samples,
+                    total_samples: stream_info.total_samples,
+                    completed_frames: frame_offset + 1,
+                    total_frames,
+                    input_bytes_read,
+                    output_bytes_written: pcm_output_bytes(stream_info, processed_samples),
+                }
+            )?;
         }
         debug_assert_eq!(processed_samples, indexed_total_samples);
         return Ok(());
@@ -350,17 +353,20 @@ where
     for (frame_offset, frame) in frames.iter().enumerate() {
         processed_samples += u64::from(frame.block_size);
         *input_bytes_read = (*input_bytes_read).saturating_add(frame.bytes_consumed as u64);
-        progress.on_frame(ProgressSnapshot {
-            processed_samples,
-            total_samples: progress_window.stream_info.total_samples,
-            completed_frames: progress_window.start_index + frame_offset + 1,
-            total_frames: progress_window.total_frames,
-            input_bytes_read: *input_bytes_read,
-            output_bytes_written: pcm_output_bytes(
-                progress_window.stream_info,
+        emit_progress!(
+            progress,
+            crate::progress::ProgressSnapshot {
                 processed_samples,
-            ),
-        })?;
+                total_samples: progress_window.stream_info.total_samples,
+                completed_frames: progress_window.start_index + frame_offset + 1,
+                total_frames: progress_window.total_frames,
+                input_bytes_read: *input_bytes_read,
+                output_bytes_written: pcm_output_bytes(
+                    progress_window.stream_info,
+                    processed_samples,
+                ),
+            }
+        )?;
     }
     Ok(processed_samples)
 }

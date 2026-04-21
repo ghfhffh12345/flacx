@@ -3,6 +3,22 @@ use crate::{
     progress::{ProgressSink, ProgressSnapshot},
 };
 
+macro_rules! emit_recompress_progress {
+    ($progress:expr, $snapshot:expr) => {{
+        #[cfg(feature = "progress")]
+        {
+            $progress.on_progress($snapshot)
+        }
+        #[cfg(not(feature = "progress"))]
+        {
+            let _ = $progress;
+            Ok::<(), crate::error::Error>(())
+        }
+    }};
+}
+
+pub(crate) use emit_recompress_progress;
+
 /// Phase marker for recompress progress reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecompressPhase {
@@ -93,10 +109,29 @@ where
 
 pub(crate) struct EncodePhaseProgress<'a, P> {
     pub(crate) sink: &'a mut P,
+    #[cfg(feature = "progress")]
     pub(crate) total_samples: u64,
+    #[cfg(feature = "progress")]
     pub(crate) decode_input_bytes_read: u64,
 }
 
+impl<'a, P> EncodePhaseProgress<'a, P> {
+    #[cfg(feature = "progress")]
+    pub(crate) fn new(sink: &'a mut P, total_samples: u64, decode_input_bytes_read: u64) -> Self {
+        Self {
+            sink,
+            total_samples,
+            decode_input_bytes_read,
+        }
+    }
+
+    #[cfg(not(feature = "progress"))]
+    pub(crate) fn new(sink: &'a mut P, _total_samples: u64, _decode_input_bytes_read: u64) -> Self {
+        Self { sink }
+    }
+}
+
+#[cfg(feature = "progress")]
 impl<P> ProgressSink for EncodePhaseProgress<'_, P>
 where
     P: RecompressProgressSink,
@@ -122,16 +157,28 @@ where
     }
 }
 
+#[cfg(not(feature = "progress"))]
+impl<P> ProgressSink for EncodePhaseProgress<'_, P>
+where
+    P: RecompressProgressSink,
+{
+    fn on_frame(&mut self, _progress: ProgressSnapshot) -> Result<()> {
+        Ok(())
+    }
+}
+
 pub(crate) const fn overall_total_samples(total_samples: u64) -> u64 {
     total_samples.saturating_mul(2)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        EncodePhaseProgress, RecompressPhase, RecompressProgress, encode_phase_transition_progress,
-    };
+    use super::{RecompressPhase, RecompressProgress, encode_phase_transition_progress};
     use crate::error::Result;
+
+    #[cfg(feature = "progress")]
+    use super::EncodePhaseProgress;
+    #[cfg(feature = "progress")]
     use crate::progress::{ProgressSink, ProgressSnapshot};
 
     struct CaptureSink(Option<RecompressProgress>);
@@ -172,6 +219,7 @@ mod tests {
         assert_eq!(progress.overall_output_bytes_written, 0);
     }
 
+    #[cfg(feature = "progress")]
     #[test]
     fn encode_phase_progress_uses_actual_output_bytes_written() {
         let mut sink = CaptureSink(None);

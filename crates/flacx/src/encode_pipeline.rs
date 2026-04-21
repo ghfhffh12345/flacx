@@ -22,7 +22,7 @@ use crate::{
     metadata::Metadata,
     model::encode_frame,
     plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
-    progress::{ProgressSink, ProgressSnapshot},
+    progress::{ProgressSink, emit_progress},
     write::{EncodedFrame, FlacWriter, FrameHeaderNumber},
 };
 
@@ -36,6 +36,7 @@ const ENCODE_SESSION_WINDOW_DEPTH: usize =
 
 thread_local! {
     static TEST_PROFILE_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+    #[cfg(feature = "progress")]
     static CURRENT_INPUT_BYTES_READ: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
@@ -91,16 +92,32 @@ fn active_encode_profile_path() -> Option<std::path::PathBuf> {
         .or_else(|| env::var_os("FLACX_ENCODE_PROFILE").map(std::path::PathBuf::from))
 }
 
+#[cfg(feature = "progress")]
 fn set_current_input_bytes_read(bytes: u64) {
     CURRENT_INPUT_BYTES_READ.with(|current| current.set(Some(bytes)));
 }
 
+#[cfg(not(feature = "progress"))]
+fn set_current_input_bytes_read(_bytes: u64) {}
+
+#[cfg(feature = "progress")]
 fn clear_current_input_bytes_read() {
     CURRENT_INPUT_BYTES_READ.with(|current| current.set(None));
 }
 
+#[cfg(not(feature = "progress"))]
+fn clear_current_input_bytes_read() {}
+
+#[cfg(feature = "progress")]
 fn current_input_bytes_read() -> u64 {
-    CURRENT_INPUT_BYTES_READ.with(std::cell::Cell::get).unwrap_or(0)
+    CURRENT_INPUT_BYTES_READ
+        .with(std::cell::Cell::get)
+        .unwrap_or(0)
+}
+
+#[cfg(not(feature = "progress"))]
+fn current_input_bytes_read() -> u64 {
+    0
 }
 
 pub(crate) fn encode_stream<W, S, P>(
@@ -775,14 +792,17 @@ where
             &frame.bytes,
         )?;
         processed_samples += u64::from(frame.sample_count);
-        progress.on_frame(ProgressSnapshot {
-            processed_samples,
-            total_samples,
-            completed_frames: frame_index + 1,
-            total_frames,
-            input_bytes_read: current_input_bytes_read(),
-            output_bytes_written: writer.bytes_written(),
-        })?;
+        emit_progress!(
+            progress,
+            crate::progress::ProgressSnapshot {
+                processed_samples,
+                total_samples,
+                completed_frames: frame_index + 1,
+                total_frames,
+                input_bytes_read: current_input_bytes_read(),
+                output_bytes_written: writer.bytes_written(),
+            }
+        )?;
     }
     Ok(processed_samples)
 }

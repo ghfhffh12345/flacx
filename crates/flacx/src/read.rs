@@ -66,10 +66,7 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
             .field("spec", &self.spec)
             .field("discovered_input_frames", &self.discovered_input_frames)
             .field("discovered_sample_number", &self.discovered_sample_number)
-            .field(
-                "drained_input_frames",
-                &self.completed_input_frames,
-            )
+            .field("drained_input_frames", &self.completed_input_frames)
             .field("drained_pcm_frames", &self.drained_pcm_frames)
             .field("threads", &self.threads)
             .field("pending_bytes_len", &self.pending_bytes.len())
@@ -88,10 +85,7 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
                     session::StreamingDecodeSession::next_ready_packet_start_frame,
                 ),
             )
-            .field(
-                "inflight_packets",
-                &self.inflight_packets,
-            )
+            .field("inflight_packets", &self.inflight_packets)
             .field(
                 "has_draining_packet",
                 &self
@@ -278,8 +272,10 @@ pub struct FlacPcmStream<R> {
     frame_offset: u64,
     discovered_input_frames: usize,
     discovered_sample_number: u64,
+    #[cfg(feature = "progress")]
     discovered_input_byte_totals: Vec<u64>,
     completed_input_frames: usize,
+    #[cfg(feature = "progress")]
     input_bytes_processed: u64,
     drained_pcm_frames: u64,
     threads: usize,
@@ -306,8 +302,10 @@ impl<R> FlacPcmStream<R> {
             frame_offset,
             discovered_input_frames: 0,
             discovered_sample_number: 0,
+            #[cfg(feature = "progress")]
             discovered_input_byte_totals: Vec::new(),
             completed_input_frames: 0,
+            #[cfg(feature = "progress")]
             input_bytes_processed: 0,
             drained_pcm_frames: 0,
             threads: 1,
@@ -410,6 +408,7 @@ impl<R> FlacPcmStream<R> {
 }
 
 impl<R: Read + Seek> FlacPcmStream<R> {
+    #[cfg(feature = "progress")]
     fn record_discovered_input_bytes(&mut self, frame_bytes: usize) {
         let completed = self
             .discovered_input_byte_totals
@@ -420,12 +419,18 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             .push(completed.saturating_add(frame_bytes as u64));
     }
 
+    #[cfg(feature = "progress")]
     fn sync_completed_input_progress(&mut self, completed_input_frames: usize) {
         self.completed_input_frames = completed_input_frames;
         self.input_bytes_processed = completed_input_frames
             .checked_sub(1)
             .and_then(|index| self.discovered_input_byte_totals.get(index).copied())
             .unwrap_or(0);
+    }
+
+    #[cfg(not(feature = "progress"))]
+    fn sync_completed_input_progress(&mut self, completed_input_frames: usize) {
+        self.completed_input_frames = completed_input_frames;
     }
 
     fn read_next_frame(&mut self) -> Result<Option<ParsedFrame>> {
@@ -492,9 +497,10 @@ impl<R: Read + Seek> FlacPcmStream<R> {
     }
 
     fn active_packet_count(&self) -> usize {
-        self.session
-            .as_ref()
-            .map_or(self.inflight_packets, session::StreamingDecodeSession::active_packet_count)
+        self.session.as_ref().map_or(
+            self.inflight_packets,
+            session::StreamingDecodeSession::active_packet_count,
+        )
     }
 
     fn submit_decode_packet(&mut self, packet: frame::DecodeWorkPacket) -> Result<()> {
@@ -551,6 +557,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             total_pcm_frames += block_size;
             self.discovered_input_frames += 1;
             self.discovered_sample_number += u64::from(parsed.block_size);
+            #[cfg(feature = "progress")]
             self.record_discovered_input_bytes(parsed.bytes_consumed);
             self.pending_start = frame_end;
         }
@@ -622,10 +629,6 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
         self.spec
     }
 
-    fn input_bytes_processed(&self) -> u64 {
-        self.input_bytes_processed
-    }
-
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
         profile::begin_decode_profile_session_for_current_thread(
             self.threads.max(1),
@@ -634,7 +637,10 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
         );
         if max_frames == 0
             || (self.drained_pcm_frames >= self.spec.total_samples
-                && self.session.as_ref().is_some_and(session::StreamingDecodeSession::is_idle)
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(session::StreamingDecodeSession::is_idle)
                 && self.inflight_packets == 0
                 && self.eof)
         {
@@ -657,7 +663,10 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
 
             if self.eof
                 && self.inflight_packets == 0
-                && self.session.as_ref().is_none_or(session::StreamingDecodeSession::is_idle)
+                && self
+                    .session
+                    .as_ref()
+                    .is_none_or(session::StreamingDecodeSession::is_idle)
             {
                 break;
             }
@@ -670,12 +679,9 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             }
 
             if self.inflight_packets > 0
-                && self
-                    .session
-                    .as_ref()
-                    .is_none_or(|session| {
-                        session.ready_packet_count() == 0 && !session.has_draining_packet()
-                    })
+                && self.session.as_ref().is_none_or(|session| {
+                    session.ready_packet_count() == 0 && !session.has_draining_packet()
+                })
                 && total_pcm_frames < max_frames
             {
                 self.wait_for_ready_packet()?;
@@ -704,6 +710,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         self.stream_info
     }
 
+    #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
         self.input_bytes_processed
     }
@@ -725,7 +732,10 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         let read_elapsed = read_start.elapsed();
         self.eof = true;
         if bytes.is_empty() {
-            self.input_bytes_processed = self.frame_offset;
+            #[cfg(feature = "progress")]
+            {
+                self.input_bytes_processed = self.frame_offset;
+            }
             profile::append_decode_phase(profile_path.as_deref(), "read_to_end", read_elapsed);
             return Ok(Some((Vec::new(), 0)));
         }
@@ -734,15 +744,18 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         let frames = frame::index_frames(&bytes, 0, self.stream_info)?;
         let index_elapsed = index_start.elapsed();
         let frame_count = frames.len();
-        let mut cumulative_input_bytes = self.frame_offset;
-        self.discovered_input_byte_totals = frames
-            .iter()
-            .map(|frame| {
-                cumulative_input_bytes =
-                    cumulative_input_bytes.saturating_add(frame.bytes_consumed as u64);
-                cumulative_input_bytes
-            })
-            .collect();
+        #[cfg(feature = "progress")]
+        {
+            let mut cumulative_input_bytes = self.frame_offset;
+            self.discovered_input_byte_totals = frames
+                .iter()
+                .map(|frame| {
+                    cumulative_input_bytes =
+                        cumulative_input_bytes.saturating_add(frame.bytes_consumed as u64);
+                    cumulative_input_bytes
+                })
+                .collect();
+        }
         let total_output_samples = usize::try_from(self.spec.total_samples)
             .unwrap_or(0)
             .saturating_mul(usize::from(self.spec.channels));

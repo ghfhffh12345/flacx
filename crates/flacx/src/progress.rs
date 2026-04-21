@@ -5,6 +5,22 @@
 
 use crate::error::Result;
 
+macro_rules! emit_progress {
+    ($progress:expr, $snapshot:expr) => {{
+        #[cfg(feature = "progress")]
+        {
+            $progress.on_frame($snapshot)
+        }
+        #[cfg(not(feature = "progress"))]
+        {
+            let _ = $progress;
+            Ok::<(), crate::error::Error>(())
+        }
+    }};
+}
+
+pub(crate) use emit_progress;
+
 /// A monotonic snapshot of encode or decode progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressSnapshot {
@@ -81,5 +97,11 @@ mod tests {
 
         assert_eq!(snapshot.input_bytes_read, 4_096);
         assert_eq!(snapshot.output_bytes_written, 1_024);
+    }
+
+    #[cfg(not(feature = "progress"))]
+    #[test]
+    fn progress_types_are_not_reexported_without_progress_feature() {
+        let _ = crate::Error::Encode("no progress".into());
     }
 }
