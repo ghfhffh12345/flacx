@@ -134,12 +134,6 @@ pub trait DecodePcmStream: EncodePcmStream {
     fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
         Ok(None)
     }
-    /// Hint that the caller has finished consuming the last streamed chunk.
-    #[doc(hidden)]
-    fn release_decode_output_buffer(&mut self) {}
-    /// Finish decode-side profiling after end-to-end streaming decode success.
-    #[doc(hidden)]
-    fn finish_successful_decode_profile(&mut self) {}
 }
 
 /// Owned decode-side handoff that keeps metadata and the PCM stream together.
@@ -274,11 +268,7 @@ pub struct FlacPcmStream<R> {
     pending_start: usize,
     ordered_drain: session::OrderedDrainState,
     inflight_packets: usize,
-    resident_pcm_frames: usize,
-    handed_out_pcm_frames: usize,
     decoder_pool: Option<frame::FrameDecodeWorkerPool>,
-    profile_summary: profile::DecodeProfileSummary,
-    profile_emitted: bool,
     materialization_eligible: bool,
     eof: bool,
 }
@@ -303,15 +293,7 @@ impl<R> FlacPcmStream<R> {
             pending_start: 0,
             ordered_drain: session::OrderedDrainState::new(),
             inflight_packets: 0,
-            resident_pcm_frames: 0,
-            handed_out_pcm_frames: 0,
             decoder_pool: None,
-            profile_summary: profile::DecodeProfileSummary::new(
-                1,
-                1,
-                DECODE_PACKET_TARGET_PCM_FRAMES,
-            ),
-            profile_emitted: false,
             materialization_eligible: true,
             eof: false,
         }
@@ -330,16 +312,6 @@ impl<R> FlacPcmStream<R> {
 
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads.max(1);
-        let queue_limit = if self.threads <= 1 {
-            1
-        } else {
-            self.threads.max(1) * DECODE_SESSION_WINDOW_DEPTH
-        };
-        self.profile_summary = profile::DecodeProfileSummary::new(
-            self.threads.max(1),
-            queue_limit,
-            DECODE_PACKET_TARGET_PCM_FRAMES,
-        );
     }
 }
 
@@ -493,7 +465,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         if let Some(pool) = self.decoder_pool.as_mut() {
             pool.submit(packet)?;
             self.inflight_packets += 1;
-            self.observe_decode_residency();
+            profile::observe_inflight_packets_for_current_thread(self.active_packet_count());
             return Ok(());
         }
 
@@ -598,7 +570,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         let channels = usize::from(self.spec.channels);
         let (drained_frames, _) = self.ordered_drain.drain_into(max_frames, channels, output);
         self.drained_pcm_frames += drained_frames as u64;
-        self.handed_out_pcm_frames = self.handed_out_pcm_frames.saturating_add(drained_frames);
+        profile::hand_out_pcm_frames_for_current_thread(drained_frames);
         drained_frames
     }
 
@@ -609,39 +581,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             .map(|&block_size| usize::from(block_size))
             .sum::<usize>();
         self.ordered_drain.push_ready(packet);
-        self.resident_pcm_frames = self.resident_pcm_frames.saturating_add(pcm_frames);
-        self.observe_decode_residency();
-    }
-
-    fn release_decode_output_buffer(&mut self) {
-        self.resident_pcm_frames = self
-            .resident_pcm_frames
-            .saturating_sub(self.handed_out_pcm_frames);
-        self.handed_out_pcm_frames = 0;
-    }
-
-    fn observe_decode_residency(&mut self) {
-        self.profile_summary
-            .observe_inflight_packets(self.active_packet_count());
-        self.profile_summary
-            .observe_inflight_pcm_frames(self.resident_pcm_frames);
-    }
-
-    fn finish_successful_decode_profile(&mut self) {
-        if self.profile_emitted
-            || self.inflight_packets != 0
-            || !self.ordered_drain.is_idle()
-            || self.discovered_sample_number < self.spec.total_samples
-            || self.drained_pcm_frames < self.spec.total_samples
-            || self.resident_pcm_frames != 0
-            || self.handed_out_pcm_frames != 0
-        {
-            return;
-        }
-
-        let profile_path = profile::active_decode_profile_path();
-        profile::append_decode_session_summary(profile_path.as_deref(), &self.profile_summary);
-        self.profile_emitted = true;
+        profile::accept_ready_pcm_frames_for_current_thread(pcm_frames, self.active_packet_count());
     }
 }
 
@@ -651,7 +591,11 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
     }
 
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
-        self.release_decode_output_buffer();
+        profile::begin_decode_profile_session_for_current_thread(
+            self.threads.max(1),
+            self.active_decode_window_limit(),
+            DECODE_PACKET_TARGET_PCM_FRAMES,
+        );
         if max_frames == 0
             || (self.drained_pcm_frames >= self.spec.total_samples
                 && self.ordered_drain.is_idle()
@@ -775,14 +719,6 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         self.materialization_eligible = false;
         Ok(Some((samples, frame_count)))
     }
-
-    fn release_decode_output_buffer(&mut self) {
-        FlacPcmStream::release_decode_output_buffer(self);
-    }
-
-    fn finish_successful_decode_profile(&mut self) {
-        FlacPcmStream::finish_successful_decode_profile(self);
-    }
 }
 
 /// Parse a FLAC stream into a reusable [`FlacReader`].
@@ -819,6 +755,18 @@ mod session;
 
 pub(crate) fn set_decode_profile_path_for_current_thread(path: Option<std::path::PathBuf>) {
     profile::set_decode_profile_path_for_current_thread(path);
+}
+
+pub(crate) fn clear_decode_profile_session_for_current_thread() {
+    profile::clear_decode_profile_session_for_current_thread();
+}
+
+pub(crate) fn release_decode_output_buffer_for_current_thread() {
+    profile::release_decode_output_buffer_for_current_thread();
+}
+
+pub(crate) fn finish_successful_decode_profile_for_current_thread() {
+    profile::finish_successful_decode_profile_for_current_thread();
 }
 
 pub use metadata::inspect_flac_total_samples;

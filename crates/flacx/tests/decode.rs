@@ -213,6 +213,27 @@ fn decode_config_with_threads_clamps_to_one() {
     assert_eq!(DecodeConfig::default().with_threads(0).threads, 1);
 }
 
+#[test]
+fn decode_pcm_stream_trait_does_not_expose_profile_hooks() {
+    let source = include_str!("../src/read.rs");
+    let trait_start = source
+        .find("pub trait DecodePcmStream: EncodePcmStream {")
+        .unwrap();
+    let trait_end = source[trait_start..]
+        .find("/// Owned decode-side handoff")
+        .map(|offset| trait_start + offset)
+        .unwrap();
+    let trait_source = &source[trait_start..trait_end];
+    assert!(
+        !trait_source.contains("fn release_decode_output_buffer"),
+        "decode profiling lifecycle must remain internal to preserve the public DecodePcmStream API"
+    );
+    assert!(
+        !trait_source.contains("fn finish_successful_decode_profile"),
+        "decode profiling lifecycle must remain internal to preserve the public DecodePcmStream API"
+    );
+}
+
 #[cfg(feature = "progress")]
 #[test]
 fn decode_source_prefers_streaming_chunks_over_materialized_samples() {
