@@ -230,8 +230,8 @@ struct SampleProgress {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct ByteProgress {
-    input_bytes_processed: u64,
-    output_bytes_processed: u64,
+    input_bytes_read: u64,
+    output_bytes_written: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,13 +265,13 @@ impl CurrentFileProgress {
     fn overall_processed_bytes(&self) -> ByteProgress {
         if let Some(progress) = self.current_recompress_progress {
             ByteProgress {
-                input_bytes_processed: progress.overall_input_bytes_processed,
-                output_bytes_processed: progress.overall_output_bytes_processed,
+                input_bytes_read: progress.overall_input_bytes_read,
+                output_bytes_written: progress.overall_output_bytes_written,
             }
         } else {
             self.current_progress.map_or(ByteProgress::default(), |progress| ByteProgress {
-                input_bytes_processed: progress.input_bytes_processed,
-                output_bytes_processed: progress.output_bytes_processed,
+                input_bytes_read: progress.input_bytes_read,
+                output_bytes_written: progress.output_bytes_written,
             })
         }
     }
@@ -1694,8 +1694,8 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 ),
                 overall_bytes,
                 ByteProgress {
-                    input_bytes_processed: progress.input_bytes_processed,
-                    output_bytes_processed: progress.output_bytes_processed,
+                    input_bytes_read: progress.input_bytes_read,
+                    output_bytes_written: progress.output_bytes_written,
                 },
             )
         };
@@ -1705,8 +1705,8 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 .processed_samples
                 .min(display.overall.total_samples),
             display.overall.total_samples,
-            overall_bytes.input_bytes_processed,
-            overall_bytes.output_bytes_processed,
+            overall_bytes.input_bytes_read,
+            overall_bytes.output_bytes_written,
             batch_elapsed,
         );
         let file_estimate = display.file.map(|file| {
@@ -1717,8 +1717,8 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 .observe(
                     file.processed_samples.min(file.total_samples),
                     file.total_samples,
-                    file_bytes.input_bytes_processed,
-                    file_bytes.output_bytes_processed,
+                    file_bytes.input_bytes_read,
+                    file_bytes.output_bytes_written,
                     file_elapsed,
                 )
         });
@@ -1806,13 +1806,13 @@ impl<W: Write> BatchProgressCoordinator<W> {
             self.active_overall_processed_bytes()
         } else {
             ByteProgress {
-                input_bytes_processed: progress.overall_input_bytes_processed,
-                output_bytes_processed: progress.overall_output_bytes_processed,
+                input_bytes_read: progress.overall_input_bytes_read,
+                output_bytes_written: progress.overall_output_bytes_written,
             }
         };
         let file_bytes = ByteProgress {
-            input_bytes_processed: progress.phase_input_bytes_processed,
-            output_bytes_processed: progress.phase_output_bytes_processed,
+            input_bytes_read: progress.phase_input_bytes_read,
+            output_bytes_written: progress.phase_output_bytes_written,
         };
         let display = self.display_for_recompress_progress(filename, progress, overall_processed);
         let overall_estimate = self.overall_state.observe(
@@ -1821,8 +1821,8 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 .processed_samples
                 .min(display.overall.total_samples),
             display.overall.total_samples,
-            overall_bytes.input_bytes_processed,
-            overall_bytes.output_bytes_processed,
+            overall_bytes.input_bytes_read,
+            overall_bytes.output_bytes_written,
             batch_elapsed,
         );
         let file_estimate = display.file.map(|file| {
@@ -1833,8 +1833,8 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 .observe(
                     file.processed_samples.min(file.total_samples),
                     file.total_samples,
-                    file_bytes.input_bytes_processed,
-                    file_bytes.output_bytes_processed,
+                    file_bytes.input_bytes_read,
+                    file_bytes.output_bytes_written,
                     phase_elapsed,
                 )
         });
@@ -1871,11 +1871,11 @@ impl<W: Write> BatchProgressCoordinator<W> {
                 total_samples,
                 completed_frames: 0,
                 total_frames: 0,
-                input_bytes_processed: self
+                input_bytes_read: self
                     .active_files
                     .get(&file_id)
                     .map_or(0, |current| current.input_bytes),
-                output_bytes_processed: 0,
+                output_bytes_written: 0,
             };
             self.observe_with_elapsed_for(file_id, completed, batch_elapsed, file_elapsed)?;
         }
@@ -1898,10 +1898,10 @@ impl<W: Write> BatchProgressCoordinator<W> {
         let completed_bytes = current.overall_processed_bytes();
         self.completed_input_bytes = self
             .completed_input_bytes
-            .saturating_add(completed_bytes.input_bytes_processed);
+            .saturating_add(completed_bytes.input_bytes_read);
         self.completed_output_bytes = self
             .completed_output_bytes
-            .saturating_add(completed_bytes.output_bytes_processed);
+            .saturating_add(completed_bytes.output_bytes_written);
         if self.display_file_id == Some(file_id) {
             self.display_file_id = self.active_files.keys().next().copied();
         }
@@ -2033,8 +2033,8 @@ impl<W: Write> BatchProgressCoordinator<W> {
             total_samples: file_total_samples,
             completed_frames: 0,
             total_frames: 0,
-            input_bytes_processed: 0,
-            output_bytes_processed: 0,
+            input_bytes_read: 0,
+            output_bytes_written: 0,
         };
         {
             let current = self
@@ -2084,10 +2084,10 @@ impl<W: Write> BatchProgressCoordinator<W> {
             overall_total_samples,
             completed_frames: 0,
             total_frames: 0,
-            phase_input_bytes_processed: 0,
-            phase_output_bytes_processed: 0,
-            overall_input_bytes_processed: 0,
-            overall_output_bytes_processed: 0,
+            phase_input_bytes_read: 0,
+            phase_output_bytes_written: 0,
+            overall_input_bytes_read: 0,
+            overall_output_bytes_written: 0,
         };
         {
             let current = self
@@ -2124,18 +2124,18 @@ impl<W: Write> BatchProgressCoordinator<W> {
     fn active_overall_processed_bytes(&self) -> ByteProgress {
         self.active_files.values().fold(
             ByteProgress {
-                input_bytes_processed: self.completed_input_bytes,
-                output_bytes_processed: self.completed_output_bytes,
+                input_bytes_read: self.completed_input_bytes,
+                output_bytes_written: self.completed_output_bytes,
             },
             |processed, current| {
                 let current_bytes = current.overall_processed_bytes();
                 ByteProgress {
-                    input_bytes_processed: processed
-                        .input_bytes_processed
-                        .saturating_add(current_bytes.input_bytes_processed),
-                    output_bytes_processed: processed
-                        .output_bytes_processed
-                        .saturating_add(current_bytes.output_bytes_processed),
+                    input_bytes_read: processed
+                        .input_bytes_read
+                        .saturating_add(current_bytes.input_bytes_read),
+                    output_bytes_written: processed
+                        .output_bytes_written
+                        .saturating_add(current_bytes.output_bytes_written),
                 }
             },
         )
@@ -2329,8 +2329,8 @@ impl ProgressState {
         &mut self,
         processed_samples: u64,
         total_samples: u64,
-        input_bytes_processed: u64,
-        output_bytes_processed: u64,
+        input_bytes_read: u64,
+        output_bytes_written: u64,
         elapsed: Duration,
     ) -> ProgressEstimate {
         let processed = processed_samples.min(total_samples);
@@ -2367,13 +2367,13 @@ impl ProgressState {
 
         let remaining_samples = total_samples.saturating_sub(processed);
         let eta_seconds = remaining_samples as f64 / samples_per_second;
-        let total_bytes_processed = input_bytes_processed.saturating_add(output_bytes_processed);
+        let total_bytes = input_bytes_read.saturating_add(output_bytes_written);
 
         ProgressEstimate {
             eta: Some(Duration::from_secs_f64(eta_seconds.max(0.0))),
-            input_bytes_per_second: Some(input_bytes_processed as f64 / elapsed_seconds),
-            output_bytes_per_second: Some(output_bytes_processed as f64 / elapsed_seconds),
-            total_bytes_per_second: Some(total_bytes_processed as f64 / elapsed_seconds),
+            input_bytes_per_second: Some(input_bytes_read as f64 / elapsed_seconds),
+            output_bytes_per_second: Some(output_bytes_written as f64 / elapsed_seconds),
+            total_bytes_per_second: Some(total_bytes as f64 / elapsed_seconds),
         }
     }
 }
@@ -3083,8 +3083,8 @@ mod tests {
                     total_samples: 100,
                     completed_frames: 1,
                     total_frames: 2,
-                    input_bytes_processed: 100,
-                    output_bytes_processed: 200,
+                    input_bytes_read: 100,
+                    output_bytes_written: 200,
                 },
                 Duration::from_millis(300),
                 Duration::from_millis(300),
@@ -3168,8 +3168,8 @@ mod tests {
                     total_samples: 100,
                     completed_frames: 1,
                     total_frames: 4,
-                    input_bytes_processed: 100,
-                    output_bytes_processed: 200,
+                    input_bytes_read: 100,
+                    output_bytes_written: 200,
                 },
                 Duration::from_millis(300),
                 Duration::from_millis(300),
@@ -3182,8 +3182,8 @@ mod tests {
                     total_samples: 100,
                     completed_frames: 2,
                     total_frames: 4,
-                    input_bytes_processed: 200,
-                    output_bytes_processed: 400,
+                    input_bytes_read: 200,
+                    output_bytes_written: 400,
                 },
                 Duration::from_millis(350),
                 Duration::from_millis(350),
@@ -3214,8 +3214,8 @@ mod tests {
                     total_samples: 100,
                     completed_frames: 1,
                     total_frames: 4,
-                    input_bytes_processed: 100,
-                    output_bytes_processed: 200,
+                    input_bytes_read: 100,
+                    output_bytes_written: 200,
                 },
                 Duration::from_millis(400),
                 Duration::from_millis(400),
@@ -3249,8 +3249,8 @@ mod tests {
                     total_samples: 100,
                     completed_frames: 1,
                     total_frames: 4,
-                    input_bytes_processed: 100,
-                    output_bytes_processed: 200,
+                    input_bytes_read: 100,
+                    output_bytes_written: 200,
                 },
                 Duration::from_millis(400),
                 Duration::from_millis(400),
@@ -3268,8 +3268,8 @@ mod tests {
                     total_samples: 100,
                     completed_frames: 2,
                     total_frames: 4,
-                    input_bytes_processed: 200,
-                    output_bytes_processed: 400,
+                    input_bytes_read: 200,
+                    output_bytes_written: 400,
                 },
                 Duration::from_millis(1_450),
                 Duration::from_millis(1_450),
@@ -3323,10 +3323,10 @@ mod tests {
                 overall_total_samples: 200,
                 completed_frames: 1,
                 total_frames: 2,
-                phase_input_bytes_processed: 100,
-                phase_output_bytes_processed: 200,
-                overall_input_bytes_processed: 100,
-                overall_output_bytes_processed: 200,
+                phase_input_bytes_read: 100,
+                phase_output_bytes_written: 200,
+                overall_input_bytes_read: 100,
+                overall_output_bytes_written: 200,
             })
             .unwrap();
         progress
@@ -3338,10 +3338,10 @@ mod tests {
                 overall_total_samples: 200,
                 completed_frames: 2,
                 total_frames: 2,
-                phase_input_bytes_processed: 200,
-                phase_output_bytes_processed: 400,
-                overall_input_bytes_processed: 200,
-                overall_output_bytes_processed: 400,
+                phase_input_bytes_read: 200,
+                phase_output_bytes_written: 400,
+                overall_input_bytes_read: 200,
+                overall_output_bytes_written: 400,
             })
             .unwrap();
         assert_eq!(
@@ -3363,10 +3363,10 @@ mod tests {
                 overall_total_samples: 200,
                 completed_frames: 1,
                 total_frames: 2,
-                phase_input_bytes_processed: 50,
-                phase_output_bytes_processed: 75,
-                overall_input_bytes_processed: 250,
-                overall_output_bytes_processed: 475,
+                phase_input_bytes_read: 50,
+                phase_output_bytes_written: 75,
+                overall_input_bytes_read: 250,
+                overall_output_bytes_written: 475,
             })
             .unwrap();
 
@@ -3407,10 +3407,10 @@ mod tests {
                     overall_total_samples: 200,
                     completed_frames: 1,
                     total_frames: 2,
-                    phase_input_bytes_processed: 100,
-                    phase_output_bytes_processed: 200,
-                    overall_input_bytes_processed: 100,
-                    overall_output_bytes_processed: 200,
+                    phase_input_bytes_read: 100,
+                    phase_output_bytes_written: 200,
+                    overall_input_bytes_read: 100,
+                    overall_output_bytes_written: 200,
                 },
                 Duration::from_secs(9),
             )
@@ -3428,10 +3428,10 @@ mod tests {
                     overall_total_samples: 200,
                     completed_frames: 1,
                     total_frames: 2,
-                    phase_input_bytes_processed: 50,
-                    phase_output_bytes_processed: 75,
-                    overall_input_bytes_processed: 250,
-                    overall_output_bytes_processed: 475,
+                    phase_input_bytes_read: 50,
+                    phase_output_bytes_written: 75,
+                    overall_input_bytes_read: 250,
+                    overall_output_bytes_written: 475,
                 },
                 Duration::from_secs(9),
             )
@@ -3462,8 +3462,8 @@ mod tests {
                     total_samples: 100,
                     completed_frames: 1,
                     total_frames: 4,
-                    input_bytes_processed: 100,
-                    output_bytes_processed: 200,
+                    input_bytes_read: 100,
+                    output_bytes_written: 200,
                 },
                 Duration::from_millis(300),
                 Duration::from_millis(300),
@@ -3477,8 +3477,8 @@ mod tests {
                     total_samples: 100,
                     completed_frames: 2,
                     total_frames: 4,
-                    input_bytes_processed: 200,
-                    output_bytes_processed: 400,
+                    input_bytes_read: 200,
+                    output_bytes_written: 400,
                 },
                 Duration::from_millis(400),
                 Duration::from_millis(250),
