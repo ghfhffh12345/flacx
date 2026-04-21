@@ -460,6 +460,92 @@ fn flac_reader_stream_single_thread_chunk_decode_round_trips_full_stream() {
 }
 
 #[test]
+fn flac_reader_take_decoded_samples_materializes_before_streaming_consumption() {
+    let expected_samples = sample_fixture(1, 2_048);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &expected_samples);
+    let flac = builtin::encode_bytes(&wav).unwrap();
+
+    let reader = read_flac_reader(Cursor::new(flac)).unwrap();
+    let (_, mut stream) = reader.into_decode_source().into_parts();
+    let (samples, frame_count) = stream
+        .take_decoded_samples()
+        .unwrap()
+        .expect("small decode stream should materialize before streaming starts");
+
+    assert_eq!(samples, expected_samples);
+    assert!(frame_count > 0);
+    assert_eq!(stream.completed_input_frames(), frame_count);
+    assert_eq!(stream.read_chunk(1, &mut Vec::new()).unwrap(), 0);
+    assert_eq!(stream.take_decoded_samples().unwrap(), None);
+}
+
+#[test]
+fn flac_reader_stream_respects_requested_budget_and_drained_progress() {
+    let expected_samples = sample_fixture(1, 2_048);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &expected_samples);
+    let reader = PcmReader::new(Cursor::new(&wav)).unwrap();
+    let mut encoder = EncoderConfig::default()
+        .with_block_size(576)
+        .into_encoder(Cursor::new(Vec::new()));
+    encoder.encode_source(reader.into_source()).unwrap();
+    let flac = encoder.into_inner().into_inner();
+
+    let reader = read_flac_reader(Cursor::new(flac)).unwrap();
+    let (_, mut stream) = reader.into_decode_source().into_parts();
+    stream.set_threads(1);
+
+    let mut output = Vec::new();
+    let mut completed_input_frames = Vec::new();
+    for _ in 0..5 {
+        let output_start = output.len();
+        let frames = stream.read_chunk(128, &mut output).unwrap();
+        assert_eq!(frames, 128);
+        assert_eq!(output.len() - output_start, 128);
+        completed_input_frames.push(stream.completed_input_frames());
+    }
+
+    assert_eq!(completed_input_frames, vec![0, 0, 0, 0, 1]);
+    assert_eq!(stream.take_decoded_samples().unwrap(), None);
+
+    while stream.read_chunk(128, &mut output).unwrap() != 0 {}
+
+    assert_eq!(output, expected_samples);
+}
+
+#[test]
+fn flac_reader_stream_underfills_at_frame_boundary_and_eof_without_overfilling() {
+    let expected_samples = sample_fixture(1, 1_153);
+    let wav = pcm_wav_bytes(16, 1, 44_100, &expected_samples);
+    let reader = PcmReader::new(Cursor::new(&wav)).unwrap();
+    let mut encoder = EncoderConfig::default()
+        .with_block_size(576)
+        .into_encoder(Cursor::new(Vec::new()));
+    encoder.encode_source(reader.into_source()).unwrap();
+    let flac = encoder.into_inner().into_inner();
+
+    let reader = read_flac_reader(Cursor::new(flac)).unwrap();
+    let (_, mut stream) = reader.into_decode_source().into_parts();
+    stream.set_threads(2);
+
+    let mut output = Vec::new();
+
+    let first_samples_start = output.len();
+    let first = stream.read_chunk(700, &mut output).unwrap();
+    assert_eq!(first, 700);
+    assert_eq!(output.len() - first_samples_start, 700);
+    assert_eq!(stream.completed_input_frames(), 1);
+
+    let second_samples_start = output.len();
+    let second = stream.read_chunk(700, &mut output).unwrap();
+    assert_eq!(second, 453);
+    assert_eq!(output.len() - second_samples_start, 453);
+    assert!(stream.completed_input_frames() >= 2);
+
+    assert_eq!(stream.read_chunk(700, &mut output).unwrap(), 0);
+    assert_eq!(output, expected_samples);
+}
+
+#[test]
 fn wav_reader_exposes_spec_before_stream_consumption() {
     let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 256));
     let reader = WavReader::new(Cursor::new(&wav)).unwrap();

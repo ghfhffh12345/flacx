@@ -18,10 +18,125 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
-        mpsc,
+        mpsc::{self, Receiver, SyncSender},
     },
     thread,
 };
+
+#[derive(Debug)]
+pub(super) struct DecodeWorkPacket {
+    pub(super) start_frame_index: usize,
+    pub(super) frame_block_sizes: Vec<u16>,
+    pub(super) bytes: Arc<[u8]>,
+    pub(super) frames: Arc<[FrameIndex]>,
+}
+
+#[derive(Debug)]
+pub(super) struct DecodedWorkPacket {
+    pub(super) start_frame_index: usize,
+    pub(super) frame_block_sizes: Vec<u16>,
+    pub(super) decoded_samples: Vec<i32>,
+}
+
+impl DecodedWorkPacket {
+    pub(super) fn frame_count(&self) -> usize {
+        self.frame_block_sizes.len()
+    }
+}
+
+pub(super) enum DecodeWorkerRecv {
+    Empty,
+    Packet(Result<DecodedWorkPacket>),
+}
+
+pub(super) struct FrameDecodeWorkerPool {
+    worker_senders: Vec<SyncSender<DecodeWorkPacket>>,
+    result_receiver: Receiver<Result<DecodedWorkPacket>>,
+    worker_handles: Vec<thread::JoinHandle<()>>,
+    next_worker: usize,
+}
+
+impl FrameDecodeWorkerPool {
+    pub(super) fn new(worker_count: usize, queue_depth: usize) -> Self {
+        let queue_depth = queue_depth.max(1);
+        let (result_sender, result_receiver) = mpsc::channel::<Result<DecodedWorkPacket>>();
+        let mut worker_senders = Vec::with_capacity(worker_count);
+        let mut worker_handles = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count.max(1) {
+            let (sender, receiver) = mpsc::sync_channel::<DecodeWorkPacket>(queue_depth);
+            let result_sender = result_sender.clone();
+            worker_handles.push(thread::spawn(move || {
+                while let Ok(packet) = receiver.recv() {
+                    if result_sender.send(decode_work_packet(packet)).is_err() {
+                        return;
+                    }
+                }
+            }));
+            worker_senders.push(sender);
+        }
+
+        drop(result_sender);
+
+        Self {
+            worker_senders,
+            result_receiver,
+            worker_handles,
+            next_worker: 0,
+        }
+    }
+
+    pub(super) fn worker_count(&self) -> usize {
+        self.worker_senders.len()
+    }
+
+    pub(super) fn submit(&mut self, packet: DecodeWorkPacket) -> Result<()> {
+        let sender = &self.worker_senders[self.next_worker % self.worker_senders.len()];
+        self.next_worker = self.next_worker.wrapping_add(1);
+        sender
+            .send(packet)
+            .map_err(|_| Error::Thread("decode worker channel closed unexpectedly".into()))
+    }
+
+    pub(super) fn try_recv(&self) -> DecodeWorkerRecv {
+        match self.result_receiver.try_recv() {
+            Ok(packet) => DecodeWorkerRecv::Packet(packet),
+            Err(mpsc::TryRecvError::Empty) => DecodeWorkerRecv::Empty,
+            Err(mpsc::TryRecvError::Disconnected) => DecodeWorkerRecv::Packet(Err(Error::Thread(
+                "decode worker result channel closed unexpectedly".into(),
+            ))),
+        }
+    }
+
+    pub(super) fn recv(&self) -> Result<DecodedWorkPacket> {
+        self.result_receiver
+            .recv()
+            .map_err(|_| Error::Thread("decode worker result channel closed unexpectedly".into()))?
+    }
+}
+
+impl Drop for FrameDecodeWorkerPool {
+    fn drop(&mut self) {
+        self.worker_senders.clear();
+        for handle in self.worker_handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub(super) fn decode_work_packet(packet: DecodeWorkPacket) -> Result<DecodedWorkPacket> {
+    let mut decoded_samples = Vec::with_capacity(total_interleaved_sample_count(&packet.frames));
+    for frame in packet.frames.iter() {
+        let frame_bytes = &packet.bytes[frame.offset..frame.offset + frame.bytes_consumed];
+        decode_frame_samples_into(frame_bytes, frame, &mut decoded_samples)?;
+    }
+
+    Ok(DecodedWorkPacket {
+        start_frame_index: packet.start_frame_index,
+        frame_block_sizes: packet.frame_block_sizes,
+        decoded_samples,
+    })
+}
 
 #[allow(dead_code)]
 pub(super) fn index_frames(

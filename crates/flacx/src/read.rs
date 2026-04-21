@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     fs::OpenOptions,
     io::Write as _,
@@ -24,6 +25,12 @@ const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 #[allow(dead_code)]
 const FRAME_CHUNK_SIZE: usize = 128;
 const FLAC_READ_CHUNK_SIZE: usize = 64 * 1024;
+const DECODE_PACKET_MAX_INPUT_FRAMES: usize = 256;
+const DECODE_PACKET_TARGET_PCM_FRAMES: usize = 1 << 20;
+const DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER: usize = 2;
+const DECODE_SESSION_RESULT_BACKLOG_PER_WORKER: usize = 1;
+const DECODE_SESSION_WINDOW_DEPTH: usize =
+    DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER + DECODE_SESSION_RESULT_BACKLOG_PER_WORKER + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameHeaderNumberKind {
@@ -53,6 +60,91 @@ struct FrameChunkResult {
     start_index: usize,
     frame_count: usize,
     decoded_samples: Vec<i32>,
+}
+
+#[derive(Debug)]
+struct DrainingDecodePacket {
+    frame_block_sizes: Vec<u16>,
+    decoded_samples: Vec<i32>,
+    sample_cursor: usize,
+    drained_input_frames: usize,
+    drained_pcm_frames: usize,
+}
+
+impl DrainingDecodePacket {
+    fn new(packet: frame::DecodedWorkPacket) -> Self {
+        Self {
+            frame_block_sizes: packet.frame_block_sizes,
+            decoded_samples: packet.decoded_samples,
+            sample_cursor: 0,
+            drained_input_frames: 0,
+            drained_pcm_frames: 0,
+        }
+    }
+
+    fn drain_into(
+        &mut self,
+        max_frames: usize,
+        channels: usize,
+        output: &mut Vec<i32>,
+    ) -> (usize, usize) {
+        let available_frames = (self.decoded_samples.len() - self.sample_cursor) / channels;
+        let drained_frames = available_frames.min(max_frames);
+        if drained_frames == 0 {
+            return (0, 0);
+        }
+
+        let drained_samples = drained_frames * channels;
+        let next_cursor = self.sample_cursor + drained_samples;
+        output.extend_from_slice(&self.decoded_samples[self.sample_cursor..next_cursor]);
+        self.sample_cursor = next_cursor;
+
+        let mut completed_input_frames = 0usize;
+        let total_drained_pcm_frames = self.sample_cursor / channels;
+        while self.drained_input_frames < self.frame_block_sizes.len() {
+            let next_frame_pcm_frames =
+                usize::from(self.frame_block_sizes[self.drained_input_frames]);
+            if self.drained_pcm_frames + next_frame_pcm_frames > total_drained_pcm_frames {
+                break;
+            }
+            self.drained_pcm_frames += next_frame_pcm_frames;
+            self.drained_input_frames += 1;
+            completed_input_frames += 1;
+        }
+
+        (drained_frames, completed_input_frames)
+    }
+
+    fn is_fully_drained(&self) -> bool {
+        self.sample_cursor == self.decoded_samples.len()
+    }
+}
+
+impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlacPcmStream")
+            .field("reader", &self.reader)
+            .field("stream_info", &self.stream_info)
+            .field("spec", &self.spec)
+            .field("discovered_input_frames", &self.discovered_input_frames)
+            .field("discovered_sample_number", &self.discovered_sample_number)
+            .field("drained_input_frames", &self.drained_input_frames)
+            .field("drained_pcm_frames", &self.drained_pcm_frames)
+            .field("threads", &self.threads)
+            .field("pending_bytes_len", &self.pending_bytes.len())
+            .field("pending_start", &self.pending_start)
+            .field("ready_packet_count", &self.ready_packets.len())
+            .field(
+                "next_ready_packet_start_frame",
+                &self.next_ready_packet_start_frame,
+            )
+            .field("inflight_packets", &self.inflight_packets)
+            .field("has_draining_packet", &self.draining_packet.is_some())
+            .field("has_decoder_pool", &self.decoder_pool.is_some())
+            .field("materialization_eligible", &self.materialization_eligible)
+            .field("eof", &self.eof)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,16 +309,23 @@ impl<R: Read + Seek> FlacReader<R> {
     }
 }
 
-#[derive(Debug)]
 pub struct FlacPcmStream<R> {
     reader: R,
     stream_info: StreamInfo,
     spec: PcmSpec,
-    next_frame_index: usize,
-    next_sample_number: u64,
+    discovered_input_frames: usize,
+    discovered_sample_number: u64,
+    drained_input_frames: usize,
+    drained_pcm_frames: u64,
     threads: usize,
     pending_bytes: Vec<u8>,
     pending_start: usize,
+    ready_packets: BTreeMap<usize, frame::DecodedWorkPacket>,
+    next_ready_packet_start_frame: usize,
+    inflight_packets: usize,
+    draining_packet: Option<DrainingDecodePacket>,
+    decoder_pool: Option<frame::FrameDecodeWorkerPool>,
+    materialization_eligible: bool,
     eof: bool,
 }
 
@@ -242,11 +341,19 @@ impl<R> FlacPcmStream<R> {
             reader,
             stream_info,
             spec,
-            next_frame_index: 0,
-            next_sample_number: 0,
+            discovered_input_frames: 0,
+            discovered_sample_number: 0,
+            drained_input_frames: 0,
+            drained_pcm_frames: 0,
             threads: 1,
             pending_bytes: Vec::new(),
             pending_start: 0,
+            ready_packets: BTreeMap::new(),
+            next_ready_packet_start_frame: 0,
+            inflight_packets: 0,
+            draining_packet: None,
+            decoder_pool: None,
+            materialization_eligible: true,
             eof: false,
         }
     }
@@ -335,8 +442,8 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             match frame::scan_frame(
                 &self.pending_bytes[self.pending_start..],
                 self.stream_info,
-                self.next_frame_index as u64,
-                self.next_sample_number,
+                self.discovered_input_frames as u64,
+                self.discovered_sample_number,
             ) {
                 Ok(parsed) => return Ok(Some(parsed)),
                 Err(Error::InvalidFlac("unexpected EOF while reading frames")) if !self.eof => {}
@@ -358,20 +465,208 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         }
     }
 
-    fn consume_pending_frame_bytes(&mut self, bytes_consumed: usize) {
-        self.pending_start += bytes_consumed;
+    fn normalize_pending_bytes(&mut self) {
         if self.pending_start == self.pending_bytes.len() {
             self.pending_bytes.clear();
             self.pending_start = 0;
             return;
         }
 
-        if self.pending_start >= FLAC_READ_CHUNK_SIZE
-            && self.pending_start.saturating_mul(2) >= self.pending_bytes.len()
-        {
+        if self.pending_start != 0 {
             self.pending_bytes.drain(..self.pending_start);
             self.pending_start = 0;
         }
+    }
+
+    fn take_staged_packet_bytes(&mut self) -> Vec<u8> {
+        let packet_end = self.pending_start;
+        let remaining = self.pending_bytes.split_off(packet_end);
+        let packet_bytes = std::mem::replace(&mut self.pending_bytes, remaining);
+        self.pending_start = 0;
+        packet_bytes
+    }
+
+    fn active_decode_window_limit(&self) -> usize {
+        if self.threads <= 1 {
+            1
+        } else {
+            self.threads.max(1) * DECODE_SESSION_WINDOW_DEPTH
+        }
+    }
+
+    fn ensure_decoder_pool(&mut self) {
+        if self.threads <= 1 {
+            if self.inflight_packets == 0 {
+                self.decoder_pool = None;
+            }
+            return;
+        }
+
+        let needs_recreate = self
+            .decoder_pool
+            .as_ref()
+            .is_none_or(|pool| pool.worker_count() != self.threads);
+        let can_recreate = self.inflight_packets == 0;
+        if needs_recreate && can_recreate {
+            self.decoder_pool = Some(frame::FrameDecodeWorkerPool::new(
+                self.threads,
+                DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER,
+            ));
+        }
+    }
+
+    fn active_packet_count(&self) -> usize {
+        self.ready_packets.len()
+            + self.inflight_packets
+            + usize::from(self.draining_packet.is_some())
+    }
+
+    fn submit_decode_packet(&mut self, packet: frame::DecodeWorkPacket) -> Result<()> {
+        self.ensure_decoder_pool();
+        if let Some(pool) = self.decoder_pool.as_mut() {
+            pool.submit(packet)?;
+            self.inflight_packets += 1;
+            return Ok(());
+        }
+
+        let packet = frame::decode_work_packet(packet)?;
+        self.ready_packets.insert(packet.start_frame_index, packet);
+        Ok(())
+    }
+
+    fn stage_next_decode_packet(&mut self) -> Result<bool> {
+        self.normalize_pending_bytes();
+        let mut total_pcm_frames = 0usize;
+        let mut frame_block_sizes = Vec::new();
+        let mut frames = Vec::new();
+        let start_frame_index = self.discovered_input_frames;
+
+        while frames.len() < DECODE_PACKET_MAX_INPUT_FRAMES
+            && self.discovered_sample_number < self.spec.total_samples
+        {
+            let Some(parsed) = self.read_next_frame()? else {
+                break;
+            };
+            let block_size = usize::from(parsed.block_size);
+            if !frames.is_empty()
+                && total_pcm_frames.saturating_add(block_size) > DECODE_PACKET_TARGET_PCM_FRAMES
+            {
+                break;
+            }
+
+            let frame_start = self.pending_start;
+            let frame_end = frame_start + parsed.bytes_consumed;
+            let offset = frame_start;
+            frame_block_sizes.push(parsed.block_size);
+            frames.push(FrameIndex {
+                header_number: parsed.header_number,
+                offset,
+                header_bytes_consumed: parsed.header_bytes_consumed,
+                bytes_consumed: parsed.bytes_consumed,
+                block_size: parsed.block_size,
+                bits_per_sample: parsed.bits_per_sample,
+                assignment: parsed.assignment,
+            });
+            total_pcm_frames += block_size;
+            self.discovered_input_frames += 1;
+            self.discovered_sample_number += u64::from(parsed.block_size);
+            self.pending_start = frame_end;
+        }
+
+        if frames.is_empty() {
+            return Ok(false);
+        }
+
+        let packet_bytes = self.take_staged_packet_bytes();
+
+        self.submit_decode_packet(frame::DecodeWorkPacket {
+            start_frame_index,
+            frame_block_sizes,
+            bytes: Arc::from(packet_bytes),
+            frames: Arc::from(frames),
+        })?;
+        Ok(true)
+    }
+
+    fn fill_decode_window(&mut self) -> Result<bool> {
+        let mut staged_any = false;
+        while self.active_packet_count() < self.active_decode_window_limit() {
+            if !self.stage_next_decode_packet()? {
+                break;
+            }
+            staged_any = true;
+        }
+        Ok(staged_any)
+    }
+
+    fn collect_ready_packets(&mut self) -> Result<()> {
+        loop {
+            let recv = match self.decoder_pool.as_ref() {
+                Some(pool) => pool.try_recv(),
+                None => frame::DecodeWorkerRecv::Empty,
+            };
+
+            match recv {
+                frame::DecodeWorkerRecv::Empty => return Ok(()),
+                frame::DecodeWorkerRecv::Packet(packet) => {
+                    self.inflight_packets = self.inflight_packets.saturating_sub(1);
+                    let packet = packet?;
+                    self.ready_packets.insert(packet.start_frame_index, packet);
+                }
+            }
+        }
+    }
+
+    fn wait_for_ready_packet(&mut self) -> Result<()> {
+        let Some(pool) = self.decoder_pool.as_ref() else {
+            return Ok(());
+        };
+        self.inflight_packets = self.inflight_packets.saturating_sub(1);
+        let packet = pool.recv()?;
+        self.ready_packets.insert(packet.start_frame_index, packet);
+        Ok(())
+    }
+
+    fn activate_next_ready_packet(&mut self) -> bool {
+        if self.draining_packet.is_some() {
+            return true;
+        }
+        let Some(packet) = self
+            .ready_packets
+            .remove(&self.next_ready_packet_start_frame)
+        else {
+            return false;
+        };
+        self.next_ready_packet_start_frame += packet.frame_count();
+        self.draining_packet = Some(DrainingDecodePacket::new(packet));
+        true
+    }
+
+    fn drain_ready_output(&mut self, max_frames: usize, output: &mut Vec<i32>) -> usize {
+        if max_frames == 0 || !self.activate_next_ready_packet() {
+            return 0;
+        }
+
+        let channels = usize::from(self.spec.channels);
+        let (drained_frames, completed_input_frames, packet_finished) = {
+            let packet = self
+                .draining_packet
+                .as_mut()
+                .expect("draining packet is present after activation");
+            let (drained_frames, completed_input_frames) =
+                packet.drain_into(max_frames, channels, output);
+            (
+                drained_frames,
+                completed_input_frames,
+                packet.is_fully_drained(),
+            )
+        };
+        self.drained_pcm_frames += drained_frames as u64;
+        self.drained_input_frames += completed_input_frames;
+        if packet_finished {
+            self.draining_packet = None;
+        }
+        drained_frames
     }
 }
 
@@ -381,54 +676,59 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
     }
 
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
-        if self.next_sample_number >= self.spec.total_samples || max_frames == 0 {
+        if max_frames == 0
+            || (self.drained_pcm_frames >= self.spec.total_samples
+                && self.draining_packet.is_none()
+                && self.ready_packets.is_empty()
+                && self.inflight_packets == 0
+                && self.eof)
+        {
             return Ok(0);
         }
+        self.materialization_eligible = false;
 
         let mut total_pcm_frames = 0usize;
-        let mut batch_bytes = Vec::new();
-        let mut frames = Vec::new();
-        while total_pcm_frames < max_frames && self.next_sample_number < self.spec.total_samples {
-            let Some(parsed) = self.read_next_frame()? else {
-                break;
-            };
-            let block_size = parsed.block_size;
-            if total_pcm_frames > 0 && total_pcm_frames + usize::from(block_size) > max_frames {
+        while total_pcm_frames < max_frames {
+            total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
+            if total_pcm_frames == max_frames {
                 break;
             }
 
-            let frame_start = self.pending_start;
-            let frame_end = frame_start + parsed.bytes_consumed;
-            let offset = batch_bytes.len();
-            batch_bytes.extend_from_slice(&self.pending_bytes[frame_start..frame_end]);
-            frames.push(FrameIndex {
-                header_number: parsed.header_number,
-                offset,
-                header_bytes_consumed: parsed.header_bytes_consumed,
-                bytes_consumed: parsed.bytes_consumed,
-                block_size,
-                bits_per_sample: parsed.bits_per_sample,
-                assignment: parsed.assignment,
-            });
-            total_pcm_frames += usize::from(block_size);
-            self.next_frame_index += 1;
-            self.next_sample_number += u64::from(block_size);
-            self.consume_pending_frame_bytes(parsed.bytes_consumed);
+            self.collect_ready_packets()?;
+            total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
+            if total_pcm_frames == max_frames {
+                break;
+            }
+
+            if self.eof
+                && self.inflight_packets == 0
+                && self.draining_packet.is_none()
+                && self.ready_packets.is_empty()
+            {
+                break;
+            }
+
+            let staged_any = self.fill_decode_window()?;
+            self.collect_ready_packets()?;
+            total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
+            if total_pcm_frames == max_frames {
+                break;
+            }
+
+            if self.inflight_packets > 0
+                && self.draining_packet.is_none()
+                && self.ready_packets.is_empty()
+                && total_pcm_frames < max_frames
+            {
+                self.wait_for_ready_packet()?;
+                continue;
+            }
+
+            if !staged_any {
+                break;
+            }
         }
 
-        if frames.is_empty() {
-            return Ok(0);
-        }
-
-        let mut progress = NoProgress;
-        frame::decode_frames_parallel(
-            Arc::from(batch_bytes),
-            Arc::from(frames),
-            self.stream_info,
-            DecodeConfig::default().with_threads(self.threads),
-            &mut progress,
-            output,
-        )?;
         Ok(total_pcm_frames)
     }
 }
@@ -439,7 +739,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
     }
 
     fn completed_input_frames(&self) -> usize {
-        self.next_frame_index
+        self.drained_input_frames
     }
 
     fn stream_info(&self) -> StreamInfo {
@@ -451,7 +751,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
     }
 
     fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
-        if self.next_frame_index != 0 || self.pending_start != 0 || !self.pending_bytes.is_empty() {
+        if !self.materialization_eligible {
             return Ok(None);
         }
 
@@ -518,8 +818,11 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
                 profile_start.elapsed().as_secs_f64()
             );
         }
-        self.next_frame_index = frame_count;
-        self.next_sample_number = self.spec.total_samples;
+        self.discovered_input_frames = frame_count;
+        self.discovered_sample_number = self.spec.total_samples;
+        self.drained_input_frames = frame_count;
+        self.drained_pcm_frames = self.spec.total_samples;
+        self.materialization_eligible = false;
         Ok(Some((samples, frame_count)))
     }
 }

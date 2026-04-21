@@ -1,4 +1,6 @@
-use std::{fs, io::Cursor, sync::OnceLock, thread::available_parallelism};
+#[cfg(feature = "progress")]
+use std::sync::OnceLock;
+use std::{fs, io::Cursor, thread::available_parallelism};
 
 use flacx::builtin::{decode_bytes, decode_file};
 use flacx::{DecodeConfig, EncoderConfig, PcmContainer, level::Level};

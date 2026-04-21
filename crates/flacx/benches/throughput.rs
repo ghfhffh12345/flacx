@@ -14,7 +14,10 @@ use flacx::{
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-use support::{TestDecoder as DecodeHarness, large_streaming_decode_flac_bytes};
+use support::{
+    TestDecoder as DecodeHarness, large_streaming_decode_flac_bytes,
+    large_streaming_decode_wav_bytes,
+};
 use support::{cue_chunk, info_list_chunk, pcm_wav_bytes, sample_fixture, wav_with_chunks};
 
 fn corpus_root(relative: &str) -> PathBuf {
@@ -138,6 +141,26 @@ fn decode_large_streaming_path(c: &mut Criterion) {
     group.finish();
 }
 
+fn matched_large_streaming_encode_decode(c: &mut Criterion) {
+    let threads = shared_thread_count();
+    let wav_input = large_streaming_decode_wav_bytes();
+    let flac_input = large_streaming_decode_flac_bytes(threads);
+    let encoder_config = EncoderConfig::default().with_threads(threads);
+    let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(threads));
+    let mut group = c.benchmark_group("flacx matched throughput");
+    group.throughput(Throughput::Bytes(wav_input.len() as u64));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(10);
+    group.bench_function("matched_large_streaming_encode", |b| {
+        b.iter(|| encode_fixture_bytes(&encoder_config, &wav_input).expect("matched encode"))
+    });
+    group.throughput(Throughput::Bytes(wav_input.len() as u64));
+    group.bench_function("matched_large_streaming_decode", |b| {
+        b.iter(|| decoder.decode_bytes(&flac_input).expect("matched decode"))
+    });
+    group.finish();
+}
+
 fn recompress_streaming_verify_handoff(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let config = RecompressConfig::default().with_threads(shared_thread_count());
@@ -205,6 +228,7 @@ criterion_group!(
     builtin_bytes_recompress,
     encode_multiframe_streaming_path,
     decode_large_streaming_path,
+    matched_large_streaming_encode_decode,
     recompress_streaming_verify_handoff,
     metadata_write_path,
     decode_frame_materialization
