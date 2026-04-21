@@ -294,6 +294,11 @@ pub fn __set_encode_profile_path_for_current_thread(path: Option<std::path::Path
     encode_pipeline::set_encode_profile_path_for_current_thread(path);
 }
 
+#[doc(hidden)]
+pub fn __set_decode_profile_path_for_current_thread(path: Option<std::path::PathBuf>) {
+    read::set_decode_profile_path_for_current_thread(path);
+}
+
 #[cfg(not(feature = "progress"))]
 #[doc = r#"```compile_fail
 use flacx::EncodeProgress;

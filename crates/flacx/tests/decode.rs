@@ -1,5 +1,5 @@
 #[cfg(feature = "progress")]
-use std::sync::OnceLock;
+use std::{collections::BTreeMap, path::PathBuf, sync::OnceLock};
 use std::{fs, io::Cursor, thread::available_parallelism};
 
 use flacx::builtin::{decode_bytes, decode_file};
@@ -36,6 +36,42 @@ use support::{is_aifc_bytes, is_aiff_bytes};
 
 fn decode_thread_variants() -> [usize; 2] {
     [1, DecodeConfig::default().threads.max(2)]
+}
+
+#[cfg(feature = "progress")]
+struct DecodeProfileGuard {
+    path: PathBuf,
+}
+
+#[cfg(feature = "progress")]
+impl DecodeProfileGuard {
+    fn new() -> Self {
+        let path = unique_temp_path("decode-profile");
+        flacx::__set_decode_profile_path_for_current_thread(Some(path.clone()));
+        Self { path }
+    }
+
+    fn summary(&self) -> BTreeMap<String, usize> {
+        fs::read_to_string(&self.path)
+            .unwrap()
+            .lines()
+            .rev()
+            .find(|line| line.starts_with("event=decode_session_summary"))
+            .unwrap()
+            .split('\t')
+            .skip(1)
+            .filter_map(|field| field.split_once('='))
+            .map(|(key, value)| (key.to_string(), value.parse().unwrap()))
+            .collect()
+    }
+}
+
+#[cfg(feature = "progress")]
+impl Drop for DecodeProfileGuard {
+    fn drop(&mut self) {
+        flacx::__set_decode_profile_path_for_current_thread(None);
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn decoder_for_threads(threads: usize) -> DecodeHarness {
@@ -312,6 +348,45 @@ fn real_reader_large_decode_progress_keeps_total_frames_zero() {
     assert_eq!(
         run.progress.last().unwrap().processed_samples,
         LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn streaming_decode_session_reports_bounded_residency() {
+    let profile = DecodeProfileGuard::new();
+    let flac = large_streaming_decode_flac_bytes(2);
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut decoder = DecodeConfig::default()
+        .with_threads(2)
+        .into_decoder(&mut output);
+
+    let summary = decoder.decode_source(reader.into_decode_source()).unwrap();
+    let profile_summary = profile.summary();
+
+    assert_eq!(
+        summary.total_samples,
+        LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
+    );
+    assert_eq!(profile_summary.get("worker_count"), Some(&2));
+    assert_eq!(profile_summary.get("queue_limit"), Some(&8));
+    assert_eq!(profile_summary.get("target_pcm_frames"), Some(&(1 << 20)));
+
+    let peak_inflight_packets = *profile_summary.get("peak_inflight_packets").unwrap();
+    assert!(
+        (1..=8).contains(&peak_inflight_packets),
+        "peak inflight packets should stay within the bounded decode window: {peak_inflight_packets}"
+    );
+
+    let peak_inflight_pcm_frames = *profile_summary.get("peak_inflight_pcm_frames").unwrap();
+    assert!(
+        peak_inflight_pcm_frames >= (1 << 20),
+        "large streaming decode should stage at least one target-sized packet: {peak_inflight_pcm_frames}"
+    );
+    assert!(
+        peak_inflight_pcm_frames <= 8 * (1 << 20),
+        "peak inflight pcm frames should remain bounded by queue_limit * target_pcm_frames: {peak_inflight_pcm_frames}"
     );
 }
 

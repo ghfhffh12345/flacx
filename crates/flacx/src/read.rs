@@ -1,7 +1,4 @@
 use std::{
-    env,
-    fs::OpenOptions,
-    io::Write as _,
     io::{Read, Seek},
     sync::Arc,
     time::Instant,
@@ -77,7 +74,10 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
             .field("threads", &self.threads)
             .field("pending_bytes_len", &self.pending_bytes.len())
             .field("pending_start", &self.pending_start)
-            .field("ready_packet_count", &self.ordered_drain.ready_packet_count())
+            .field(
+                "ready_packet_count",
+                &self.ordered_drain.ready_packet_count(),
+            )
             .field(
                 "next_ready_packet_start_frame",
                 &self.ordered_drain.next_ready_packet_start_frame(),
@@ -268,7 +268,10 @@ pub struct FlacPcmStream<R> {
     pending_start: usize,
     ordered_drain: session::OrderedDrainState,
     inflight_packets: usize,
+    buffered_pcm_frames: usize,
     decoder_pool: Option<frame::FrameDecodeWorkerPool>,
+    profile_summary: profile::DecodeProfileSummary,
+    profile_emitted: bool,
     materialization_eligible: bool,
     eof: bool,
 }
@@ -293,7 +296,14 @@ impl<R> FlacPcmStream<R> {
             pending_start: 0,
             ordered_drain: session::OrderedDrainState::new(),
             inflight_packets: 0,
+            buffered_pcm_frames: 0,
             decoder_pool: None,
+            profile_summary: profile::DecodeProfileSummary::new(
+                1,
+                1,
+                DECODE_PACKET_TARGET_PCM_FRAMES,
+            ),
+            profile_emitted: false,
             materialization_eligible: true,
             eof: false,
         }
@@ -312,6 +322,16 @@ impl<R> FlacPcmStream<R> {
 
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads.max(1);
+        let queue_limit = if self.threads <= 1 {
+            1
+        } else {
+            self.threads.max(1) * DECODE_SESSION_WINDOW_DEPTH
+        };
+        self.profile_summary = profile::DecodeProfileSummary::new(
+            self.threads.max(1),
+            queue_limit,
+            DECODE_PACKET_TARGET_PCM_FRAMES,
+        );
     }
 }
 
@@ -465,11 +485,13 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         if let Some(pool) = self.decoder_pool.as_mut() {
             pool.submit(packet)?;
             self.inflight_packets += 1;
+            self.observe_decode_residency();
             return Ok(());
         }
 
         let packet = frame::decode_work_packet(packet)?;
         self.ordered_drain.push_ready(packet);
+        self.observe_decode_residency();
         Ok(())
     }
 
@@ -524,6 +546,9 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             bytes: Arc::from(packet_bytes),
             frames: Arc::from(frames),
         })?;
+        self.buffered_pcm_frames = self.buffered_pcm_frames.saturating_add(total_pcm_frames);
+        self.profile_summary
+            .observe_inflight_pcm_frames(self.buffered_pcm_frames);
         Ok(true)
     }
 
@@ -570,7 +595,30 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         let channels = usize::from(self.spec.channels);
         let (drained_frames, _) = self.ordered_drain.drain_into(max_frames, channels, output);
         self.drained_pcm_frames += drained_frames as u64;
+        self.buffered_pcm_frames = self.buffered_pcm_frames.saturating_sub(drained_frames);
         drained_frames
+    }
+
+    fn observe_decode_residency(&mut self) {
+        self.profile_summary
+            .observe_inflight_packets(self.active_packet_count());
+        self.profile_summary
+            .observe_inflight_pcm_frames(self.buffered_pcm_frames);
+    }
+
+    fn maybe_emit_decode_session_summary(&mut self) {
+        if self.profile_emitted
+            || self.inflight_packets != 0
+            || !self.ordered_drain.is_idle()
+            || self.discovered_sample_number < self.spec.total_samples
+            || self.drained_pcm_frames < self.spec.total_samples
+        {
+            return;
+        }
+
+        let profile_path = profile::active_decode_profile_path();
+        profile::append_decode_session_summary(profile_path.as_deref(), &self.profile_summary);
+        self.profile_emitted = true;
     }
 }
 
@@ -586,6 +634,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
                 && self.inflight_packets == 0
                 && self.eof)
         {
+            self.maybe_emit_decode_session_summary();
             return Ok(0);
         }
         self.materialization_eligible = false;
@@ -603,10 +652,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
                 break;
             }
 
-            if self.eof
-                && self.inflight_packets == 0
-                && self.ordered_drain.is_idle()
-            {
+            if self.eof && self.inflight_packets == 0 && self.ordered_drain.is_idle() {
                 break;
             }
 
@@ -630,6 +676,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             }
         }
 
+        self.maybe_emit_decode_session_summary();
         Ok(total_pcm_frames)
     }
 }
@@ -648,7 +695,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
     }
 
     fn set_threads(&mut self, threads: usize) {
-        self.threads = threads.max(1);
+        FlacPcmStream::set_threads(self, threads);
     }
 
     fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
@@ -656,7 +703,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
             return Ok(None);
         }
 
-        let profile_path = env::var_os("FLACX_DECODE_PROFILE").map(std::path::PathBuf::from);
+        let profile_path = profile::active_decode_profile_path();
         let profile_start = Instant::now();
         let mut bytes = Vec::new();
         let read_start = Instant::now();
@@ -664,15 +711,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
         let read_elapsed = read_start.elapsed();
         self.eof = true;
         if bytes.is_empty() {
-            if let Some(path) = profile_path
-                && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
-            {
-                let _ = writeln!(
-                    file,
-                    "event=decode_phase\tphase=read_to_end\telapsed_seconds={:.9}",
-                    read_elapsed.as_secs_f64()
-                );
-            }
+            profile::append_decode_phase(profile_path.as_deref(), "read_to_end", read_elapsed);
             return Ok(Some((Vec::new(), 0)));
         }
 
@@ -695,30 +734,18 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
             &mut samples,
         )?;
         let decode_elapsed = decode_start.elapsed();
-        if let Some(path) = profile_path
-            && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
-        {
-            let _ = writeln!(
-                file,
-                "event=decode_phase\tphase=read_to_end\telapsed_seconds={:.9}",
-                read_elapsed.as_secs_f64()
-            );
-            let _ = writeln!(
-                file,
-                "event=decode_phase\tphase=index_frames\telapsed_seconds={:.9}",
-                index_elapsed.as_secs_f64()
-            );
-            let _ = writeln!(
-                file,
-                "event=decode_phase\tphase=decode_frames_parallel\telapsed_seconds={:.9}",
-                decode_elapsed.as_secs_f64()
-            );
-            let _ = writeln!(
-                file,
-                "event=decode_phase\tphase=total_take_decoded_samples\telapsed_seconds={:.9}",
-                profile_start.elapsed().as_secs_f64()
-            );
-        }
+        profile::append_decode_phase(profile_path.as_deref(), "read_to_end", read_elapsed);
+        profile::append_decode_phase(profile_path.as_deref(), "index_frames", index_elapsed);
+        profile::append_decode_phase(
+            profile_path.as_deref(),
+            "decode_frames_parallel",
+            decode_elapsed,
+        );
+        profile::append_decode_phase(
+            profile_path.as_deref(),
+            "total_take_decoded_samples",
+            profile_start.elapsed(),
+        );
         self.discovered_input_frames = frame_count;
         self.discovered_sample_number = self.spec.total_samples;
         self.ordered_drain.mark_fully_drained(frame_count);
@@ -757,7 +784,12 @@ pub fn read_flac_reader_with_options<R: Read + Seek>(
 
 mod frame;
 mod metadata;
+mod profile;
 mod session;
+
+pub(crate) fn set_decode_profile_path_for_current_thread(path: Option<std::path::PathBuf>) {
+    profile::set_decode_profile_path_for_current_thread(path);
+}
 
 pub use metadata::inspect_flac_total_samples;
 use metadata::resolve_channel_mask;
