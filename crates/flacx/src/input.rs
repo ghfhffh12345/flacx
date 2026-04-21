@@ -44,11 +44,13 @@ pub trait EncodePcmStream {
     }
 }
 
+#[cfg(feature = "progress")]
 pub(crate) struct CountedEncodePcmStream<S> {
     stream: S,
     input_bytes_processed: u64,
 }
 
+#[cfg(feature = "progress")]
 impl<S> CountedEncodePcmStream<S> {
     pub(crate) fn new(stream: S) -> Self {
         Self {
@@ -58,6 +60,20 @@ impl<S> CountedEncodePcmStream<S> {
     }
 }
 
+#[cfg(not(feature = "progress"))]
+pub(crate) type CountedEncodePcmStream<S> = S;
+
+#[cfg(feature = "progress")]
+pub(crate) fn counted_encode_pcm_stream<S>(stream: S) -> CountedEncodePcmStream<S> {
+    CountedEncodePcmStream::new(stream)
+}
+
+#[cfg(not(feature = "progress"))]
+pub(crate) fn counted_encode_pcm_stream<S>(stream: S) -> CountedEncodePcmStream<S> {
+    stream
+}
+
+#[cfg(feature = "progress")]
 impl<S: EncodePcmStream> EncodePcmStream for CountedEncodePcmStream<S> {
     fn spec(&self) -> PcmSpec {
         self.stream.spec()
@@ -150,6 +166,7 @@ impl<S: EncodePcmStream> EncodeSource<S> {
 /// Use `PcmReader` when the input family is only known at runtime. If you know
 /// the container ahead of time, prefer the more specific reader types such as
 /// [`crate::WavReader`] or [`crate::AiffReader`].
+#[derive(Debug)]
 pub enum PcmReader<R: Read + Seek> {
     Wav(crate::wav_input::WavReader<R>),
     #[cfg(feature = "aiff")]
@@ -216,17 +233,26 @@ impl<R: Read + Seek> PcmReader<R> {
         match self {
             Self::Wav(reader) => {
                 let (metadata, stream) = reader.into_session_parts();
-                (metadata, AnyPcmStream::Wav(CountedEncodePcmStream::new(stream)))
+                (
+                    metadata,
+                    AnyPcmStream::Wav(counted_encode_pcm_stream(stream)),
+                )
             }
             #[cfg(feature = "aiff")]
             Self::Aiff(reader) => {
                 let (metadata, stream) = reader.into_session_parts();
-                (metadata, AnyPcmStream::Aiff(CountedEncodePcmStream::new(stream)))
+                (
+                    metadata,
+                    AnyPcmStream::Aiff(counted_encode_pcm_stream(stream)),
+                )
             }
             #[cfg(feature = "caf")]
             Self::Caf(reader) => {
                 let (metadata, stream) = reader.into_session_parts();
-                (metadata, AnyPcmStream::Caf(CountedEncodePcmStream::new(stream)))
+                (
+                    metadata,
+                    AnyPcmStream::Caf(counted_encode_pcm_stream(stream)),
+                )
             }
         }
     }

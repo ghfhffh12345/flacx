@@ -774,6 +774,41 @@ fn resolve_pcm_container(
     }
 }
 
+#[cfg(not(feature = "wav"))]
+fn resolve_pcm_container_without_wav(requested: PcmContainer) -> Result<PcmContainer> {
+    match requested {
+        PcmContainer::Auto => {
+            #[cfg(feature = "aiff")]
+            {
+                return Ok(PcmContainer::Aiff);
+            }
+            #[cfg(all(not(feature = "aiff"), feature = "caf"))]
+            {
+                return Ok(PcmContainer::Caf);
+            }
+            #[cfg(all(not(feature = "aiff"), not(feature = "caf")))]
+            {
+                return Err(wav_feature_disabled_error());
+            }
+        }
+        PcmContainer::Wave | PcmContainer::Rf64 | PcmContainer::Wave64 => {
+            Err(wav_feature_disabled_error())
+        }
+        PcmContainer::Aiff => {
+            ensure_output_container_enabled(PcmContainer::Aiff)?;
+            Ok(PcmContainer::Aiff)
+        }
+        PcmContainer::Aifc => {
+            ensure_output_container_enabled(PcmContainer::Aifc)?;
+            Ok(PcmContainer::Aifc)
+        }
+        PcmContainer::Caf => {
+            ensure_output_container_enabled(PcmContainer::Caf)?;
+            Ok(PcmContainer::Caf)
+        }
+    }
+}
+
 fn feature_disabled_output_error(container: PcmContainer) -> Error {
     Error::UnsupportedWav(format!(
         "{} output requires the `{}` cargo feature",
@@ -1139,6 +1174,7 @@ mod tests {
         payload
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn writes_canonical_16bit_wav() {
         let spec = PcmSpec {
@@ -1162,6 +1198,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn writes_extensible_wav_for_padded_container() {
         let spec = PcmSpec {
@@ -1184,6 +1221,7 @@ mod tests {
         assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 0xFFFE);
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn metadata_wav_layout_is_fixed_and_padded() {
         let spec = PcmSpec {
@@ -1244,6 +1282,7 @@ mod tests {
         assert_eq!(padded_byte, 0);
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn metadata_output_can_omit_fxmd_while_preserving_other_chunks() {
         let spec = PcmSpec {
@@ -1293,6 +1332,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn writes_non_ordinary_channel_masks_in_extensible_fmt() {
         let spec = PcmSpec {
@@ -1319,6 +1359,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn writes_zero_channel_mask_in_extensible_fmt() {
         let spec = PcmSpec {

@@ -1374,6 +1374,7 @@ mod tests {
         assert_eq!(parsed.samples, vec![0, 1, 2, 3]);
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn read_wav_for_encode_captures_info_and_cue_metadata() {
         let wav = with_chunks(
@@ -1391,6 +1392,7 @@ mod tests {
         assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn ignores_malformed_metadata_chunks_without_rejecting_audio() {
         let mut malformed_list = b"INFO".to_vec();
@@ -1412,6 +1414,7 @@ mod tests {
         assert_eq!(parsed.wav.samples, vec![0, 1, 2, 3]);
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn read_wav_for_encode_leniently_ignores_invalid_fxmd_chunks() {
         let wav = with_chunks(
@@ -1433,6 +1436,7 @@ mod tests {
         assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn read_wav_for_encode_can_ignore_fxmd_chunks_entirely() {
         let wav = with_chunks(
@@ -1456,6 +1460,7 @@ mod tests {
         assert!(matches!(&blocks[1], FlacMetadataBlock::CueSheet(_)));
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn read_wav_for_encode_rejects_unsupported_fxmd_header_flags_by_default() {
         let wav = with_chunks(
@@ -1478,6 +1483,7 @@ mod tests {
         assert!(error.to_string().contains("flags are unsupported"));
     }
 
+    #[cfg(feature = "wav")]
     #[test]
     fn read_wav_for_encode_leniently_ignores_unsupported_fxmd_header_flags() {
         let wav = with_chunks(

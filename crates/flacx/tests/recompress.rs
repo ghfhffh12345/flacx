@@ -1,3 +1,5 @@
+#![cfg(feature = "wav")]
+
 use std::{fs, io::Cursor};
 
 #[cfg(feature = "progress")]
@@ -119,8 +121,9 @@ impl DecodePcmStream for StreamingOnlyRecompressStream {
     }
 
     fn input_bytes_processed(&self) -> u64 {
+        let total_input_bytes_read = self.total_input_bytes;
         if self.cursor == self.samples.len() {
-            self.total_input_bytes
+            total_input_bytes_read
         } else {
             0
         }
@@ -387,7 +390,7 @@ fn recompress_session_avoids_buffered_encode_handoff() {
     assert!(source.contains("into_verified_pcm_stream()?"));
     assert!(source.contains("into_encode_parts()"));
     assert!(source.contains("BufferedRecompressPcmStream"));
-    assert!(source.contains("CountedEncodePcmStream::new"));
+    assert!(source.contains("counted_encode_pcm_stream"));
     assert!(!source.contains("encode_buffered_pcm_with_sink"));
 }
 
@@ -539,17 +542,11 @@ fn recompress_progress_reports_exact_phase_and_overall_output_bytes() {
     let recompressed = recompressor.into_inner().into_inner();
     let last = updates.last().unwrap();
     assert_eq!(
-        last.phase_input_bytes_processed,
+        last.phase_input_bytes_read,
         wav_data_bytes(&wav).len() as u64
     );
-    assert_eq!(
-        last.phase_output_bytes_processed,
-        recompressed.len() as u64
-    );
-    assert_eq!(
-        last.overall_output_bytes_processed,
-        wav_data_bytes(&wav).len() as u64 + recompressed.len() as u64
-    );
+    assert_eq!(last.phase_output_bytes_written, recompressed.len() as u64);
+    assert_eq!(last.overall_output_bytes_written, recompressed.len() as u64);
 }
 
 #[cfg(feature = "progress")]
@@ -572,7 +569,7 @@ fn recompress_progress_reports_exact_overall_input_bytes_across_decode_and_encod
 
     let last = updates.last().unwrap();
     assert_eq!(
-        last.overall_input_bytes_processed,
+        last.overall_input_bytes_read,
         flac.len() as u64 + wav_data_bytes(&wav).len() as u64
     );
 }

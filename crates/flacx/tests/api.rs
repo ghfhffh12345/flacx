@@ -69,6 +69,7 @@ fn flac_frame_offset(bytes: &[u8]) -> u64 {
     }
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn builtin_encode_bytes_matches_explicit_reader_session_flow() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
@@ -83,6 +84,7 @@ fn builtin_encode_bytes_matches_explicit_reader_session_flow() {
     assert_eq!(via_builtin, via_session);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn reader_session_flow_uses_configured_options() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
@@ -106,6 +108,7 @@ fn reader_session_flow_uses_configured_options() {
     let _ = fs::remove_file(output_path);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn builtin_encode_file_matches_explicit_reader_session_output() {
     let wav = pcm_wav_bytes(16, 1, 32_000, &sample_fixture(1, 2_048));
@@ -151,8 +154,15 @@ fn recompress_public_exports_remain_stable() {
     assert!(source.contains("pub mod builtin {"));
     assert!(source.contains("recompress_bytes, recompress_file,"));
     assert!(source.contains("pub use recompress::{"));
-    assert!(source.contains("FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,"));
-    assert!(source.contains("RecompressProgress, RecompressSummary, Recompressor,"));
+    assert!(
+        source.contains(
+            "FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressSummary,"
+        )
+    );
+    assert!(source.contains("Recompressor,"));
+    assert!(source.contains(
+        "#[cfg(feature = \"progress\")]\npub use recompress::{RecompressPhase, RecompressProgress};"
+    ));
 }
 
 #[test]
@@ -293,6 +303,7 @@ fn explicit_reader_session_flow_accepts_caf_inputs() {
     assert_eq!(via_builtin, via_session);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn api_accepts_seekable_readers_and_writer_bound_sessions() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
@@ -307,6 +318,7 @@ fn api_accepts_seekable_readers_and_writer_bound_sessions() {
     assert!(output.get_ref().starts_with(b"fLaC"));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn builtin_decode_bytes_matches_default_decoder() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
@@ -323,6 +335,7 @@ fn builtin_decode_bytes_matches_default_decoder() {
     assert_eq!(format.bits_per_sample, 16);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decode_api_accepts_seekable_readers_and_returns_summary() {
     let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 3_000));
@@ -354,6 +367,7 @@ fn decode_api_accepts_seekable_readers_and_returns_summary() {
     assert_eq!(format.bits_per_sample, 24);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn explicit_recompress_reader_session_flow_preserves_audio() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_536));
@@ -380,6 +394,7 @@ fn explicit_recompress_reader_session_flow_preserves_audio() {
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn builtin_recompress_file_matches_explicit_reader_session_output() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_536));
@@ -407,6 +422,7 @@ fn builtin_recompress_file_matches_explicit_reader_session_output() {
     let _ = fs::remove_file(output_path);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn flac_reader_stream_starts_before_all_frames_are_decoded() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 16_384));
@@ -433,6 +449,7 @@ fn flac_reader_stream_starts_before_all_frames_are_decoded() {
     assert_eq!(summary.total_samples, 16_384);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn flac_reader_stream_single_thread_chunk_decode_round_trips_full_stream() {
     let expected_samples = sample_fixture(2, 16_384);
@@ -459,6 +476,7 @@ fn flac_reader_stream_single_thread_chunk_decode_round_trips_full_stream() {
     assert!(stream.completed_input_frames() > 0);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn flac_reader_take_decoded_samples_materializes_before_streaming_consumption() {
     let expected_samples = sample_fixture(1, 2_048);
@@ -479,6 +497,7 @@ fn flac_reader_take_decoded_samples_materializes_before_streaming_consumption() 
     assert_eq!(stream.take_decoded_samples().unwrap(), None);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn flac_reader_stream_respects_requested_budget_and_drained_progress() {
     let expected_samples = sample_fixture(1, 2_048);
@@ -512,6 +531,7 @@ fn flac_reader_stream_respects_requested_budget_and_drained_progress() {
     assert_eq!(output, expected_samples);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn flac_reader_stream_underfills_at_frame_boundary_and_eof_without_overfilling() {
     let expected_samples = sample_fixture(1, 1_153);
@@ -601,6 +621,7 @@ fn raw_reader_stream_appends_into_existing_output_buffer() {
     assert_eq!(&output[1..], expected_samples.as_slice());
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn explicit_reader_session_pipeline_round_trips_without_builtin_inference() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
@@ -634,6 +655,7 @@ fn explicit_reader_session_pipeline_round_trips_without_builtin_inference() {
     assert_eq!(wav_data_bytes(roundtrip.get_ref()), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn explicit_reader_session_supports_variable_block_schedule_semantics() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_352));
@@ -663,6 +685,7 @@ fn explicit_reader_session_supports_variable_block_schedule_semantics() {
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn encode_source_constructor_preserves_explicit_metadata_and_stream_composition() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
@@ -808,6 +831,7 @@ fn explicit_reader_session_progress_matches_default_output_for_variable_schedule
     );
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decode_source_constructor_preserves_explicit_metadata_and_stream_composition() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
@@ -826,6 +850,7 @@ fn decode_source_constructor_preserves_explicit_metadata_and_stream_composition(
     assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decode_source_new_with_scratch_metadata_emits_expected_container_bytes() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
@@ -882,6 +907,7 @@ fn reader_metadata_reused_via_encode_source_new_matches_reader_into_source_bytes
     assert_eq!(candidate_flac, baseline_flac);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn reader_metadata_reused_via_decode_source_new_matches_reader_into_decode_source_bytes() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
@@ -908,6 +934,7 @@ fn reader_metadata_reused_via_decode_source_new_matches_reader_into_decode_sourc
     assert_eq!(candidate_output, baseline_output);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn directly_constructed_flac_stream_matches_reader_decode_source_output() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
@@ -942,6 +969,7 @@ fn directly_constructed_flac_stream_matches_reader_decode_source_output() {
     assert_eq!(direct_output, baseline_output);
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn directly_constructed_flac_stream_matches_reader_recompress_output() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
@@ -1045,6 +1073,7 @@ fn encode_source_rejects_conflicting_metadata_channel_mask() {
     assert!(error.to_string().contains("channel mask"));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decode_source_rejects_conflicting_metadata_channel_mask() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
@@ -1064,6 +1093,7 @@ fn decode_source_rejects_conflicting_metadata_channel_mask() {
     assert!(error.to_string().contains("channel mask"));
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn recompress_source_rejects_conflicting_metadata_channel_mask() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
@@ -1193,6 +1223,7 @@ fn encoder_session_starts_before_full_payload_consumption() {
     );
 }
 
+#[cfg(feature = "wav")]
 #[test]
 fn decoder_session_starts_before_full_flac_payload_consumption() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 16_384));

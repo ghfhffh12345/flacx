@@ -10,7 +10,7 @@ use crate::{
     decode::DecodeSummary,
     error::{Error, Result},
     md5::{StreaminfoMd5, verify_streaminfo_digest},
-    progress::{ProgressSink, ProgressSnapshot},
+    progress::{ProgressSink, emit_progress},
     read::DecodePcmStream,
     stream_info::StreamInfo,
     wav_output::{
@@ -55,18 +55,22 @@ where
                 container: config.output_container,
             },
         )?;
-        progress.on_frame(ProgressSnapshot {
-            processed_samples: spec.total_samples,
-            total_samples: spec.total_samples,
-            completed_frames: frame_count,
-            total_frames: frame_count,
-            input_bytes_processed: crate::read::DecodePcmStream::input_bytes_processed(&stream),
-            output_bytes_processed: output.stream_position()?,
-        })?;
+        emit_progress!(
+            progress,
+            crate::progress::ProgressSnapshot {
+                processed_samples: spec.total_samples,
+                total_samples: spec.total_samples,
+                completed_frames: frame_count,
+                total_frames: frame_count,
+                input_bytes_read: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+                output_bytes_written: output.stream_position()?,
+            }
+        )?;
         verify_streaminfo_digest(streaminfo_md5, source_info.md5)?;
         return Ok(summary_from_stream_info(source_info, frame_count));
     }
 
+    #[cfg(feature = "progress")]
     let total_frames = stream.total_input_frames();
     let _profile_cleanup = DecodeProfileCleanupGuard;
     let mut streaminfo_md5 = StreaminfoMd5::new(spec);
@@ -92,25 +96,31 @@ where
         writer.write_samples_and_update_md5(&chunk, &mut streaminfo_md5)?;
         crate::read::release_decode_output_buffer_for_current_thread();
         processed_samples += frames as u64;
-        progress.on_frame(ProgressSnapshot {
+        emit_progress!(
+            progress,
+            crate::progress::ProgressSnapshot {
+                processed_samples,
+                total_samples: spec.total_samples,
+                completed_frames: stream.completed_input_frames(),
+                total_frames,
+                input_bytes_read: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+                output_bytes_written: writer.bytes_written(),
+            }
+        )?;
+    }
+
+    let output = writer.finish(Some(&mut streaminfo_md5))?;
+    emit_progress!(
+        progress,
+        crate::progress::ProgressSnapshot {
             processed_samples,
             total_samples: spec.total_samples,
             completed_frames: stream.completed_input_frames(),
             total_frames,
-            input_bytes_processed: crate::read::DecodePcmStream::input_bytes_processed(&stream),
-            output_bytes_processed: writer.bytes_written(),
-        })?;
-    }
-
-    let output = writer.finish(Some(&mut streaminfo_md5))?;
-    progress.on_frame(ProgressSnapshot {
-        processed_samples,
-        total_samples: spec.total_samples,
-        completed_frames: stream.completed_input_frames(),
-        total_frames,
-        input_bytes_processed: crate::read::DecodePcmStream::input_bytes_processed(&stream),
-        output_bytes_processed: output.stream_position()?,
-    })?;
+            input_bytes_read: crate::read::DecodePcmStream::input_bytes_processed(&stream),
+            output_bytes_written: output.stream_position()?,
+        }
+    )?;
     verify_streaminfo_digest(streaminfo_md5.finalize()?, source_info.md5)?;
     crate::read::finish_successful_decode_profile_for_current_thread();
     Ok(summary_from_stream_info(

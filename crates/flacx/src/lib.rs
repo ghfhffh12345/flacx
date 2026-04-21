@@ -144,7 +144,8 @@
 //! - `caf` enables CAF support
 //! - `progress` enables callback-based progress reporting via
 //!   [`ProgressSnapshot`], [`EncodeProgress`], [`DecodeProgress`], and
-//!   recompress progress helpers
+//!   recompress progress helpers with explicit input-read and output-write
+//!   counters
 //!
 //! ## Navigating the docs
 //!
@@ -224,11 +225,14 @@ pub use read::{
     FlacReaderOptions, read_flac_reader, read_flac_reader_with_options,
 };
 pub use recompress::{
-    FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,
-    RecompressProgress, RecompressSummary, Recompressor,
+    FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressSummary,
+    Recompressor,
 };
 pub use stream_info::StreamInfo;
 pub use wav_input::{WavPcmStream, WavPcmStreamBuilder, WavReader, WavReaderOptions};
+
+#[cfg(feature = "progress")]
+pub use recompress::{RecompressPhase, RecompressProgress};
 
 /// Inspect a supported PCM-container stream and return its total sample count without decoding it.
 ///
@@ -274,13 +278,15 @@ pub mod core {
         DecodeBuilder, DecodeConfig, DecodePcmStream, DecodeSource, DecodeSummary, Decoder,
         EncodePcmStream, EncodeSource, EncodeSummary, Encoder, EncoderBuilder, EncoderConfig,
         FlacPcmStream, FlacPcmStreamBuilder, FlacReader, FlacReaderOptions, Metadata, PcmContainer,
-        PcmReader, PcmStream, PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor, RawPcmReader,
-        RawPcmStream, RecompressBuilder, RecompressConfig, RecompressMode, RecompressPhase,
-        RecompressProgress, Recompressor, StreamInfo, inspect_pcm_total_samples,
-        inspect_raw_pcm_total_samples, read_flac_reader, read_flac_reader_with_options,
-        write_pcm_stream,
+        PcmReader, PcmStream, PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream,
+        RecompressBuilder, RecompressConfig, RecompressMode, Recompressor, StreamInfo,
+        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, read_flac_reader,
+        read_flac_reader_with_options, write_pcm_stream,
     };
     pub use crate::{WavPcmStream, WavPcmStreamBuilder, WavReader, WavReaderOptions};
+
+    #[cfg(feature = "progress")]
+    pub use crate::{RecompressPhase, RecompressProgress};
 
     #[cfg(feature = "progress")]
     pub use crate::{DecodeProgress, EncodeProgress, ProgressSnapshot};

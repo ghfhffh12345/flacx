@@ -5,7 +5,24 @@
 
 use crate::error::Result;
 
+macro_rules! emit_progress {
+    ($progress:expr, $snapshot:expr) => {{
+        #[cfg(feature = "progress")]
+        {
+            $progress.on_frame($snapshot)
+        }
+        #[cfg(not(feature = "progress"))]
+        {
+            let _ = $progress;
+            Ok::<(), crate::error::Error>(())
+        }
+    }};
+}
+
+pub(crate) use emit_progress;
+
 /// A monotonic snapshot of encode or decode progress.
+#[cfg(feature = "progress")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressSnapshot {
     /// Samples processed so far.
@@ -16,10 +33,27 @@ pub struct ProgressSnapshot {
     pub completed_frames: usize,
     /// Total frames planned for the current input.
     pub total_frames: usize,
-    /// Input bytes processed so far.
-    pub input_bytes_processed: u64,
-    /// Output bytes processed so far.
-    pub output_bytes_processed: u64,
+    /// Input bytes read so far.
+    pub input_bytes_read: u64,
+    /// Output bytes written so far.
+    pub output_bytes_written: u64,
+}
+
+#[cfg(not(feature = "progress"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProgressSnapshot {
+    /// Samples processed so far.
+    pub processed_samples: u64,
+    /// Total samples expected for the current input.
+    pub total_samples: u64,
+    /// Frames completed so far.
+    pub completed_frames: usize,
+    /// Total frames planned for the current input.
+    pub total_frames: usize,
+    /// Input bytes read so far.
+    pub input_bytes_read: u64,
+    /// Output bytes written so far.
+    pub output_bytes_written: u64,
 }
 
 #[cfg(feature = "progress")]
@@ -69,17 +103,23 @@ mod tests {
     use super::ProgressSnapshot;
 
     #[test]
-    fn progress_snapshot_carries_input_and_output_bytes() {
+    fn progress_snapshot_carries_input_bytes_read_and_output_bytes_written() {
         let snapshot = ProgressSnapshot {
             processed_samples: 128,
             total_samples: 256,
             completed_frames: 2,
             total_frames: 4,
-            input_bytes_processed: 4_096,
-            output_bytes_processed: 1_024,
+            input_bytes_read: 4_096,
+            output_bytes_written: 1_024,
         };
 
-        assert_eq!(snapshot.input_bytes_processed, 4_096);
-        assert_eq!(snapshot.output_bytes_processed, 1_024);
+        assert_eq!(snapshot.input_bytes_read, 4_096);
+        assert_eq!(snapshot.output_bytes_written, 1_024);
+    }
+
+    #[cfg(not(feature = "progress"))]
+    #[test]
+    fn progress_types_are_not_reexported_without_progress_feature() {
+        let _ = crate::Error::Encode("no progress".into());
     }
 }

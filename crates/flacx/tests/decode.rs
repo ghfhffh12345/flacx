@@ -1,3 +1,5 @@
+#![cfg(feature = "wav")]
+
 #[cfg(feature = "progress")]
 use std::{collections::BTreeMap, path::PathBuf, sync::OnceLock};
 use std::{fs, io::Cursor, sync::mpsc, thread, thread::available_parallelism, time::Duration};
@@ -317,8 +319,8 @@ fn decode_progress_reports_exact_input_and_output_bytes() {
         .unwrap();
 
     let last = progress_updates.last().unwrap();
-    assert_eq!(last.input_bytes_processed, flac.len() as u64);
-    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+    assert_eq!(last.input_bytes_read, flac.len() as u64);
+    assert_eq!(last.output_bytes_written, output.get_ref().len() as u64);
 }
 
 #[cfg(all(feature = "progress", feature = "aiff", feature = "caf"))]
@@ -344,7 +346,7 @@ fn decode_progress_reports_exact_output_bytes_for_aiff_aifc_and_caf() {
 
         let last = progress_updates.last().unwrap();
         assert_eq!(
-            last.output_bytes_processed,
+            last.output_bytes_written,
             output.get_ref().len() as u64,
             "container={container:?}"
         );
@@ -391,7 +393,7 @@ fn streamed_decode_progress_reports_post_finish_aiff_padding_bytes() {
         "AIFF output should include container overhead and final padding"
     );
     let last = progress_updates.last().unwrap();
-    assert_eq!(last.output_bytes_processed, output.get_ref().len() as u64);
+    assert_eq!(last.output_bytes_written, output.get_ref().len() as u64);
 }
 
 #[cfg(feature = "progress")]
@@ -569,7 +571,10 @@ fn large_streaming_decode_uses_background_session_and_matches_single_thread_outp
     let single_threaded = decode_bytes_with_threads(&flac, 1);
     let multi_threaded = decode_bytes_with_threads(&flac, threads);
 
-    assert_eq!(wav_data_bytes(&single_threaded), wav_data_bytes(&multi_threaded));
+    assert_eq!(
+        wav_data_bytes(&single_threaded),
+        wav_data_bytes(&multi_threaded)
+    );
 }
 
 #[cfg(feature = "progress")]
@@ -587,8 +592,8 @@ fn matched_large_streaming_decode_stays_bit_exact_across_thread_counts() {
 fn streaming_decode_source_error_cancels_background_session_without_deadlock() {
     let flac = truncate_bytes(&large_streaming_decode_flac_bytes(4), 4096);
 
-    let error = run_decode_with_timeout(move || decoder_for_threads(4).decode_bytes(&flac))
-        .unwrap_err();
+    let error =
+        run_decode_with_timeout(move || decoder_for_threads(4).decode_bytes(&flac)).unwrap_err();
 
     assert!(
         error.to_string().contains("invalid flac") || error.to_string().contains("decode error"),
