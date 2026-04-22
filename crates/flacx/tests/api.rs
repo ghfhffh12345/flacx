@@ -152,8 +152,7 @@ fn builtin_convenience_no_longer_uses_legacy_helpers() {
 fn recompress_public_exports_remain_stable() {
     let source = include_str!("../src/lib.rs");
     assert!(source.contains("pub mod builtin {"));
-    assert!(source.contains("recompress_bytes,"));
-    assert!(source.contains("recompress_file,"));
+    assert!(source.contains("recompress_bytes, recompress_file,"));
     assert!(source.contains("pub use recompress::{"));
     assert!(
         source.contains(

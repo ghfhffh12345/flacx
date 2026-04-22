@@ -347,10 +347,10 @@ pub fn read_wav<R: Read + Seek>(reader: R) -> Result<PcmStream> {
 /// # Example
 ///
 /// ```no_run
-/// use flacx::inspect_wav_total_samples;
+/// use flacx::inspect_pcm_total_samples;
 /// use std::fs::File;
 ///
-/// let total_samples = inspect_wav_total_samples(File::open("input.wav").unwrap()).unwrap();
+/// let total_samples = inspect_pcm_total_samples(File::open("input.wav").unwrap()).unwrap();
 /// assert!(total_samples > 0);
 /// ```
 pub fn inspect_wav_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64> {
