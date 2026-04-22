@@ -1191,7 +1191,9 @@ fn encode_command_rejects_invalid_wav_input() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid wav") || stderr.contains("unsupported wav"));
+    assert!(
+        stderr.contains("invalid pcm container") || stderr.contains("unsupported pcm container")
+    );
 
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
