@@ -156,7 +156,7 @@ fn matched_large_streaming_encode_decode(c: &mut Criterion) {
     for decode_threads in decode_thread_variants() {
         let flac_input = large_streaming_decode_flac_bytes(decode_threads);
         let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(decode_threads));
-        group.throughput(Throughput::Bytes(flac_input.len() as u64));
+        group.throughput(Throughput::Bytes(wav_input.len() as u64));
         group.bench_function(
             format!("matched_large_streaming_decode_threads_{decode_threads}"),
             |b| b.iter(|| decoder.decode_bytes(&flac_input).expect("matched decode")),
