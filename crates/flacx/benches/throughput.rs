@@ -368,8 +368,8 @@ fn run_decode_corpus(corpus: &Corpus, threads: usize) -> Result<(), Box<dyn std:
             let reader = read_flac_reader_with_options(
                 Cursor::new(&input.bytes),
                 FlacReaderOptions {
-                    strict_seektable_validation: config.strict_seektable_validation,
-                    strict_channel_mask_provenance: config.strict_channel_mask_provenance,
+                    strict_seektable_validation: config.strict_seektable_validation(),
+                    strict_channel_mask_provenance: config.strict_channel_mask_provenance(),
                 },
             )?;
             let mut decoder = config.into_decoder(File::create(&output)?);
@@ -428,8 +428,8 @@ fn encode_fixture_file(
     let reader = WavReader::with_reader_options(
         File::open(input)?,
         WavReaderOptions {
-            capture_fxmd: config.capture_fxmd,
-            strict_fxmd_validation: config.strict_fxmd_validation,
+            capture_fxmd: config.capture_fxmd(),
+            strict_fxmd_validation: config.strict_fxmd_validation(),
         },
     )?;
     let mut encoder = config.clone().into_encoder(File::create(output)?);
@@ -444,8 +444,8 @@ fn encode_fixture_bytes(
     let reader = WavReader::with_reader_options(
         Cursor::new(input),
         WavReaderOptions {
-            capture_fxmd: config.capture_fxmd,
-            strict_fxmd_validation: config.strict_fxmd_validation,
+            capture_fxmd: config.capture_fxmd(),
+            strict_fxmd_validation: config.strict_fxmd_validation(),
         },
     )?;
     let mut encoder = config.clone().into_encoder(Cursor::new(Vec::new()));
@@ -565,8 +565,8 @@ fn recompress_reader_options(config: RecompressConfig) -> FlacReaderOptions {
 }
 
 fn shared_thread_count() -> usize {
-    let encode_threads = EncoderConfig::default().threads.max(1);
-    let decode_threads = DecodeConfig::default().threads.max(1);
+    let encode_threads = EncoderConfig::default().threads().max(1);
+    let decode_threads = DecodeConfig::default().threads().max(1);
     let recompress_threads = RecompressConfig::default().threads().max(1);
     assert_eq!(
         encode_threads, decode_threads,

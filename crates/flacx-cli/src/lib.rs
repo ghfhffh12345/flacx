@@ -389,8 +389,8 @@ fn run_encode_work_item(
         }
     } else {
         let wav_reader_options = WavReaderOptions {
-            capture_fxmd: config.capture_fxmd,
-            strict_fxmd_validation: config.strict_fxmd_validation,
+            capture_fxmd: config.capture_fxmd(),
+            strict_fxmd_validation: config.strict_fxmd_validation(),
         };
         let mut encoder = config.into_encoder(create_buffered_writer(&item.output)?);
         match sender {
@@ -538,12 +538,12 @@ fn run_decode_work_item(
         )?;
     }
     let output_container =
-        decode_output_container_from_path(&item.output)?.unwrap_or(config.output_container);
+        decode_output_container_from_path(&item.output)?.unwrap_or(config.output_container());
     let reader = read_flac_reader_with_options(
         open_buffered_reader(&item.input)?,
         FlacReaderOptions {
-            strict_seektable_validation: config.strict_seektable_validation,
-            strict_channel_mask_provenance: config.strict_channel_mask_provenance,
+            strict_seektable_validation: config.strict_seektable_validation(),
+            strict_channel_mask_provenance: config.strict_channel_mask_provenance(),
         },
     )?;
     let mut decoder = config
@@ -838,7 +838,7 @@ fn plan_decode_single_file_work_item(command: &DecodeCommand) -> Result<Conversi
             }
             output.to_path_buf()
         }
-        None => input.with_extension(decode_target_extension(command.config.output_container)),
+        None => input.with_extension(decode_target_extension(command.config.output_container())),
     };
 
     Ok(ConversionWorkItem {
@@ -857,7 +857,7 @@ fn plan_decode_directory_worklist(command: &DecodeCommand) -> Result<PlannedWork
         Some(output_root) => Some(validate_output_root(CommandKind::Decode, output_root)?),
         None => None,
     };
-    let target_extension = decode_target_extension(command.config.output_container);
+    let target_extension = decode_target_extension(command.config.output_container());
 
     let mut walker = WalkDir::new(&command.input)
         .follow_links(false)
