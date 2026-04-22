@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufReader, BufWriter, Cursor, Read, Seek, Write},
+    io::{BufReader, Cursor, Read, Seek, Write},
     path::Path,
 };
 
@@ -21,8 +21,6 @@ pub use crate::{
 };
 
 const FILE_READ_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;
-const FILE_WRITE_BUFFER_CAPACITY: usize = 10 * 1024 * 1024;
-
 pub fn encode_file<P, Q>(input_path: P, output_path: Q) -> Result<EncodeSummary>
 where
     P: AsRef<Path>,
@@ -62,9 +60,7 @@ where
         open_buffered_reader(input_path)?,
         pcm_reader_options(config),
     )?;
-    let mut encoder = config
-        .clone()
-        .into_encoder(create_buffered_writer(output_path)?);
+    let mut encoder = config.clone().into_encoder(File::create(output_path)?);
     encoder.encode_source(reader.into_source())
 }
 
@@ -125,11 +121,10 @@ where
             open_buffered_reader(input_path)?,
             config.flac_reader_options(),
         )?;
-        let temp_writer = BufWriter::with_capacity(FILE_WRITE_BUFFER_CAPACITY, temp_file);
         let (mut temp_writer, summary) = recompress_reader_session_with_config_and_progress(
             config,
             reader,
-            temp_writer,
+            temp_file,
             progress,
         )?;
         temp_writer.flush()?;
@@ -262,13 +257,6 @@ fn open_buffered_reader(path: &Path) -> Result<BufReader<File>> {
     Ok(BufReader::with_capacity(
         FILE_READ_BUFFER_CAPACITY,
         File::open(path)?,
-    ))
-}
-
-fn create_buffered_writer(path: &Path) -> Result<BufWriter<File>> {
-    Ok(BufWriter::with_capacity(
-        FILE_WRITE_BUFFER_CAPACITY,
-        File::create(path)?,
     ))
 }
 

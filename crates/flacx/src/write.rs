@@ -1,4 +1,4 @@
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 
 use crate::{
     metadata::{FlacMetadataBlock, SEEKTABLE_BLOCK_TYPE, SEEKTABLE_POINT_LEN, SeekPoint},
@@ -17,10 +17,8 @@ pub(crate) use frame::{
 const MAX_METADATA_PAYLOAD_LEN: usize = 0x00ff_ffff;
 const MAX_SEEKTABLE_POINTS: usize = MAX_METADATA_PAYLOAD_LEN / SEEKTABLE_POINT_LEN;
 const STREAMINFO_LENGTH: u32 = 34;
-const FLAC_STREAM_BUFFER_CAPACITY: usize = 1024 * 1024;
-
 pub(crate) struct FlacWriter<W: Seek + Write> {
-    writer: BufWriter<W>,
+    writer: W,
     position: u64,
     stream_info: StreamInfo,
     streaminfo_offset: u64,
@@ -36,8 +34,7 @@ impl<W: Seek + Write> FlacWriter<W> {
         allow_implicit_seektable: bool,
     ) -> io::Result<Self> {
         let mut position = writer.stream_position()?;
-        let mut writer = BufWriter::with_capacity(FLAC_STREAM_BUFFER_CAPACITY, writer);
-        let write_counted = |writer: &mut BufWriter<W>, position: &mut u64, bytes: &[u8]| {
+        let write_counted = |writer: &mut W, position: &mut u64, bytes: &[u8]| {
             writer.write_all(bytes)?;
             *position = position.saturating_add(bytes.len() as u64);
             Ok::<(), io::Error>(())
@@ -146,11 +143,7 @@ impl<W: Seek + Write> FlacWriter<W> {
         self.write_all_counted(&self.stream_info.to_bytes())?;
         self.seek_counted(SeekFrom::Start(end_position))?;
         self.writer.flush()?;
-        let writer = self
-            .writer
-            .into_inner()
-            .map_err(|error| error.into_error())?;
-        Ok((writer, self.stream_info))
+        Ok((self.writer, self.stream_info))
     }
 
     fn write_all_counted(&mut self, bytes: &[u8]) -> io::Result<()> {
