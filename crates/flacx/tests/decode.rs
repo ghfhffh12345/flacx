@@ -450,6 +450,14 @@ fn large_streaming_decode_fixture_stays_above_eager_threshold() {
     );
 }
 
+#[test]
+fn decode_output_has_no_eager_threshold_or_materialized_branch() {
+    let source = include_str!("../src/decode_output.rs");
+    assert!(!source.contains("EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD"));
+    assert!(!source.contains("should_materialize_decode"));
+    assert!(!source.contains("take_decoded_samples()?"));
+}
+
 #[cfg(feature = "progress")]
 #[test]
 fn real_reader_large_decode_prefers_streaming_branch() {

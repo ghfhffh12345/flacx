@@ -555,23 +555,20 @@ fn flac_reader_stream_single_thread_chunk_decode_round_trips_full_stream() {
 
 #[cfg(feature = "wav")]
 #[test]
-fn flac_reader_take_decoded_samples_materializes_before_streaming_consumption() {
+fn flac_reader_take_decoded_samples_never_materializes() {
     let expected_samples = sample_fixture(1, 2_048);
     let wav = pcm_wav_bytes(16, 1, 44_100, &expected_samples);
     let flac = builtin::encode_bytes(&wav).unwrap();
 
     let reader = read_flac_reader(Cursor::new(flac)).unwrap();
     let (_, mut stream) = reader.into_decode_source().into_parts();
-    let (samples, frame_count) = stream
-        .take_decoded_samples()
-        .unwrap()
-        .expect("small decode stream should materialize before streaming starts");
-
-    assert_eq!(samples, expected_samples);
-    assert!(frame_count > 0);
-    assert_eq!(stream.completed_input_frames(), frame_count);
-    assert_eq!(stream.read_chunk(1, &mut Vec::new()).unwrap(), 0);
     assert_eq!(stream.take_decoded_samples().unwrap(), None);
+
+    let mut output = Vec::new();
+    while stream.read_chunk(128, &mut output).unwrap() != 0 {}
+
+    assert_eq!(output, expected_samples);
+    assert!(stream.completed_input_frames() > 0);
 }
 
 #[cfg(feature = "wav")]
