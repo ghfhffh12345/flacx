@@ -132,7 +132,7 @@ fn builtin_encode_file_matches_explicit_reader_session_output() {
 }
 
 #[test]
-fn builtin_convenience_no_longer_uses_legacy_helpers() {
+fn api_builtin_convenience_no_longer_uses_legacy_helpers() {
     let source = include_str!("../src/convenience.rs");
     assert!(!source.contains("read_wav_for_encode_with_config"));
     assert!(!source.contains("encode_buffered_input_with_sink"));
@@ -149,7 +149,7 @@ fn builtin_convenience_no_longer_uses_legacy_helpers() {
 }
 
 #[test]
-fn recompress_public_exports_remain_stable() {
+fn api_recompress_public_exports_remain_stable() {
     let source = include_str!("../src/lib.rs");
     assert!(source.contains("pub mod builtin {"));
     assert!(source.contains("recompress_bytes, recompress_file,"));
@@ -166,7 +166,7 @@ fn recompress_public_exports_remain_stable() {
 }
 
 #[test]
-fn source_api_exports_replace_split_metadata_surface() {
+fn api_source_exports_replace_split_metadata_surface() {
     let lib_source = include_str!("../src/lib.rs");
     let encoder_source = include_str!("../src/encoder.rs");
     let decode_source = include_str!("../src/decode.rs");
@@ -211,7 +211,7 @@ fn source_api_exports_replace_split_metadata_surface() {
 }
 
 #[test]
-fn direct_construction_exports_include_flac_pcm_stream_and_stream_info() {
+fn api_direct_construction_exports_include_flac_pcm_stream_and_stream_info() {
     let lib_source = include_str!("../src/lib.rs");
 
     assert!(lib_source.contains("pub use read::{"));
@@ -224,7 +224,7 @@ fn direct_construction_exports_include_flac_pcm_stream_and_stream_info() {
 }
 
 #[test]
-fn direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
+fn api_direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
     let wav_source = include_str!("../src/wav_input.rs");
     let aiff_source = include_str!("../src/aiff.rs");
     let caf_source = include_str!("../src/caf.rs");
@@ -247,6 +247,42 @@ fn direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
     assert!(
         read_source.contains("FlacPcmStream::builder") || read_source.contains("pub fn builder(")
     );
+}
+
+#[test]
+fn api_top_level_public_api_uses_pcm_inspection_naming() {
+    let lib_source = include_str!("../src/lib.rs");
+    assert!(lib_source.contains("inspect_pcm_total_samples"));
+    assert!(!lib_source.contains("pub use input::inspect_wav_total_samples;"));
+    assert!(!lib_source.contains("inspect_wav_total_samples,"));
+}
+
+#[test]
+fn api_public_error_surface_uses_pcm_container_variants() {
+    let error_source = include_str!("../src/error.rs");
+    assert!(error_source.contains("InvalidPcmContainer"));
+    assert!(error_source.contains("UnsupportedPcmContainer"));
+    assert!(!error_source.contains("InvalidWav"));
+    assert!(!error_source.contains("UnsupportedWav"));
+}
+
+#[test]
+fn api_session_level_builders_are_removed_from_public_surface() {
+    let encoder_source = include_str!("../src/encoder.rs");
+    let decoder_source = include_str!("../src/decode.rs");
+    assert!(!encoder_source.contains("pub fn builder() -> EncoderBuilder"));
+    assert!(!decoder_source.contains("pub fn builder() -> DecodeBuilder"));
+}
+
+#[test]
+fn api_config_accessors_replace_public_field_contract() {
+    let config_source = include_str!("../src/config.rs");
+    assert!(config_source.contains("pub fn level(&self) -> Level"));
+    assert!(config_source.contains("pub fn threads(&self) -> usize"));
+    assert!(config_source.contains("pub fn output_container(&self) -> PcmContainer"));
+    assert!(!config_source.contains("pub level: Level"));
+    assert!(!config_source.contains("pub threads: usize"));
+    assert!(!config_source.contains("pub output_container: PcmContainer"));
 }
 
 #[cfg(feature = "aiff")]

@@ -39,6 +39,7 @@ fn encode_rejects_aiff_family_inputs_when_feature_is_disabled() {
         aifc_pcm_bytes(*b"NONE", 16, 1, 44_100, &sample_fixture(1, 128)),
     ] {
         let error = Encoder::default().encode_bytes(&input).unwrap_err();
+        assert!(error.to_string().contains("pcm container"));
         assert!(error.to_string().contains("`aiff` cargo feature"));
     }
 }
@@ -51,6 +52,7 @@ fn pcm_reader_new_rejects_aiff_family_inputs_when_feature_is_disabled() {
         aifc_pcm_bytes(*b"NONE", 16, 1, 44_100, &sample_fixture(1, 128)),
     ] {
         let error = PcmReader::new(std::io::Cursor::new(input)).unwrap_err();
+        assert!(error.to_string().contains("pcm container"));
         assert!(error.to_string().contains("`aiff` cargo feature"));
     }
 }
@@ -60,6 +62,7 @@ fn pcm_reader_new_rejects_aiff_family_inputs_when_feature_is_disabled() {
 fn encode_rejects_caf_inputs_when_feature_is_disabled() {
     let input = caf_lpcm_bytes(16, 16, 2, 44_100, false, &sample_fixture(2, 128));
     let error = Encoder::default().encode_bytes(&input).unwrap_err();
+    assert!(error.to_string().contains("pcm container"));
     assert!(error.to_string().contains("`caf` cargo feature"));
 }
 
@@ -68,6 +71,7 @@ fn encode_rejects_caf_inputs_when_feature_is_disabled() {
 fn pcm_reader_new_rejects_caf_inputs_when_feature_is_disabled() {
     let input = caf_lpcm_bytes(16, 16, 2, 44_100, false, &sample_fixture(2, 128));
     let error = PcmReader::new(std::io::Cursor::new(input)).unwrap_err();
+    assert!(error.to_string().contains("pcm container"));
     assert!(error.to_string().contains("`caf` cargo feature"));
 }
 
@@ -80,6 +84,7 @@ fn decode_rejects_aiff_family_outputs_when_feature_is_disabled() {
         let error = DecodeHarness::new(DecodeConfig::default().with_output_container(container))
             .decode_bytes(&flac)
             .unwrap_err();
+        assert!(error.to_string().contains("pcm container"));
         assert!(error.to_string().contains("`aiff` cargo feature"));
     }
 }
@@ -93,6 +98,7 @@ fn decode_rejects_caf_output_when_feature_is_disabled() {
         DecodeHarness::new(DecodeConfig::default().with_output_container(PcmContainer::Caf))
             .decode_bytes(&flac)
             .unwrap_err();
+    assert!(error.to_string().contains("pcm container"));
     assert!(error.to_string().contains("`caf` cargo feature"));
 }
 
@@ -108,6 +114,7 @@ fn decode_file_rejects_aiff_extensions_when_feature_is_disabled() {
         let error = DecodeHarness::default()
             .decode_file(&input_path, &output_path)
             .unwrap_err();
+        assert!(error.to_string().contains("pcm container"));
         assert!(error.to_string().contains("`aiff` cargo feature"));
     }
 
@@ -125,6 +132,7 @@ fn decode_file_rejects_caf_extension_when_feature_is_disabled() {
     let error = DecodeHarness::default()
         .decode_file(&input_path, &output_path)
         .unwrap_err();
+    assert!(error.to_string().contains("pcm container"));
     assert!(error.to_string().contains("`caf` cargo feature"));
 
     let _ = std::fs::remove_file(output_path);
