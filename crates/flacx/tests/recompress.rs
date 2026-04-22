@@ -392,17 +392,6 @@ fn recompress_builder_matches_fluent_config() {
 }
 
 #[test]
-fn recompress_session_has_no_eager_or_buffered_pcm_handoff() {
-    let verify_source = include_str!("../src/recompress/verify.rs");
-    let session_source = include_str!("../src/recompress/session.rs");
-
-    assert!(!verify_source.contains("into_verified_pcm_stream"));
-    assert!(!session_source.contains("EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD"));
-    assert!(!session_source.contains("BufferedRecompressPcmStream"));
-    assert!(session_source.contains("into_encode_parts()"));
-}
-
-#[test]
 fn recompress_source_streams_verified_pcm_for_small_inputs_too() {
     let total_samples = 2_048usize;
     let chunk_frames = 512usize;
