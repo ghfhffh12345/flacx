@@ -562,7 +562,9 @@ fn flac_reader_take_decoded_samples_never_materializes() {
 
     let reader = read_flac_reader(Cursor::new(flac)).unwrap();
     let (_, mut stream) = reader.into_decode_source().into_parts();
+    assert_eq!(stream.completed_input_frames(), 0);
     assert_eq!(stream.take_decoded_samples().unwrap(), None);
+    assert_eq!(stream.completed_input_frames(), 0);
 
     let mut output = Vec::new();
     while stream.read_chunk(128, &mut output).unwrap() != 0 {}

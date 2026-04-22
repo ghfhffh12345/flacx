@@ -450,14 +450,6 @@ fn large_streaming_decode_fixture_stays_above_eager_threshold() {
     );
 }
 
-#[test]
-fn decode_output_has_no_eager_threshold_or_materialized_branch() {
-    let source = include_str!("../src/decode_output.rs");
-    assert!(!source.contains("EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD"));
-    assert!(!source.contains("should_materialize_decode"));
-    assert!(!source.contains("take_decoded_samples()?"));
-}
-
 #[cfg(feature = "progress")]
 #[test]
 fn real_reader_large_decode_prefers_streaming_branch() {
@@ -471,6 +463,36 @@ fn real_reader_large_decode_prefers_streaming_branch() {
         run.progress.len() > 1,
         "real-reader large decode should stream multiple progress updates instead of materializing eagerly"
     );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn real_reader_small_decode_streams_progress_updates() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut progress_updates = Vec::new();
+    let mut decoder = DecodeConfig::default()
+        .with_threads(1)
+        .into_decoder(&mut output);
+
+    decoder
+        .decode_source_with_progress(reader.into_decode_source(), |update| {
+            progress_updates.push(update);
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(
+        progress_updates.len() > 1,
+        "small real-reader decode should stream multiple progress updates"
+    );
+    assert!(
+        progress_updates.iter().all(|update| update.total_frames == 0),
+        "streaming progress updates should preserve total_frames=0"
+    );
+    assert_eq!(wav_data_bytes(&output.into_inner()), wav_data_bytes(&wav));
 }
 
 #[cfg(feature = "progress")]
