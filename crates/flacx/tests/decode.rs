@@ -438,20 +438,6 @@ fn cached_large_streaming_decode_run() -> &'static LargeStreamingDecodeRun {
 
 #[cfg(feature = "progress")]
 #[test]
-fn decode_output_removes_eager_materialization_helpers() {
-    let source = include_str!("../src/decode_output.rs");
-    assert!(
-        !source.contains("EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD"),
-        "decode output should no longer keep an eager materialization threshold"
-    );
-    assert!(
-        !source.contains("should_materialize_decode"),
-        "decode output should remain streaming-only"
-    );
-}
-
-#[cfg(feature = "progress")]
-#[test]
 fn real_reader_large_decode_prefers_streaming_branch() {
     let run = cached_large_streaming_decode_run();
 

@@ -4,7 +4,6 @@ use std::{
     fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 std::thread_local! {
@@ -140,17 +139,6 @@ pub(crate) fn finish_successful_decode_profile_for_current_thread() {
         return;
     }
     append_decode_session_summary(profile_path.as_deref(), &session.summary);
-}
-
-pub(crate) fn append_decode_phase(profile_path: Option<&Path>, phase: &str, elapsed: Duration) {
-    let Some(mut file) = open_profile_file(profile_path) else {
-        return;
-    };
-    let _ = writeln!(
-        file,
-        "event=decode_phase\tphase={phase}\telapsed_seconds={:.9}",
-        elapsed.as_secs_f64()
-    );
 }
 
 pub(crate) fn append_decode_session_summary(
