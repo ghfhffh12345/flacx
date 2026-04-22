@@ -13,22 +13,14 @@ use crate::{
     progress::ProgressSink,
     read::DecodePcmStream,
     stream_info::StreamInfo,
-    wav_output::{
-        StreamingPcmWriter, WavMetadataWriteOptions, ensure_output_container_enabled,
-        write_wav_with_metadata_and_md5_with_options,
-    },
+    wav_output::{StreamingPcmWriter, WavMetadataWriteOptions, ensure_output_container_enabled},
 };
 
 #[cfg(feature = "progress")]
 use crate::progress::emit_progress;
 
 static TEMP_OUTPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
-const EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD: u64 = 8 * 1024 * 1024;
 const DECODE_CHUNK_FRAME_MULTIPLIER: usize = 1_024;
-
-pub(crate) fn should_materialize_decode(total_samples: u64) -> bool {
-    total_samples <= EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD
-}
 
 pub(crate) fn decode_stream_to_container<S, W, P>(
     mut stream: S,
@@ -47,35 +39,6 @@ where
     ensure_output_container_enabled(config.output_container())?;
     let spec = stream.spec();
     let source_info = stream.stream_info();
-    if should_materialize_decode(spec.total_samples)
-        && let Some((samples, frame_count)) = stream.take_decoded_samples()?
-    {
-        let streaminfo_md5 = write_wav_with_metadata_and_md5_with_options(
-            output,
-            spec,
-            &samples,
-            &metadata,
-            WavMetadataWriteOptions {
-                emit_fxmd: config.emit_fxmd(),
-                container: config.output_container(),
-            },
-        )?;
-        #[cfg(feature = "progress")]
-        emit_progress!(
-            progress,
-            crate::progress::ProgressSnapshot {
-                processed_samples: spec.total_samples,
-                total_samples: spec.total_samples,
-                completed_frames: frame_count,
-                total_frames: frame_count,
-                input_bytes_read: crate::read::DecodePcmStream::input_bytes_processed(&stream),
-                output_bytes_written: output.stream_position()?,
-            }
-        )?;
-        verify_streaminfo_digest(streaminfo_md5, source_info.md5)?;
-        return Ok(summary_from_stream_info(source_info, frame_count));
-    }
-
     #[cfg(feature = "progress")]
     let total_frames = stream.total_input_frames();
     let _profile_cleanup = DecodeProfileCleanupGuard;

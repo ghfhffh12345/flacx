@@ -438,15 +438,15 @@ fn cached_large_streaming_decode_run() -> &'static LargeStreamingDecodeRun {
 
 #[cfg(feature = "progress")]
 #[test]
-fn large_streaming_decode_fixture_stays_above_eager_threshold() {
+fn decode_output_removes_eager_materialization_helpers() {
     let source = include_str!("../src/decode_output.rs");
     assert!(
-        source.contains("const EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD: u64 = 8 * 1024 * 1024;"),
-        "keep this guard in sync with the large streaming decode fixture"
+        !source.contains("EAGER_DECODE_TOTAL_SAMPLES_THRESHOLD"),
+        "decode output should no longer keep an eager materialization threshold"
     );
     assert!(
-        (LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64) > 8 * 1024 * 1024,
-        "large streaming decode fixture must remain above the eager materialization threshold"
+        !source.contains("should_materialize_decode"),
+        "decode output should remain streaming-only"
     );
 }
 

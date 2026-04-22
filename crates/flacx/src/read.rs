@@ -1,17 +1,14 @@
 use std::{
     io::{Read, Seek},
     sync::Arc,
-    time::Instant,
 };
 
 use crate::{
-    config::DecodeConfig,
     error::{Error, Result},
     input::{EncodePcmStream, PcmSpec},
     metadata::Metadata,
     model::ChannelAssignment,
     pcm::{is_supported_channel_mask, ordinary_channel_mask},
-    progress::NoProgress,
     stream_info::{MAX_STREAMINFO_SAMPLE_RATE, StreamInfo},
 };
 
@@ -94,7 +91,6 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
                     .is_some_and(session::StreamingDecodeSession::has_draining_packet),
             )
             .field("has_streaming_session", &self.session.is_some())
-            .field("materialization_eligible", &self.materialization_eligible)
             .field("eof", &self.eof)
             .finish()
     }
@@ -285,7 +281,6 @@ pub struct FlacPcmStream<R> {
     pending_start: usize,
     inflight_packets: usize,
     session: Option<session::StreamingDecodeSession>,
-    materialization_eligible: bool,
     eof: bool,
 }
 
@@ -318,7 +313,6 @@ impl<R> FlacPcmStream<R> {
             pending_start: 0,
             inflight_packets: 0,
             session: None,
-            materialization_eligible: true,
             eof: false,
         }
     }
@@ -502,10 +496,10 @@ impl<R: Read + Seek> FlacPcmStream<R> {
     }
 
     fn active_packet_count(&self) -> usize {
-        self.session.as_ref().map_or(
-            self.inflight_packets,
-            session::StreamingDecodeSession::active_packet_count,
-        )
+        self.session
+            .as_ref()
+            .map_or(0, session::StreamingDecodeSession::active_packet_count)
+            .saturating_add(self.inflight_packets)
     }
 
     fn submit_decode_packet(&mut self, packet: frame::DecodeWorkPacket) -> Result<()> {
@@ -651,7 +645,6 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
         {
             return Ok(0);
         }
-        self.materialization_eligible = false;
 
         let mut total_pcm_frames = 0usize;
         while total_pcm_frames < max_frames {
@@ -725,73 +718,7 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
     }
 
     fn take_decoded_samples(&mut self) -> Result<Option<(Vec<i32>, usize)>> {
-        if !self.materialization_eligible {
-            return Ok(None);
-        }
-
-        let profile_path = profile::active_decode_profile_path();
-        let profile_start = Instant::now();
-        let mut bytes = Vec::new();
-        let read_start = Instant::now();
-        self.reader.read_to_end(&mut bytes)?;
-        let read_elapsed = read_start.elapsed();
-        self.eof = true;
-        if bytes.is_empty() {
-            #[cfg(feature = "progress")]
-            {
-                self.input_bytes_processed = self.frame_offset;
-            }
-            profile::append_decode_phase(profile_path.as_deref(), "read_to_end", read_elapsed);
-            return Ok(Some((Vec::new(), 0)));
-        }
-
-        let index_start = Instant::now();
-        let frames = frame::index_frames(&bytes, 0, self.stream_info)?;
-        let index_elapsed = index_start.elapsed();
-        let frame_count = frames.len();
-        #[cfg(feature = "progress")]
-        {
-            let mut cumulative_input_bytes = self.frame_offset;
-            self.discovered_input_byte_totals = frames
-                .iter()
-                .map(|frame| {
-                    cumulative_input_bytes =
-                        cumulative_input_bytes.saturating_add(frame.bytes_consumed as u64);
-                    cumulative_input_bytes
-                })
-                .collect();
-        }
-        let total_output_samples = usize::try_from(self.spec.total_samples)
-            .unwrap_or(0)
-            .saturating_mul(usize::from(self.spec.channels));
-        let mut samples = Vec::with_capacity(total_output_samples);
-        let mut progress = NoProgress;
-        let decode_start = Instant::now();
-        frame::decode_frames_parallel(
-            Arc::from(bytes),
-            Arc::from(frames),
-            self.stream_info,
-            DecodeConfig::default().with_threads(self.threads),
-            &mut progress,
-            &mut samples,
-        )?;
-        let decode_elapsed = decode_start.elapsed();
-        profile::append_decode_phase(profile_path.as_deref(), "read_to_end", read_elapsed);
-        profile::append_decode_phase(profile_path.as_deref(), "index_frames", index_elapsed);
-        profile::append_decode_phase(
-            profile_path.as_deref(),
-            "decode_frames_parallel",
-            decode_elapsed,
-        );
-        profile::append_decode_phase(
-            profile_path.as_deref(),
-            "total_take_decoded_samples",
-            profile_start.elapsed(),
-        );
-        self.sync_completed_input_progress(frame_count);
-        self.drained_pcm_frames = self.spec.total_samples;
-        self.materialization_eligible = false;
-        Ok(Some((samples, frame_count)))
+        Ok(None)
     }
 }
 
@@ -1025,5 +952,28 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(error.to_string().contains("1..8"));
+    }
+
+    #[test]
+    fn active_decode_window_counts_inflight_packets_after_session_start() {
+        let stream_info = StreamInfo {
+            sample_rate: 44_100,
+            channels: 2,
+            bits_per_sample: 16,
+            total_samples: 4_096,
+            md5: [0; 16],
+            min_block_size: 4_096,
+            max_block_size: 4_096,
+            min_frame_size: 0,
+            max_frame_size: 0,
+        };
+        let mut stream = FlacPcmStream::builder(Cursor::new(Vec::<u8>::new()))
+            .stream_info(stream_info)
+            .build()
+            .unwrap();
+        stream.inflight_packets = 3;
+        stream.session = Some(super::session::StreamingDecodeSession::new_local());
+
+        assert_eq!(stream.active_packet_count(), 3);
     }
 }
