@@ -1,7 +1,4 @@
-use std::{
-    io::{Read, Seek},
-    sync::Arc,
-};
+use std::io::{Read, Seek};
 
 use crate::{
     error::{Error, Result},
@@ -12,7 +9,10 @@ use crate::{
     stream_info::{MAX_STREAMINFO_SAMPLE_RATE, StreamInfo},
 };
 
-use self::slab::DecodeSlabPlan;
+use self::{
+    index::{RollingIndexConfig, RollingIndexWindow},
+    slab::DecodeSlabPlan,
+};
 
 const FLAC_MAGIC: &[u8; 4] = b"fLaC";
 const STREAMINFO_BLOCK_TYPE: u8 = 0;
@@ -20,8 +20,9 @@ const FLAC_SYNC_CODE: u16 = 0b11_1111_1111_1110;
 #[allow(dead_code)]
 const FRAME_CHUNK_SIZE: usize = 128;
 const FLAC_READ_CHUNK_SIZE: usize = 64 * 1024;
-const DECODE_PACKET_MAX_INPUT_FRAMES: usize = 256;
-const DECODE_PACKET_TARGET_PCM_FRAMES: usize = 1 << 20;
+const DECODE_SLAB_MAX_INPUT_FRAMES: usize = 256;
+const DECODE_SLAB_TARGET_PCM_FRAMES: usize = 1 << 20;
+const DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK: usize = FLAC_READ_CHUNK_SIZE * 4;
 const DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER: usize = 2;
 const DECODE_SESSION_RESULT_BACKLOG_PER_WORKER: usize = 1;
 const DECODE_SESSION_WINDOW_DEPTH: usize =
@@ -281,6 +282,7 @@ pub struct FlacPcmStream<R> {
     threads: usize,
     pending_bytes: Vec<u8>,
     pending_start: usize,
+    index_window: RollingIndexWindow,
     inflight_packets: usize,
     session: Option<session::StreamingDecodeSession>,
     eof: bool,
@@ -313,6 +315,15 @@ impl<R> FlacPcmStream<R> {
             threads: 1,
             pending_bytes: Vec::new(),
             pending_start: 0,
+            index_window: RollingIndexWindow::new(
+                stream_info,
+                RollingIndexConfig {
+                    target_pcm_frames_per_slab: DECODE_SLAB_TARGET_PCM_FRAMES,
+                    max_frames_per_slab: DECODE_SLAB_MAX_INPUT_FRAMES,
+                    max_bytes_per_slab: decode_slab_max_input_bytes(stream_info),
+                    max_slabs_ahead: 1,
+                },
+            ),
             inflight_packets: 0,
             session: None,
             eof: false,
@@ -332,6 +343,8 @@ impl<R> FlacPcmStream<R> {
 
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads.max(1);
+        self.index_window
+            .set_max_slabs_ahead(self.active_decode_window_limit());
     }
 }
 
@@ -427,11 +440,15 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             .checked_sub(1)
             .and_then(|index| self.discovered_input_byte_totals.get(index).copied())
             .unwrap_or(0);
+        self.index_window
+            .retire_completed_input_frames(completed_input_frames);
     }
 
     #[cfg(not(feature = "progress"))]
     fn sync_completed_input_progress(&mut self, completed_input_frames: usize) {
         self.completed_input_frames = completed_input_frames;
+        self.index_window
+            .retire_completed_input_frames(completed_input_frames);
     }
 
     fn read_next_frame(&mut self) -> Result<Option<ParsedFrame>> {
@@ -483,18 +500,8 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         packet_bytes
     }
 
-    fn take_staged_decode_slab_plan(
-        &mut self,
-        start_frame_index: usize,
-        frame_block_sizes: Vec<u16>,
-        frames: Vec<FrameIndex>,
-    ) -> DecodeSlabPlan {
-        DecodeSlabPlan {
-            start_frame_index,
-            frame_block_sizes,
-            bytes: Arc::from(self.take_staged_packet_bytes()),
-            frames: Arc::from(frames),
-        }
+    fn seal_staged_decode_slab_plan(&mut self, plan: DecodeSlabPlan) -> DecodeSlabPlan {
+        plan.seal_bytes(self.take_staged_packet_bytes())
     }
 
     fn ensure_streaming_session(&mut self) {
@@ -537,61 +544,43 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         Ok(())
     }
 
-    fn stage_next_decode_slab(&mut self) -> Result<bool> {
+    fn read_next_slab_plan(&mut self) -> Result<Option<DecodeSlabPlan>> {
         self.normalize_pending_bytes();
-        let mut total_pcm_frames = 0usize;
-        let mut frame_block_sizes = Vec::new();
-        let mut frames = Vec::new();
-        let start_frame_index = self.discovered_input_frames;
-
-        while frames.len() < DECODE_PACKET_MAX_INPUT_FRAMES
+        while self.index_window.has_capacity()
             && self.discovered_sample_number < self.spec.total_samples
         {
             let Some(parsed) = self.read_next_frame()? else {
                 break;
             };
-            let block_size = usize::from(parsed.block_size);
-            if !frames.is_empty()
-                && total_pcm_frames.saturating_add(block_size) > DECODE_PACKET_TARGET_PCM_FRAMES
-            {
-                break;
-            }
-
             let frame_start = self.pending_start;
             let frame_end = frame_start + parsed.bytes_consumed;
-            frame_block_sizes.push(parsed.block_size);
-            frames.push(FrameIndex {
-                header_number: parsed.header_number,
-                offset: frame_start,
-                header_bytes_consumed: parsed.header_bytes_consumed,
-                bytes_consumed: parsed.bytes_consumed,
-                block_size: parsed.block_size,
-                bits_per_sample: parsed.bits_per_sample,
-                assignment: parsed.assignment,
-            });
-            total_pcm_frames += block_size;
             self.discovered_input_frames += 1;
             self.discovered_sample_number += u64::from(parsed.block_size);
             #[cfg(feature = "progress")]
             self.record_discovered_input_bytes(parsed.bytes_consumed);
             self.pending_start = frame_end;
+
+            if let Some(plan) = self.index_window.push_frame(parsed, frame_start)? {
+                return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
+            }
         }
 
-        if frames.is_empty() {
-            return Ok(false);
+        if self.discovered_sample_number >= self.spec.total_samples || self.eof {
+            if let Some(plan) = self.index_window.finish() {
+                return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
+            }
         }
 
-        let plan = self.take_staged_decode_slab_plan(start_frame_index, frame_block_sizes, frames);
-        self.submit_decode_plan(plan)?;
-        Ok(true)
+        Ok(None)
     }
 
     fn fill_decode_window(&mut self) -> Result<bool> {
         let mut staged_any = false;
         while self.active_packet_count() < self.active_decode_window_limit() {
-            if !self.stage_next_decode_slab()? {
+            let Some(plan) = self.read_next_slab_plan()? else {
                 break;
-            }
+            };
+            self.submit_decode_plan(plan)?;
             staged_any = true;
         }
         Ok(staged_any)
@@ -643,7 +632,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
         profile::begin_decode_profile_session_for_current_thread(
             self.threads.max(1),
             self.active_decode_window_limit(),
-            DECODE_PACKET_TARGET_PCM_FRAMES,
+            DECODE_SLAB_TARGET_PCM_FRAMES,
         );
         if max_frames == 0
             || (self.drained_pcm_frames >= self.spec.total_samples
@@ -733,6 +722,19 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
     }
 }
 
+fn decode_slab_max_input_bytes(stream_info: StreamInfo) -> usize {
+    let advertised_max_frame_size =
+        usize::try_from(stream_info.max_frame_size).unwrap_or(usize::MAX);
+    let derived_max_frame_size = advertised_max_frame_size
+        .checked_mul(DECODE_SLAB_MAX_INPUT_FRAMES)
+        .unwrap_or(usize::MAX);
+    if advertised_max_frame_size == 0 {
+        DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK
+    } else {
+        derived_max_frame_size.max(DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK)
+    }
+}
+
 /// Parse a FLAC stream into a reusable [`FlacReader`].
 pub fn read_flac_reader<R: Read + Seek>(reader: R) -> Result<FlacReader<R>> {
     read_flac_reader_with_options(reader, FlacReaderOptions::default())
@@ -761,6 +763,7 @@ pub fn read_flac_reader_with_options<R: Read + Seek>(
 }
 
 mod frame;
+mod index;
 mod metadata;
 mod profile;
 mod session;
@@ -990,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn take_staged_decode_slab_plan_consumes_staged_bytes_and_frame_metadata() {
+    fn seal_staged_decode_slab_plan_consumes_staged_bytes_and_frame_metadata() {
         let stream_info = StreamInfo {
             sample_rate: 44_100,
             channels: 2,
@@ -1021,8 +1024,13 @@ mod tests {
         stream.pending_bytes = vec![1, 2, 3, 4, 5];
         stream.pending_start = 3;
 
-        let plan = stream.take_staged_decode_slab_plan(7, vec![2], frames.clone());
+        let plan = stream.seal_staged_decode_slab_plan(super::slab::DecodeSlabPlan::new(
+            3,
+            7,
+            frames.clone(),
+        ));
 
+        assert_eq!(plan.sequence, 3);
         assert_eq!(plan.start_frame_index, 7);
         assert_eq!(plan.frame_block_sizes, vec![2]);
         assert_eq!(plan.bytes.as_ref(), &[1, 2, 3]);

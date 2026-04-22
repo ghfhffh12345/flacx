@@ -34,10 +34,33 @@ impl From<frame::DecodedWorkPacket> for DecodedSlab {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct DecodeSlabPlan {
+    pub(super) sequence: usize,
     pub(super) start_frame_index: usize,
     pub(super) frame_block_sizes: Vec<u16>,
     pub(super) bytes: std::sync::Arc<[u8]>,
     pub(super) frames: std::sync::Arc<[super::FrameIndex]>,
+}
+
+impl DecodeSlabPlan {
+    pub(super) fn new(
+        sequence: usize,
+        start_frame_index: usize,
+        frames: Vec<super::FrameIndex>,
+    ) -> Self {
+        let frame_block_sizes = frames.iter().map(|frame| frame.block_size).collect();
+        Self {
+            sequence,
+            start_frame_index,
+            frame_block_sizes,
+            bytes: std::sync::Arc::from(Vec::<u8>::new()),
+            frames: std::sync::Arc::from(frames),
+        }
+    }
+
+    pub(super) fn seal_bytes(mut self, bytes: Vec<u8>) -> Self {
+        self.bytes = std::sync::Arc::from(bytes);
+        self
+    }
 }
 
 impl From<DecodeSlabPlan> for frame::DecodeWorkPacket {
@@ -91,8 +114,10 @@ impl DrainingSlab {
             output.extend(std::mem::take(&mut self.decoded_samples));
             self.sample_cursor = drained_frames * channels;
 
-            let completed_input_frames =
-                self.frame_block_sizes.len().saturating_sub(self.drained_input_frames);
+            let completed_input_frames = self
+                .frame_block_sizes
+                .len()
+                .saturating_sub(self.drained_input_frames);
             self.drained_input_frames = self.frame_block_sizes.len();
             self.drained_pcm_frames = total_pcm_frames(&self.frame_block_sizes);
 
@@ -174,7 +199,11 @@ impl OrderedSlabDrain {
                     .expect("draining slab is present after activation");
                 let (drained_frames, completed_input_frames) =
                     slab.drain_into(max_frames - total_drained_frames, channels, output);
-                (drained_frames, completed_input_frames, slab.is_fully_drained())
+                (
+                    drained_frames,
+                    completed_input_frames,
+                    slab.is_fully_drained(),
+                )
             };
 
             total_drained_frames += drained_frames;
@@ -224,10 +253,7 @@ impl OrderedSlabDrain {
             return true;
         }
 
-        let Some(slab) = self
-            .ready_slabs
-            .remove(&self.next_ready_slab_start_frame)
-        else {
+        let Some(slab) = self.ready_slabs.remove(&self.next_ready_slab_start_frame) else {
             return false;
         };
 
