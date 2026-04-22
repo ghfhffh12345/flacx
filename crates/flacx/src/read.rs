@@ -1,4 +1,7 @@
-use std::io::{Read, Seek};
+use std::{
+    collections::VecDeque,
+    io::{Read, Seek},
+};
 
 use crate::{
     error::{Error, Result},
@@ -58,6 +61,12 @@ struct FrameChunkResult {
     decoded_samples: Vec<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubmittedDecodeSlab {
+    end_frame_index: usize,
+    pcm_frames: usize,
+}
+
 impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlacPcmStream")
@@ -72,26 +81,26 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
             .field("pending_bytes_len", &self.pending_bytes.len())
             .field("pending_start", &self.pending_start)
             .field(
-                "ready_packet_count",
+                "ready_slab_count",
                 &self
                     .session
                     .as_ref()
-                    .map_or(0, session::StreamingDecodeSession::ready_packet_count),
+                    .map_or(0, session::StreamingDecodeSession::ready_slab_count),
             )
             .field(
-                "next_ready_packet_start_frame",
+                "next_ready_slab_start_frame",
                 &self.session.as_ref().map_or(
                     self.completed_input_frames,
-                    session::StreamingDecodeSession::next_ready_packet_start_frame,
+                    session::StreamingDecodeSession::next_ready_slab_start_frame,
                 ),
             )
-            .field("inflight_packets", &self.inflight_packets)
+            .field("inflight_slabs", &self.inflight_slabs)
             .field(
-                "has_draining_packet",
+                "has_draining_slab",
                 &self
                     .session
                     .as_ref()
-                    .is_some_and(session::StreamingDecodeSession::has_draining_packet),
+                    .is_some_and(session::StreamingDecodeSession::has_draining_slab),
             )
             .field("has_streaming_session", &self.session.is_some())
             .field("eof", &self.eof)
@@ -283,7 +292,8 @@ pub struct FlacPcmStream<R> {
     pending_bytes: Vec<u8>,
     pending_start: usize,
     index_window: RollingIndexWindow,
-    inflight_packets: usize,
+    inflight_slabs: usize,
+    submitted_slabs: VecDeque<SubmittedDecodeSlab>,
     session: Option<session::StreamingDecodeSession>,
     eof: bool,
 }
@@ -324,7 +334,8 @@ impl<R> FlacPcmStream<R> {
                     max_slabs_ahead: 1,
                 },
             ),
-            inflight_packets: 0,
+            inflight_slabs: 0,
+            submitted_slabs: VecDeque::new(),
             session: None,
             eof: false,
         }
@@ -492,16 +503,16 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         }
     }
 
-    fn take_staged_packet_bytes(&mut self) -> Vec<u8> {
-        let packet_end = self.pending_start;
-        let remaining = self.pending_bytes.split_off(packet_end);
-        let packet_bytes = std::mem::replace(&mut self.pending_bytes, remaining);
+    fn take_staged_slab_bytes(&mut self) -> Vec<u8> {
+        let slab_end = self.pending_start;
+        let remaining = self.pending_bytes.split_off(slab_end);
+        let slab_bytes = std::mem::replace(&mut self.pending_bytes, remaining);
         self.pending_start = 0;
-        packet_bytes
+        slab_bytes
     }
 
     fn seal_staged_decode_slab_plan(&mut self, plan: DecodeSlabPlan) -> DecodeSlabPlan {
-        plan.seal_bytes(self.take_staged_packet_bytes())
+        plan.seal_bytes(self.take_staged_slab_bytes())
     }
 
     fn ensure_streaming_session(&mut self) {
@@ -518,29 +529,39 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         });
     }
 
-    fn active_packet_count(&self) -> usize {
+    fn active_slab_count(&self) -> usize {
         self.session
             .as_ref()
-            .map_or(0, session::StreamingDecodeSession::active_packet_count)
-            .saturating_add(self.inflight_packets)
+            .map_or(0, session::StreamingDecodeSession::active_slab_count)
+            .saturating_add(self.inflight_slabs)
     }
 
     fn submit_decode_plan(&mut self, plan: DecodeSlabPlan) -> Result<()> {
         self.ensure_streaming_session();
+        let submitted_slab = SubmittedDecodeSlab {
+            end_frame_index: plan.start_frame_index + plan.frame_block_sizes.len(),
+            pcm_frames: plan
+                .frame_block_sizes
+                .iter()
+                .map(|&block_size| usize::from(block_size))
+                .sum(),
+        };
         if self.threads <= 1 {
-            let packet = frame::decode_work_packet(plan.into())?;
+            let slab = frame::decode_work_slab(plan.into())?;
             self.session
                 .as_mut()
                 .expect("local streaming decode session initialized")
-                .accept_ready_packet(packet, 1);
+                .accept_ready_slab(slab.into(), 1);
+            self.submitted_slabs.push_back(submitted_slab);
             return Ok(());
         }
         self.session
             .as_ref()
             .expect("streaming decode session initialized")
             .submit(plan)?;
-        self.inflight_packets += 1;
-        profile::observe_inflight_packets_for_current_thread(self.active_packet_count());
+        self.inflight_slabs += 1;
+        self.submitted_slabs.push_back(submitted_slab);
+        profile::observe_inflight_packets_for_current_thread(self.active_slab_count());
         Ok(())
     }
 
@@ -587,7 +608,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
 
     fn fill_decode_window(&mut self) -> Result<bool> {
         let mut staged_any = false;
-        while self.active_packet_count() < self.active_decode_window_limit() {
+        while self.active_slab_count() < self.active_decode_window_limit() {
             let Some(plan) = self.read_next_slab_plan()? else {
                 break;
             };
@@ -597,27 +618,46 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         Ok(staged_any)
     }
 
-    fn collect_ready_packets(&mut self) -> Result<()> {
+    fn collect_ready_slabs(&mut self) -> Result<()> {
         let Some(session) = self.session.as_mut() else {
             return Ok(());
         };
-        let collected = session.collect_ready_packets()?;
+        let collected = session.collect_ready_slabs()?;
         let completed_input_frames = session.completed_input_frames();
-        self.inflight_packets = self.inflight_packets.saturating_sub(collected);
+        self.inflight_slabs = self.inflight_slabs.saturating_sub(collected);
         self.sync_completed_input_progress(completed_input_frames);
         Ok(())
     }
 
-    fn wait_for_ready_packet(&mut self) -> Result<()> {
+    fn wait_for_ready_slab(&mut self) -> Result<()> {
         let Some(session) = self.session.as_mut() else {
             return Ok(());
         };
-        if session.wait_for_ready_packet()? {
+        if session.wait_for_ready_slab()? {
             let completed_input_frames = session.completed_input_frames();
-            self.inflight_packets = self.inflight_packets.saturating_sub(1);
+            self.inflight_slabs = self.inflight_slabs.saturating_sub(1);
             self.sync_completed_input_progress(completed_input_frames);
         }
         Ok(())
+    }
+
+    fn release_completed_slab_pcm_frames(
+        &mut self,
+        completed_input_frames: usize,
+    ) -> usize {
+        let mut released_pcm_frames = 0usize;
+        while self
+            .submitted_slabs
+            .front()
+            .is_some_and(|slab| slab.end_frame_index <= completed_input_frames)
+        {
+            let slab = self
+                .submitted_slabs
+                .pop_front()
+                .expect("front slab exists while releasing completed slabs");
+            released_pcm_frames = released_pcm_frames.saturating_add(slab.pcm_frames);
+        }
+        released_pcm_frames
     }
 
     fn drain_ready_output(&mut self, max_frames: usize, output: &mut Vec<i32>) -> usize {
@@ -628,8 +668,10 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         let (drained_frames, _) = session.drain_into(max_frames, channels, output);
         let completed_input_frames = session.completed_input_frames();
         self.drained_pcm_frames += drained_frames as u64;
+        let completed_slab_pcm_frames =
+            self.release_completed_slab_pcm_frames(completed_input_frames);
         self.sync_completed_input_progress(completed_input_frames);
-        profile::hand_out_pcm_frames_for_current_thread(drained_frames);
+        profile::hand_out_pcm_frames_for_current_thread(completed_slab_pcm_frames);
         drained_frames
     }
 }
@@ -651,7 +693,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
                     .session
                     .as_ref()
                     .is_some_and(session::StreamingDecodeSession::is_idle)
-                && self.inflight_packets == 0
+                && self.inflight_slabs == 0
                 && self.eof)
         {
             return Ok(0);
@@ -664,14 +706,14 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
                 break;
             }
 
-            self.collect_ready_packets()?;
+            self.collect_ready_slabs()?;
             total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
             if total_pcm_frames == max_frames {
                 break;
             }
 
             if self.eof
-                && self.inflight_packets == 0
+                && self.inflight_slabs == 0
                 && self
                     .session
                     .as_ref()
@@ -681,19 +723,19 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             }
 
             let staged_any = self.fill_decode_window()?;
-            self.collect_ready_packets()?;
+            self.collect_ready_slabs()?;
             total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
             if total_pcm_frames == max_frames {
                 break;
             }
 
-            if self.inflight_packets > 0
+            if self.inflight_slabs > 0
                 && self.session.as_ref().is_none_or(|session| {
-                    session.ready_packet_count() == 0 && !session.has_draining_packet()
+                    session.ready_slab_count() == 0 && !session.has_draining_slab()
                 })
                 && total_pcm_frames < max_frames
             {
-                self.wait_for_ready_packet()?;
+                self.wait_for_ready_slab()?;
                 continue;
             }
 
@@ -788,7 +830,7 @@ pub(crate) fn clear_decode_profile_session_for_current_thread() {
     profile::clear_decode_profile_session_for_current_thread();
 }
 
-pub(crate) fn release_decode_output_buffer_for_current_thread() {
+pub(crate) fn release_ordered_decode_output_for_current_thread() {
     profile::release_decode_output_buffer_for_current_thread();
 }
 
@@ -985,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn active_decode_window_counts_inflight_packets_after_session_start() {
+    fn active_decode_window_counts_inflight_slabs_after_session_start() {
         let stream_info = StreamInfo {
             sample_rate: 44_100,
             channels: 2,
@@ -1001,10 +1043,10 @@ mod tests {
             .stream_info(stream_info)
             .build()
             .unwrap();
-        stream.inflight_packets = 3;
+        stream.inflight_slabs = 3;
         stream.session = Some(super::session::StreamingDecodeSession::new_local());
 
-        assert_eq!(stream.active_packet_count(), 3);
+        assert_eq!(stream.active_slab_count(), 3);
     }
 
     #[test]

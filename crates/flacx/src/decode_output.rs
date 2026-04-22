@@ -64,7 +64,7 @@ where
             break;
         }
         writer.write_samples_and_update_md5(&chunk, &mut streaminfo_md5)?;
-        crate::read::release_decode_output_buffer_for_current_thread();
+        crate::read::release_ordered_decode_output_for_current_thread();
         #[cfg(feature = "progress")]
         {
             processed_samples += frames as u64;
