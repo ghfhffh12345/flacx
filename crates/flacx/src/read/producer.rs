@@ -85,6 +85,19 @@ impl ProducerState {
 
     pub(super) fn record_ready_submission(&mut self, plan: &DecodeSlabPlan) {
         let (end_frame_index, pcm_frames, input_bytes) = Self::submitted_slab_residency(plan);
+        self.record_ready_submission_parts_with_input_bytes(
+            end_frame_index,
+            pcm_frames,
+            input_bytes,
+        );
+    }
+
+    pub(super) fn record_ready_submission_parts_with_input_bytes(
+        &mut self,
+        end_frame_index: usize,
+        pcm_frames: usize,
+        input_bytes: usize,
+    ) {
         self.record_submitted_slab(end_frame_index, pcm_frames, input_bytes);
     }
 
