@@ -775,25 +775,25 @@ mod tests {
     fn preset_mapping_matches_cli_contract() {
         let encode_default =
             apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Default);
-        assert!(encode_default.capture_fxmd);
-        assert!(encode_default.strict_fxmd_validation);
+        assert!(encode_default.capture_fxmd());
+        assert!(encode_default.strict_fxmd_validation());
 
         let encode_loose = apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Loose);
-        assert!(!encode_loose.capture_fxmd);
-        assert!(!encode_loose.strict_fxmd_validation);
+        assert!(!encode_loose.capture_fxmd());
+        assert!(!encode_loose.strict_fxmd_validation());
 
         let decode_strict = apply_decode_mode(flacx::DecodeConfig::default(), ModePreset::Strict);
-        assert!(decode_strict.emit_fxmd);
-        assert!(decode_strict.strict_channel_mask_provenance);
-        assert!(decode_strict.strict_seektable_validation);
+        assert!(decode_strict.emit_fxmd());
+        assert!(decode_strict.strict_channel_mask_provenance());
+        assert!(decode_strict.strict_seektable_validation());
 
         let recompress_loose_encode =
             apply_encode_mode(flacx::EncoderConfig::default(), ModePreset::Loose);
         let recompress_loose_decode =
             apply_decode_mode(flacx::DecodeConfig::default(), ModePreset::Loose);
-        assert!(!recompress_loose_encode.capture_fxmd);
-        assert!(!recompress_loose_encode.strict_fxmd_validation);
-        assert!(!recompress_loose_decode.emit_fxmd);
+        assert!(!recompress_loose_encode.capture_fxmd());
+        assert!(!recompress_loose_encode.strict_fxmd_validation());
+        assert!(!recompress_loose_decode.emit_fxmd());
 
         assert_eq!(
             recompress_mode(ModePreset::Loose),
