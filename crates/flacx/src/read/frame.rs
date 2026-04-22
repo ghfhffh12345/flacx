@@ -27,7 +27,7 @@ use std::{
 };
 
 #[derive(Debug)]
-pub(super) struct DecodeWorkPacket {
+pub(super) struct DecodeWorkSlab {
     pub(super) start_frame_index: usize,
     pub(super) frame_block_sizes: Vec<u16>,
     pub(super) bytes: Arc<[u8]>,
@@ -35,20 +35,23 @@ pub(super) struct DecodeWorkPacket {
 }
 
 #[derive(Debug)]
-pub(super) struct DecodedWorkPacket {
+pub(super) struct DecodedWorkSlab {
     pub(super) start_frame_index: usize,
     pub(super) frame_block_sizes: Vec<u16>,
     pub(super) decoded_samples: Vec<i32>,
 }
 
+pub(super) type DecodeWorkPacket = DecodeWorkSlab;
+pub(super) type DecodedWorkPacket = DecodedWorkSlab;
+
 pub(super) enum DecodeWorkerRecv {
     Empty,
-    Packet(Result<DecodedWorkPacket>),
+    Slab(Result<DecodedWorkSlab>),
 }
 
 pub(super) struct FrameDecodeWorkerPool {
-    worker_senders: Vec<SyncSender<DecodeWorkPacket>>,
-    result_receiver: Receiver<Result<DecodedWorkPacket>>,
+    worker_senders: Vec<SyncSender<DecodeWorkSlab>>,
+    result_receiver: Receiver<Result<DecodedWorkSlab>>,
     worker_handles: Vec<thread::JoinHandle<()>>,
     next_worker: usize,
 }
@@ -56,16 +59,16 @@ pub(super) struct FrameDecodeWorkerPool {
 impl FrameDecodeWorkerPool {
     pub(super) fn new(worker_count: usize, queue_depth: usize) -> Self {
         let queue_depth = queue_depth.max(1);
-        let (result_sender, result_receiver) = mpsc::channel::<Result<DecodedWorkPacket>>();
+        let (result_sender, result_receiver) = mpsc::channel::<Result<DecodedWorkSlab>>();
         let mut worker_senders = Vec::with_capacity(worker_count);
         let mut worker_handles = Vec::with_capacity(worker_count);
 
         for _ in 0..worker_count.max(1) {
-            let (sender, receiver) = mpsc::sync_channel::<DecodeWorkPacket>(queue_depth);
+            let (sender, receiver) = mpsc::sync_channel::<DecodeWorkSlab>(queue_depth);
             let result_sender = result_sender.clone();
             worker_handles.push(thread::spawn(move || {
-                while let Ok(packet) = receiver.recv() {
-                    if result_sender.send(decode_work_packet(packet)).is_err() {
+                while let Ok(slab) = receiver.recv() {
+                    if result_sender.send(decode_work_slab(slab)).is_err() {
                         return;
                     }
                 }
@@ -83,20 +86,20 @@ impl FrameDecodeWorkerPool {
         }
     }
 
-    pub(super) fn submit(&mut self, packet: DecodeWorkPacket) -> Result<()> {
+    pub(super) fn submit(&mut self, slab: DecodeWorkSlab) -> Result<()> {
         let sender = &self.worker_senders[self.next_worker % self.worker_senders.len()];
         self.next_worker = self.next_worker.wrapping_add(1);
         sender
-            .send(packet)
+            .send(slab)
             .map_err(|_| Error::Thread("decode worker channel closed unexpectedly".into()))
     }
 
     pub(super) fn try_submit(
         &mut self,
-        packet: DecodeWorkPacket,
-    ) -> std::result::Result<(), mpsc::TrySendError<DecodeWorkPacket>> {
+        slab: DecodeWorkSlab,
+    ) -> std::result::Result<(), mpsc::TrySendError<DecodeWorkSlab>> {
         let sender = &self.worker_senders[self.next_worker % self.worker_senders.len()];
-        match sender.try_send(packet) {
+        match sender.try_send(slab) {
             Ok(()) => {
                 self.next_worker = self.next_worker.wrapping_add(1);
                 Ok(())
@@ -107,15 +110,15 @@ impl FrameDecodeWorkerPool {
 
     pub(super) fn try_recv(&self) -> DecodeWorkerRecv {
         match self.result_receiver.try_recv() {
-            Ok(packet) => DecodeWorkerRecv::Packet(packet),
+            Ok(slab) => DecodeWorkerRecv::Slab(slab),
             Err(mpsc::TryRecvError::Empty) => DecodeWorkerRecv::Empty,
-            Err(mpsc::TryRecvError::Disconnected) => DecodeWorkerRecv::Packet(Err(Error::Thread(
+            Err(mpsc::TryRecvError::Disconnected) => DecodeWorkerRecv::Slab(Err(Error::Thread(
                 "decode worker result channel closed unexpectedly".into(),
             ))),
         }
     }
 
-    pub(super) fn recv(&self) -> Result<DecodedWorkPacket> {
+    pub(super) fn recv(&self) -> Result<DecodedWorkSlab> {
         self.result_receiver
             .recv()
             .map_err(|_| Error::Thread("decode worker result channel closed unexpectedly".into()))?
@@ -131,18 +134,22 @@ impl Drop for FrameDecodeWorkerPool {
     }
 }
 
-pub(super) fn decode_work_packet(packet: DecodeWorkPacket) -> Result<DecodedWorkPacket> {
-    let mut decoded_samples = Vec::with_capacity(total_interleaved_sample_count(&packet.frames));
-    for frame in packet.frames.iter() {
-        let frame_bytes = &packet.bytes[frame.offset..frame.offset + frame.bytes_consumed];
+pub(super) fn decode_work_slab(slab: DecodeWorkSlab) -> Result<DecodedWorkSlab> {
+    let mut decoded_samples = Vec::with_capacity(total_interleaved_sample_count(&slab.frames));
+    for frame in slab.frames.iter() {
+        let frame_bytes = &slab.bytes[frame.offset..frame.offset + frame.bytes_consumed];
         decode_frame_samples_into(frame_bytes, frame, &mut decoded_samples)?;
     }
 
-    Ok(DecodedWorkPacket {
-        start_frame_index: packet.start_frame_index,
-        frame_block_sizes: packet.frame_block_sizes,
+    Ok(DecodedWorkSlab {
+        start_frame_index: slab.start_frame_index,
+        frame_block_sizes: slab.frame_block_sizes,
         decoded_samples,
     })
+}
+
+pub(super) fn decode_work_packet(packet: DecodeWorkPacket) -> Result<DecodedWorkPacket> {
+    decode_work_slab(packet)
 }
 
 #[allow(dead_code)]

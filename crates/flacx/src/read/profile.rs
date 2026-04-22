@@ -23,8 +23,8 @@ pub(crate) struct DecodeProfileSummary {
     pub(crate) worker_count: usize,
     pub(crate) queue_limit: usize,
     pub(crate) target_pcm_frames: usize,
-    pub(crate) peak_inflight_packets: usize,
-    pub(crate) peak_inflight_pcm_frames: usize,
+    pub(crate) peak_active_window_slabs: usize,
+    pub(crate) peak_resident_pcm_frames: usize,
 }
 
 impl DecodeProfileSummary {
@@ -37,12 +37,12 @@ impl DecodeProfileSummary {
         }
     }
 
-    pub(crate) fn observe_inflight_packets(&mut self, inflight_packets: usize) {
-        self.peak_inflight_packets = self.peak_inflight_packets.max(inflight_packets);
+    pub(crate) fn observe_active_window_slabs(&mut self, active_window_slabs: usize) {
+        self.peak_active_window_slabs = self.peak_active_window_slabs.max(active_window_slabs);
     }
 
-    pub(crate) fn observe_inflight_pcm_frames(&mut self, inflight_pcm_frames: usize) {
-        self.peak_inflight_pcm_frames = self.peak_inflight_pcm_frames.max(inflight_pcm_frames);
+    pub(crate) fn observe_resident_pcm_frames(&mut self, resident_pcm_frames: usize) {
+        self.peak_resident_pcm_frames = self.peak_resident_pcm_frames.max(resident_pcm_frames);
     }
 }
 
@@ -89,7 +89,9 @@ pub(crate) fn clear_decode_profile_session_for_current_thread() {
 pub(crate) fn observe_inflight_packets_for_current_thread(inflight_packets: usize) {
     CURRENT_PROFILE_SESSION.with(|session| {
         if let Some(session) = session.borrow_mut().as_mut() {
-            session.summary.observe_inflight_packets(inflight_packets);
+            session
+                .summary
+                .observe_active_window_slabs(inflight_packets);
         }
     });
 }
@@ -100,11 +102,13 @@ pub(crate) fn accept_ready_pcm_frames_for_current_thread(
 ) {
     CURRENT_PROFILE_SESSION.with(|session| {
         if let Some(session) = session.borrow_mut().as_mut() {
-            session.summary.observe_inflight_packets(inflight_packets);
+            session
+                .summary
+                .observe_active_window_slabs(inflight_packets);
             session.resident_pcm_frames = session.resident_pcm_frames.saturating_add(pcm_frames);
             session
                 .summary
-                .observe_inflight_pcm_frames(session.resident_pcm_frames);
+                .observe_resident_pcm_frames(session.resident_pcm_frames);
         }
     });
 }
@@ -150,11 +154,13 @@ pub(crate) fn append_decode_session_summary(
     };
     let _ = writeln!(
         file,
-        "event=decode_session_summary\tworker_count={}\tqueue_limit={}\tpeak_inflight_packets={}\tpeak_inflight_pcm_frames={}\ttarget_pcm_frames={}",
+        "event=decode_session_summary\tworker_count={}\tqueue_limit={}\tpeak_active_window_slabs={}\tpeak_inflight_packets={}\tpeak_resident_pcm_frames={}\tpeak_inflight_pcm_frames={}\ttarget_pcm_frames={}",
         profile.worker_count,
         profile.queue_limit,
-        profile.peak_inflight_packets,
-        profile.peak_inflight_pcm_frames,
+        profile.peak_active_window_slabs,
+        profile.peak_active_window_slabs,
+        profile.peak_resident_pcm_frames,
+        profile.peak_resident_pcm_frames,
         profile.target_pcm_frames,
     );
 }

@@ -22,12 +22,12 @@ impl DecodedSlab {
     }
 }
 
-impl From<frame::DecodedWorkPacket> for DecodedSlab {
-    fn from(packet: frame::DecodedWorkPacket) -> Self {
+impl From<frame::DecodedWorkSlab> for DecodedSlab {
+    fn from(slab: frame::DecodedWorkSlab) -> Self {
         Self {
-            start_frame_index: packet.start_frame_index,
-            frame_block_sizes: packet.frame_block_sizes,
-            decoded_samples: packet.decoded_samples,
+            start_frame_index: slab.start_frame_index,
+            frame_block_sizes: slab.frame_block_sizes,
+            decoded_samples: slab.decoded_samples,
         }
     }
 }
@@ -63,7 +63,7 @@ impl DecodeSlabPlan {
     }
 }
 
-impl From<DecodeSlabPlan> for frame::DecodeWorkPacket {
+impl From<DecodeSlabPlan> for frame::DecodeWorkSlab {
     fn from(plan: DecodeSlabPlan) -> Self {
         Self {
             start_frame_index: plan.start_frame_index,
