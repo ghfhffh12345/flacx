@@ -78,12 +78,6 @@ impl<W> Decoder<W>
 where
     W: Write + Seek,
 {
-    /// Create a builder initialized from [`DecodeConfig::builder`].
-    #[must_use]
-    pub fn builder() -> DecodeBuilder {
-        DecodeConfig::builder()
-    }
-
     /// Construct a writer-owning decode session from a writer and config.
     #[must_use]
     pub fn new(writer: W, config: DecodeConfig) -> Self {

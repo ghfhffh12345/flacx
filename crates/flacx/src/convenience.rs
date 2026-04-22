@@ -18,7 +18,6 @@ use crate::{
 
 pub use crate::{
     inspect_flac_total_samples, inspect_pcm_total_samples, inspect_raw_pcm_total_samples,
-    inspect_wav_total_samples,
 };
 
 const FILE_READ_BUFFER_CAPACITY: usize = 4 * 1024 * 1024;

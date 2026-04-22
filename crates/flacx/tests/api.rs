@@ -152,7 +152,8 @@ fn builtin_convenience_no_longer_uses_legacy_helpers() {
 fn recompress_public_exports_remain_stable() {
     let source = include_str!("../src/lib.rs");
     assert!(source.contains("pub mod builtin {"));
-    assert!(source.contains("recompress_bytes, recompress_file,"));
+    assert!(source.contains("recompress_bytes,"));
+    assert!(source.contains("recompress_file,"));
     assert!(source.contains("pub use recompress::{"));
     assert!(
         source.contains(
@@ -252,7 +253,9 @@ fn direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
 #[test]
 fn api_top_level_public_api_uses_pcm_inspection_naming() {
     let lib_source = include_str!("../src/lib.rs");
-    assert!(lib_source.contains("inspect_pcm_total_samples"));
+    assert!(lib_source.contains(
+        "pub use input::inspect_wav_total_samples as inspect_pcm_total_samples;"
+    ));
     assert!(!lib_source.contains("pub use input::inspect_wav_total_samples;"));
     assert!(!lib_source.contains("inspect_wav_total_samples,"));
 }

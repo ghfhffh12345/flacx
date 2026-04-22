@@ -109,7 +109,7 @@
 //! | --- | --- | --- |
 //! | Explicit pipeline | You want direct control over readers, direct stream construction, metadata, configs, output containers, or progress callbacks. | [`core`], [`EncoderConfig`], [`DecodeConfig`], [`RecompressConfig`], [`WavReader`], [`FlacReader`], [`WavPcmStream`], [`FlacPcmStream`], [`Encoder`], [`Decoder`], [`Recompressor`] |
 //! | Convenience helpers | You want file-path or byte-slice conversions with minimal setup. | [`builtin`] |
-//! | Supporting types | You need presets, metadata editing, raw PCM descriptors, or preflight inspection helpers. | [`level`], [`Metadata`], [`RawPcmDescriptor`], [`inspect_wav_total_samples`], [`inspect_flac_total_samples`] |
+//! | Supporting types | You need presets, metadata editing, raw PCM descriptors, or preflight inspection helpers. | [`level`], [`Metadata`], [`RawPcmDescriptor`], [`inspect_pcm_total_samples`], [`inspect_flac_total_samples`] |
 //!
 //! ## Main building blocks
 //!
@@ -198,8 +198,8 @@ pub mod level;
 pub mod builtin {
     pub use crate::convenience::{
         decode_bytes, decode_file, encode_bytes, encode_file, inspect_flac_total_samples,
-        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, inspect_wav_total_samples,
-        recompress_bytes, recompress_file,
+        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, recompress_bytes,
+        recompress_file,
     };
 }
 
@@ -213,7 +213,6 @@ pub use encoder::{EncodeSummary, Encoder};
 pub use error::{Error, Result};
 pub use input::{
     EncodePcmStream, EncodeSource, PcmReader, PcmSpec, PcmSpec as PcmStreamSpec, PcmStream,
-    inspect_wav_total_samples as inspect_pcm_total_samples,
 };
 pub use metadata::Metadata;
 pub use pcm::PcmContainer;
@@ -234,17 +233,14 @@ pub use wav_input::{WavPcmStream, WavPcmStreamBuilder, WavReader, WavReaderOptio
 #[cfg(feature = "progress")]
 pub use recompress::{RecompressPhase, RecompressProgress};
 
-/// Inspect a supported PCM-container stream and return its total sample count without decoding it.
-///
-/// This WAV-named helper remains the stable public inspection API for encode
-/// preflight and currently accepts RIFF/WAVE, RF64, Wave64, AIFF, the Stage 2
-/// AIFC allowlist, and the Stage 3 CAF allowlist.
-pub use input::inspect_wav_total_samples;
+/// Inspect a supported PCM-container stream and return its total sample count
+/// without decoding it.
+pub use input::inspect_wav_total_samples as inspect_pcm_total_samples;
 
 /// Inspect a FLAC stream and return the total sample count recorded in its
 /// STREAMINFO metadata.
 ///
-/// This is the FLAC counterpart to [`inspect_wav_total_samples`].
+/// This is the FLAC counterpart to [`inspect_pcm_total_samples`].
 pub use read::inspect_flac_total_samples;
 
 /// Write a typed [`PcmStream`] out to a supported PCM-container family without
@@ -278,9 +274,9 @@ pub mod core {
         DecodeBuilder, DecodeConfig, DecodePcmStream, DecodeSource, DecodeSummary, Decoder,
         EncodePcmStream, EncodeSource, EncodeSummary, Encoder, EncoderBuilder, EncoderConfig,
         FlacPcmStream, FlacPcmStreamBuilder, FlacReader, FlacReaderOptions, Metadata, PcmContainer,
-        PcmReader, PcmStream, PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor, RawPcmReader, RawPcmStream,
-        RecompressBuilder, RecompressConfig, RecompressMode, Recompressor, StreamInfo,
-        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, read_flac_reader,
+        PcmReader, PcmStream, PcmStreamSpec, RawPcmByteOrder, RawPcmDescriptor, RawPcmReader,
+        RawPcmStream, RecompressBuilder, RecompressConfig, RecompressMode, Recompressor,
+        StreamInfo, inspect_pcm_total_samples, inspect_raw_pcm_total_samples, read_flac_reader,
         read_flac_reader_with_options, write_pcm_stream,
     };
     pub use crate::{WavPcmStream, WavPcmStreamBuilder, WavReader, WavReaderOptions};

@@ -66,12 +66,6 @@ impl<W> Encoder<W>
 where
     W: Write + Seek,
 {
-    /// Create a builder initialized from [`EncoderConfig::builder`].
-    #[must_use]
-    pub fn builder() -> EncoderBuilder {
-        EncoderConfig::builder()
-    }
-
     /// Construct a writer-owning encode session from a writer and config.
     #[must_use]
     pub fn new(writer: W, config: EncoderConfig) -> Self {
