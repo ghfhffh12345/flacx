@@ -77,10 +77,26 @@ impl DrainingPacket {
         channels: usize,
         output: &mut Vec<i32>,
     ) -> (usize, usize) {
-        let available_frames = (self.decoded_samples.len() - self.sample_cursor) / channels;
+        let available_frames = self
+            .decoded_samples
+            .len()
+            .saturating_sub(self.sample_cursor)
+            / channels;
         let drained_frames = available_frames.min(max_frames);
         if drained_frames == 0 {
             return (0, 0);
+        }
+
+        if self.sample_cursor == 0 && drained_frames == available_frames && output.is_empty() {
+            output.extend(std::mem::take(&mut self.decoded_samples));
+            self.sample_cursor = drained_frames * channels;
+
+            let completed_input_frames =
+                self.frame_block_sizes.len().saturating_sub(self.drained_input_frames);
+            self.drained_input_frames = self.frame_block_sizes.len();
+            self.drained_pcm_frames = total_pcm_frames(&self.frame_block_sizes);
+
+            return (drained_frames, completed_input_frames);
         }
 
         let drained_samples = drained_frames * channels;
@@ -105,8 +121,12 @@ impl DrainingPacket {
     }
 
     fn is_fully_drained(&self) -> bool {
-        self.sample_cursor == self.decoded_samples.len()
+        self.sample_cursor >= self.decoded_samples.len()
     }
+}
+
+fn total_pcm_frames(frame_block_sizes: &[u16]) -> usize {
+    frame_block_sizes.iter().map(|&block_size| usize::from(block_size)).sum()
 }
 
 #[derive(Debug, Default)]

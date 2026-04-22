@@ -205,9 +205,9 @@ where
                 open_buffered_reader(input_path)?,
                 flac_reader_options(config),
             )?;
-            let mut decoder = config.with_output_container(output_container).into_decoder(
-                BufWriter::with_capacity(FILE_WRITE_BUFFER_CAPACITY, temp_file),
-            );
+            let mut decoder = config
+                .with_output_container(output_container)
+                .into_decoder(temp_file);
             let summary = decoder.decode_source_with_sink(reader.into_decode_source(), progress)?;
             decoder.into_inner().flush()?;
             Ok(summary)

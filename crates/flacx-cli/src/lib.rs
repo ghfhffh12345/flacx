@@ -549,7 +549,7 @@ fn run_decode_work_item(
     )?;
     let mut decoder = config
         .with_output_container(output_container)
-        .into_decoder(create_buffered_writer(&item.output)?);
+        .into_decoder(fs::File::create(&item.output)?);
     match sender {
         Some(sender) => {
             decoder.decode_source_with_progress(reader.into_decode_source(), |update| {
