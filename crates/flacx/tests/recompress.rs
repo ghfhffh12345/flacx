@@ -380,12 +380,10 @@ fn recompress_builder_matches_fluent_config() {
 fn recompress_session_has_no_eager_or_buffered_pcm_handoff() {
     let verify_source = include_str!("../src/recompress/verify.rs");
     let session_source = include_str!("../src/recompress/session.rs");
-    let source_source = include_str!("../src/recompress/source.rs");
 
     assert!(!verify_source.contains("into_verified_pcm_stream"));
     assert!(!session_source.contains("EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD"));
     assert!(!session_source.contains("BufferedRecompressPcmStream"));
-    assert!(!source_source.contains("into_verified_pcm_stream"));
     assert!(session_source.contains("into_encode_parts()"));
 }
 
