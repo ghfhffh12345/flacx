@@ -3,11 +3,11 @@
 //!
 //! `flacx` exposes two complementary ways to work:
 //!
-//! - the explicit API built around readers, sources, configs, and
+//! - the reset API built around staged readers, sources, configs, and
 //!   writer-owning sessions
 //! - the convenience [`builtin`] helpers for one-shot file and byte workflows
 //!
-//! Most applications should start with the explicit API when they want control
+//! Most applications should start with the reset API when they want control
 //! over metadata, output configuration, or progress reporting, and use
 //! [`builtin`] when a single function call is enough.
 //!
@@ -107,17 +107,17 @@
 //!
 //! | Surface | Use it when | Main entry points |
 //! | --- | --- | --- |
-//! | Explicit pipeline | You want direct control over readers, direct stream construction, metadata, configs, output containers, or progress callbacks. | [`core`], [`EncoderConfig`], [`DecodeConfig`], [`RecompressConfig`], [`WavReader`], [`FlacReader`], [`WavPcmStream`], [`FlacPcmStream`], [`Encoder`], [`Decoder`], [`Recompressor`] |
+//! | Reset API | You want direct control over staged input, direct stream construction, metadata, configs, output containers, or progress callbacks. | [`core`], [`EncoderConfig`], [`DecodeConfig`], [`RecompressConfig`], [`PcmReader`], [`read_flac_reader`], [`WavPcmStream`], [`FlacPcmStream`], [`Encoder`], [`Decoder`], [`Recompressor`] |
 //! | Convenience helpers | You want file-path or byte-slice conversions with minimal setup. | [`builtin`] |
 //! | Supporting types | You need presets, metadata editing, raw PCM descriptors, or preflight inspection helpers. | [`level`], [`Metadata`], [`RawPcmDescriptor`], [`inspect_pcm_total_samples`], [`inspect_flac_total_samples`] |
 //!
 //! ## Main building blocks
 //!
-//! The public API is organized around a few reusable concepts:
+//! The reset API is organized around a few reusable concepts:
 //!
-//! - **Readers** parse an input format and expose its recovered stream spec and
-//!   metadata, such as [`WavReader`], [`AiffReader`], [`CafReader`], and
-//!   [`FlacReader`].
+//! - **Reset entry points** parse an input format and hand it off into an
+//!   owned source, such as [`PcmReader`] for PCM-container inputs and
+//!   [`read_flac_reader`] for FLAC inputs.
 //! - **Concrete streams** can be reader-produced or directly constructed when
 //!   you already know the payload layout, such as [`WavPcmStream`],
 //!   [`AiffPcmStream`], [`CafPcmStream`], [`RawPcmStream`], and
@@ -131,7 +131,7 @@
 //!   or recompress operation through [`Encoder`], [`Decoder`], and
 //!   [`Recompressor`].
 //!
-//! The [`core`] module re-exports the explicit pipeline in one place if you
+//! The [`core`] module re-exports the reset API in one place if you
 //! prefer a narrower import surface.
 //!
 //! ## Feature flags
@@ -149,7 +149,7 @@
 //!
 //! ## Navigating the docs
 //!
-//! - Start with [`core`] for the explicit pipeline.
+//! - Start with [`core`] for the reset API.
 //! - Use [`builtin`] for the shortest file/byte workflows.
 //! - Visit [`level`] for compression presets and [`PcmContainer`] for decode
 //!   output-family selection.

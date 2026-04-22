@@ -265,6 +265,11 @@ fn api_docs_examples_use_reset_reader_entry_points() {
     let decode_source = include_str!("../src/decode.rs");
     let readme = include_str!("../README.md");
 
+    assert!(lib_source.contains("the reset API built around staged readers, sources, configs, and"));
+    assert!(lib_source.contains("| Reset API | You want direct control over staged input, direct stream construction, metadata, configs, output containers, or progress callbacks. |"));
+    assert!(lib_source.contains("The reset API is organized around a few reusable concepts:"));
+    assert!(lib_source.contains("The [`core`] module re-exports the reset API in one place if you"));
+    assert!(lib_source.contains("- Start with [`core`] for the reset API."));
     assert!(lib_source.contains("use flacx::{EncoderConfig, PcmReader};"));
     assert!(lib_source.contains("let source = PcmReader::new(input)?.into_source();"));
     assert!(lib_source.contains("use flacx::{DecodeConfig, read_flac_reader};"));
