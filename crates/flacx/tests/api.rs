@@ -132,7 +132,7 @@ fn builtin_encode_file_matches_explicit_reader_session_output() {
 }
 
 #[test]
-fn api_builtin_convenience_no_longer_uses_legacy_helpers() {
+fn builtin_convenience_no_longer_uses_legacy_helpers() {
     let source = include_str!("../src/convenience.rs");
     assert!(!source.contains("read_wav_for_encode_with_config"));
     assert!(!source.contains("encode_buffered_input_with_sink"));
@@ -149,7 +149,7 @@ fn api_builtin_convenience_no_longer_uses_legacy_helpers() {
 }
 
 #[test]
-fn api_recompress_public_exports_remain_stable() {
+fn recompress_public_exports_remain_stable() {
     let source = include_str!("../src/lib.rs");
     assert!(source.contains("pub mod builtin {"));
     assert!(source.contains("recompress_bytes, recompress_file,"));
@@ -166,7 +166,7 @@ fn api_recompress_public_exports_remain_stable() {
 }
 
 #[test]
-fn api_source_exports_replace_split_metadata_surface() {
+fn source_exports_replace_split_metadata_surface() {
     let lib_source = include_str!("../src/lib.rs");
     let encoder_source = include_str!("../src/encoder.rs");
     let decode_source = include_str!("../src/decode.rs");
@@ -211,7 +211,7 @@ fn api_source_exports_replace_split_metadata_surface() {
 }
 
 #[test]
-fn api_direct_construction_exports_include_flac_pcm_stream_and_stream_info() {
+fn direct_construction_exports_include_flac_pcm_stream_and_stream_info() {
     let lib_source = include_str!("../src/lib.rs");
 
     assert!(lib_source.contains("pub use read::{"));
@@ -224,7 +224,7 @@ fn api_direct_construction_exports_include_flac_pcm_stream_and_stream_info() {
 }
 
 #[test]
-fn api_direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
+fn direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
     let wav_source = include_str!("../src/wav_input.rs");
     let aiff_source = include_str!("../src/aiff.rs");
     let caf_source = include_str!("../src/caf.rs");
@@ -341,7 +341,7 @@ fn explicit_reader_session_flow_accepts_caf_inputs() {
 
 #[cfg(feature = "wav")]
 #[test]
-fn api_accepts_seekable_readers_and_writer_bound_sessions() {
+fn accepts_seekable_readers_and_writer_bound_sessions() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_024));
     let reader = PcmReader::new(Cursor::new(wav)).unwrap();
     let mut output = Cursor::new(Vec::new());
@@ -373,7 +373,7 @@ fn builtin_decode_bytes_matches_default_decoder() {
 
 #[cfg(feature = "wav")]
 #[test]
-fn decode_api_accepts_seekable_readers_and_returns_summary() {
+fn decode_accepts_seekable_readers_and_returns_summary() {
     let wav = pcm_wav_bytes(24, 2, 48_000, &sample_fixture(2, 3_000));
     let flac = builtin::encode_bytes(&wav).unwrap();
     let reader = read_flac_reader(Cursor::new(flac)).unwrap();
@@ -800,7 +800,7 @@ fn directly_constructed_wav_stream_matches_reader_encode_source_output() {
 }
 
 #[test]
-fn shared_metadata_api_replaces_public_split_metadata_and_exposes_no_raw_authoring_surface() {
+fn shared_metadata_replaces_public_split_metadata_and_exposes_no_raw_authoring_surface() {
     let lib_source = include_str!("../src/lib.rs");
     let metadata_source = include_str!("../src/metadata.rs");
 
@@ -1078,7 +1078,7 @@ fn raw_descriptor_fixture_still_counts_samples_explicitly() {
 }
 
 #[test]
-fn raw_api_rejects_missing_multichannel_channel_mask() {
+fn raw_rejects_missing_multichannel_channel_mask() {
     let descriptor = RawPcmDescriptor {
         sample_rate: 48_000,
         channels: 4,
