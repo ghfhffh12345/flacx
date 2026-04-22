@@ -1,6 +1,12 @@
 use crate::progress::ProgressSink;
 
 #[cfg(feature = "progress")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
+#[cfg(feature = "progress")]
 use crate::{error::Result, progress::ProgressSnapshot};
 
 macro_rules! emit_recompress_progress {
@@ -124,14 +130,18 @@ pub(crate) struct EncodePhaseProgress<'a, P> {
     #[cfg(feature = "progress")]
     pub(crate) total_samples: u64,
     #[cfg(feature = "progress")]
-    pub(crate) decode_input_bytes_read: u64,
+    pub(crate) decode_input_bytes_read: Arc<AtomicU64>,
     #[cfg(not(feature = "progress"))]
     _marker: std::marker::PhantomData<&'a mut P>,
 }
 
 impl<'a, P> EncodePhaseProgress<'a, P> {
     #[cfg(feature = "progress")]
-    pub(crate) fn new(sink: &'a mut P, total_samples: u64, decode_input_bytes_read: u64) -> Self {
+    pub(crate) fn with_shared_decode_input_bytes(
+        sink: &'a mut P,
+        total_samples: u64,
+        decode_input_bytes_read: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             sink,
             total_samples,
@@ -157,6 +167,7 @@ where
     P: RecompressProgressSink,
 {
     fn on_frame(&mut self, progress: ProgressSnapshot) -> Result<()> {
+        let decode_input_bytes_read = self.decode_input_bytes_read.load(Ordering::Relaxed);
         self.sink.on_progress(RecompressProgress {
             phase: RecompressPhase::Encode,
             phase_processed_samples: progress.processed_samples,
@@ -169,8 +180,7 @@ where
             total_frames: progress.total_frames,
             phase_input_bytes_read: progress.input_bytes_read,
             phase_output_bytes_written: progress.output_bytes_written,
-            overall_input_bytes_read: self
-                .decode_input_bytes_read
+            overall_input_bytes_read: decode_input_bytes_read
                 .saturating_add(progress.input_bytes_read),
             overall_output_bytes_written: progress.output_bytes_written,
         })
@@ -195,6 +205,11 @@ mod tests {
     use crate::error::Result;
     #[cfg(feature = "progress")]
     use crate::progress::{ProgressSink, ProgressSnapshot};
+    #[cfg(feature = "progress")]
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
 
     #[cfg(feature = "progress")]
     struct CaptureSink(Option<RecompressProgress>);
@@ -242,10 +257,11 @@ mod tests {
     #[test]
     fn encode_phase_progress_uses_actual_output_bytes_written() {
         let mut sink = CaptureSink(None);
+        let decode_input_bytes_read = Arc::new(AtomicU64::new(8_192));
         let mut progress = EncodePhaseProgress {
             sink: &mut sink,
             total_samples: 2_048,
-            decode_input_bytes_read: 8_192,
+            decode_input_bytes_read,
         };
 
         progress
@@ -264,5 +280,32 @@ mod tests {
         assert_eq!(captured.phase_output_bytes_written, 512);
         assert_eq!(captured.overall_input_bytes_read, 8_320);
         assert_eq!(captured.overall_output_bytes_written, 512);
+    }
+
+    #[cfg(feature = "progress")]
+    #[test]
+    fn encode_phase_progress_reads_shared_decode_input_bytes() {
+        let mut sink = CaptureSink(None);
+        let decode_input_bytes = Arc::new(AtomicU64::new(4_096));
+        let mut progress = EncodePhaseProgress::with_shared_decode_input_bytes(
+            &mut sink,
+            2_048,
+            Arc::clone(&decode_input_bytes),
+        );
+        decode_input_bytes.store(4_574, Ordering::Relaxed);
+
+        progress
+            .on_frame(ProgressSnapshot {
+                processed_samples: 256,
+                total_samples: 512,
+                completed_frames: 1,
+                total_frames: 4,
+                input_bytes_read: 128,
+                output_bytes_written: 512,
+            })
+            .unwrap();
+
+        let captured = sink.0.expect("encode progress captured");
+        assert_eq!(captured.overall_input_bytes_read, 4_702);
     }
 }

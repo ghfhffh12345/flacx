@@ -9,8 +9,6 @@ use std::sync::{
 use crate::input::EncodePcmStream;
 #[cfg(not(feature = "progress"))]
 use crate::input::counted_encode_pcm_stream;
-#[cfg(feature = "progress")]
-use crate::progress::{ProgressSink, ProgressSnapshot};
 use crate::{
     encoder::{EncodeSummary, Encoder},
     error::Result,
@@ -19,16 +17,14 @@ use crate::{
     progress::NoProgress,
 };
 
-#[cfg(not(feature = "progress"))]
-use super::progress::EncodePhaseProgress;
 use super::{
     config::{RecompressConfig, RecompressMode},
-    progress::{RecompressProgressSink, emit_recompress_progress},
+    progress::{EncodePhaseProgress, RecompressProgressSink, emit_recompress_progress},
     source::FlacRecompressSource,
 };
 
 #[cfg(feature = "progress")]
-use super::progress::{RecompressPhase, RecompressProgress};
+use super::progress::RecompressProgress;
 
 #[cfg(feature = "progress")]
 struct RecompressEncodePcmStream<S> {
@@ -100,50 +96,6 @@ where
 
     fn preferred_encode_chunk_target_pcm_frames(&self) -> Option<usize> {
         self.inner.preferred_encode_chunk_target_pcm_frames()
-    }
-}
-
-#[cfg(feature = "progress")]
-struct StreamingEncodePhaseProgress<'a, P> {
-    sink: &'a mut P,
-    total_samples: u64,
-    decode_input_bytes_read: Arc<AtomicU64>,
-}
-
-#[cfg(feature = "progress")]
-impl<'a, P> StreamingEncodePhaseProgress<'a, P> {
-    fn new(sink: &'a mut P, total_samples: u64, decode_input_bytes_read: Arc<AtomicU64>) -> Self {
-        Self {
-            sink,
-            total_samples,
-            decode_input_bytes_read,
-        }
-    }
-}
-
-#[cfg(feature = "progress")]
-impl<P> ProgressSink for StreamingEncodePhaseProgress<'_, P>
-where
-    P: RecompressProgressSink,
-{
-    fn on_frame(&mut self, progress: ProgressSnapshot) -> Result<()> {
-        let decode_input_bytes_read = self.decode_input_bytes_read.load(Ordering::Relaxed);
-        self.sink.on_progress(RecompressProgress {
-            phase: RecompressPhase::Encode,
-            phase_processed_samples: progress.processed_samples,
-            phase_total_samples: progress.total_samples,
-            overall_processed_samples: self
-                .total_samples
-                .saturating_add(progress.processed_samples),
-            overall_total_samples: super::progress::overall_total_samples(self.total_samples),
-            completed_frames: progress.completed_frames,
-            total_frames: progress.total_frames,
-            phase_input_bytes_read: progress.input_bytes_read,
-            phase_output_bytes_written: progress.output_bytes_written,
-            overall_input_bytes_read: decode_input_bytes_read
-                .saturating_add(progress.input_bytes_read),
-            overall_output_bytes_written: progress.output_bytes_written,
-        })
     }
 }
 
@@ -345,8 +297,11 @@ where
         )?;
 
         #[cfg(feature = "progress")]
-        let mut encode_progress =
-            StreamingEncodePhaseProgress::new(progress, total_samples, decode_input_bytes_read);
+        let mut encode_progress = EncodePhaseProgress::with_shared_decode_input_bytes(
+            progress,
+            total_samples,
+            decode_input_bytes_read,
+        );
         #[cfg(not(feature = "progress"))]
         let mut encode_progress =
             EncodePhaseProgress::new(progress, total_samples, decode_input_bytes_read);
