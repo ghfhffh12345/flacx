@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     io::{Read, Seek},
 };
 
@@ -13,7 +12,8 @@ use crate::{
 };
 
 use self::{
-    index::{PushFrameOutcome, RollingIndexConfig, RollingIndexWindow},
+    index::PushFrameOutcome,
+    producer::{ProducerConfig, ProducerState},
     slab::DecodeSlabPlan,
 };
 
@@ -61,12 +61,6 @@ struct FrameChunkResult {
     decoded_samples: Vec<i32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SubmittedDecodeSlab {
-    end_frame_index: usize,
-    pcm_frames: usize,
-}
-
 impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlacPcmStream")
@@ -94,7 +88,7 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
                     session::StreamingDecodeSession::next_ready_slab_start_frame,
                 ),
             )
-            .field("inflight_slabs", &self.inflight_slabs)
+            .field("inflight_slabs", &self.producer.inflight_slabs())
             .field(
                 "has_draining_slab",
                 &self
@@ -291,9 +285,7 @@ pub struct FlacPcmStream<R> {
     threads: usize,
     pending_bytes: Vec<u8>,
     pending_start: usize,
-    index_window: RollingIndexWindow,
-    inflight_slabs: usize,
-    submitted_slabs: VecDeque<SubmittedDecodeSlab>,
+    producer: ProducerState,
     session: Option<session::StreamingDecodeSession>,
     eof: bool,
 }
@@ -325,17 +317,15 @@ impl<R> FlacPcmStream<R> {
             threads: 1,
             pending_bytes: Vec::new(),
             pending_start: 0,
-            index_window: RollingIndexWindow::new(
+            producer: ProducerState::new(
                 stream_info,
-                RollingIndexConfig {
+                ProducerConfig {
                     target_pcm_frames_per_slab: DECODE_SLAB_TARGET_PCM_FRAMES,
                     max_frames_per_slab: DECODE_SLAB_MAX_INPUT_FRAMES,
                     max_bytes_per_slab: decode_slab_max_input_bytes(stream_info),
                     max_slabs_ahead: 1,
                 },
             ),
-            inflight_slabs: 0,
-            submitted_slabs: VecDeque::new(),
             session: None,
             eof: false,
         }
@@ -354,7 +344,7 @@ impl<R> FlacPcmStream<R> {
 
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads.max(1);
-        self.index_window
+        self.producer
             .set_max_slabs_ahead(self.active_decode_window_limit());
     }
 }
@@ -451,14 +441,14 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             .checked_sub(1)
             .and_then(|index| self.discovered_input_byte_totals.get(index).copied())
             .unwrap_or(0);
-        self.index_window
+        self.producer
             .retire_completed_input_frames(completed_input_frames);
     }
 
     #[cfg(not(feature = "progress"))]
     fn sync_completed_input_progress(&mut self, completed_input_frames: usize) {
         self.completed_input_frames = completed_input_frames;
-        self.index_window
+        self.producer
             .retire_completed_input_frames(completed_input_frames);
     }
 
@@ -533,41 +523,34 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         self.session
             .as_ref()
             .map_or(0, session::StreamingDecodeSession::active_slab_count)
-            .saturating_add(self.inflight_slabs)
+            .saturating_add(self.producer.inflight_slabs())
     }
 
     fn submit_decode_plan(&mut self, plan: DecodeSlabPlan) -> Result<()> {
         self.ensure_streaming_session();
-        let submitted_slab = SubmittedDecodeSlab {
-            end_frame_index: plan.start_frame_index + plan.frame_block_sizes.len(),
-            pcm_frames: plan
-                .frame_block_sizes
-                .iter()
-                .map(|&block_size| usize::from(block_size))
-                .sum(),
-        };
         if self.threads <= 1 {
+            self.producer.record_ready_submission(&plan);
             let slab = frame::decode_work_slab(plan.into())?;
             self.session
                 .as_mut()
                 .expect("local streaming decode session initialized")
                 .accept_ready_slab(slab.into(), 1);
-            self.submitted_slabs.push_back(submitted_slab);
             return Ok(());
         }
+        let (end_frame_index, pcm_frames) = ProducerState::submitted_slab(&plan);
         self.session
             .as_ref()
             .expect("streaming decode session initialized")
             .submit(plan)?;
-        self.inflight_slabs += 1;
-        self.submitted_slabs.push_back(submitted_slab);
+        self.producer
+            .record_inflight_submission_parts(end_frame_index, pcm_frames);
         profile::observe_inflight_packets_for_current_thread(self.active_slab_count());
         Ok(())
     }
 
     fn read_next_slab_plan(&mut self) -> Result<Option<DecodeSlabPlan>> {
         self.normalize_pending_bytes();
-        while self.index_window.has_capacity()
+        while self.producer.has_capacity()
             && self.discovered_sample_number < self.spec.total_samples
         {
             let Some(parsed) = self.read_next_frame()? else {
@@ -575,7 +558,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             };
             let frame_start = self.pending_start;
             let frame_end = frame_start + parsed.bytes_consumed;
-            match self.index_window.push_frame(parsed, frame_start)? {
+            match self.producer.push_frame(parsed, frame_start)? {
                 PushFrameOutcome::Pending => {
                     self.accept_indexed_frame(parsed, frame_end);
                 }
@@ -590,7 +573,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         }
 
         if self.discovered_sample_number >= self.spec.total_samples || self.eof {
-            if let Some(plan) = self.index_window.finish() {
+            if let Some(plan) = self.producer.finish() {
                 return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
             }
         }
@@ -624,7 +607,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         };
         let collected = session.collect_ready_slabs()?;
         let completed_input_frames = session.completed_input_frames();
-        self.inflight_slabs = self.inflight_slabs.saturating_sub(collected);
+        self.producer.finish_inflight_slabs(collected);
         self.sync_completed_input_progress(completed_input_frames);
         Ok(())
     }
@@ -635,29 +618,10 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         };
         if session.wait_for_ready_slab()? {
             let completed_input_frames = session.completed_input_frames();
-            self.inflight_slabs = self.inflight_slabs.saturating_sub(1);
+            self.producer.finish_inflight_slabs(1);
             self.sync_completed_input_progress(completed_input_frames);
         }
         Ok(())
-    }
-
-    fn release_completed_slab_pcm_frames(
-        &mut self,
-        completed_input_frames: usize,
-    ) -> usize {
-        let mut released_pcm_frames = 0usize;
-        while self
-            .submitted_slabs
-            .front()
-            .is_some_and(|slab| slab.end_frame_index <= completed_input_frames)
-        {
-            let slab = self
-                .submitted_slabs
-                .pop_front()
-                .expect("front slab exists while releasing completed slabs");
-            released_pcm_frames = released_pcm_frames.saturating_add(slab.pcm_frames);
-        }
-        released_pcm_frames
     }
 
     fn drain_ready_output(&mut self, max_frames: usize, output: &mut Vec<i32>) -> usize {
@@ -669,7 +633,8 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         let completed_input_frames = session.completed_input_frames();
         self.drained_pcm_frames += drained_frames as u64;
         let completed_slab_pcm_frames =
-            self.release_completed_slab_pcm_frames(completed_input_frames);
+            self.producer
+                .release_completed_slab_pcm_frames(completed_input_frames);
         self.sync_completed_input_progress(completed_input_frames);
         profile::hand_out_pcm_frames_for_current_thread(completed_slab_pcm_frames);
         drained_frames
@@ -693,7 +658,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
                     .session
                     .as_ref()
                     .is_some_and(session::StreamingDecodeSession::is_idle)
-                && self.inflight_slabs == 0
+                && self.producer.inflight_slabs() == 0
                 && self.eof)
         {
             return Ok(0);
@@ -713,7 +678,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             }
 
             if self.eof
-                && self.inflight_slabs == 0
+                && self.producer.inflight_slabs() == 0
                 && self
                     .session
                     .as_ref()
@@ -729,7 +694,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
                 break;
             }
 
-            if self.inflight_slabs > 0
+            if self.producer.inflight_slabs() > 0
                 && self.session.as_ref().is_none_or(|session| {
                     session.ready_slab_count() == 0 && !session.has_draining_slab()
                 })
@@ -819,6 +784,7 @@ mod frame;
 mod index;
 mod metadata;
 mod profile;
+mod producer;
 mod session;
 mod slab;
 
@@ -942,7 +908,7 @@ mod tests {
     use super::metadata::requires_channel_layout_provenance;
     use super::{
         FlacPcmStream, StreamInfo,
-        index::{RollingIndexConfig, RollingIndexWindow},
+        producer::{ProducerConfig, ProducerState},
     };
     use crate::model::ChannelAssignment;
     use crate::{EncoderConfig, convenience::encode_bytes_with_config};
@@ -1043,7 +1009,18 @@ mod tests {
             .stream_info(stream_info)
             .build()
             .unwrap();
-        stream.inflight_slabs = 3;
+        stream.producer = ProducerState::new(
+            stream_info,
+            ProducerConfig {
+                target_pcm_frames_per_slab: super::DECODE_SLAB_TARGET_PCM_FRAMES,
+                max_frames_per_slab: super::DECODE_SLAB_MAX_INPUT_FRAMES,
+                max_bytes_per_slab: super::decode_slab_max_input_bytes(stream_info),
+                max_slabs_ahead: 1,
+            },
+        );
+        stream.producer.record_inflight_submission_parts(0, 0);
+        stream.producer.record_inflight_submission_parts(0, 0);
+        stream.producer.record_inflight_submission_parts(0, 0);
         stream.session = Some(super::session::StreamingDecodeSession::new_local());
 
         assert_eq!(stream.active_slab_count(), 3);
@@ -1135,9 +1112,9 @@ mod tests {
         let mut stream = super::read_flac_reader(Cursor::new(flac))
             .expect("parse encoded flac")
             .into_pcm_stream();
-        stream.index_window = RollingIndexWindow::new(
+        stream.producer = ProducerState::new(
             stream.stream_info,
-            RollingIndexConfig {
+            ProducerConfig {
                 target_pcm_frames_per_slab: 24,
                 max_frames_per_slab: 4,
                 max_bytes_per_slab: usize::MAX,
