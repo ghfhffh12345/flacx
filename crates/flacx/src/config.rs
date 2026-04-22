@@ -7,7 +7,9 @@
 //!
 //! Use [`EncoderConfig::builder`] / [`DecodeConfig::builder`] when you want a
 //! fluent configuration flow, and use the `with_*` methods when you want to
-//! start from [`Default::default`].
+//! start from [`Default::default`]. Their fields stay private; inspect the
+//! resulting values through the accessor methods such as
+//! [`EncoderConfig::threads`] and [`DecodeConfig::output_container`].
 
 use crate::{PcmContainer, level::Level};
 
@@ -274,13 +276,19 @@ impl DecodeConfig {
     /// ```no_run
     /// use flacx::DecodeConfig;
     ///
+    /// use flacx::PcmContainer;
+    ///
     /// let config = DecodeConfig::builder()
     ///     .threads(4)
+    ///     .emit_fxmd(false)
+    ///     .output_container(PcmContainer::Wave64)
     ///     .strict_channel_mask_provenance(true)
     ///     .strict_seektable_validation(true)
     ///     .build();
-    ///
+///
     /// assert_eq!(config.threads(), 4);
+    /// assert!(!config.emit_fxmd());
+    /// assert_eq!(config.output_container(), PcmContainer::Wave64);
     /// assert!(config.strict_channel_mask_provenance());
     /// assert!(config.strict_seektable_validation());
     /// ```
@@ -509,15 +517,11 @@ mod tests {
             .strict_seektable_validation(true)
             .build();
 
-        assert_eq!(
-            built,
-            DecodeConfig::default()
-                .with_threads(4)
-                .with_emit_fxmd(false)
-                .with_output_container(PcmContainer::Wave64)
-                .with_strict_channel_mask_provenance(true)
-                .with_strict_seektable_validation(true)
-        );
+        assert_eq!(built.threads(), 4);
+        assert!(!built.emit_fxmd());
+        assert_eq!(built.output_container(), PcmContainer::Wave64);
+        assert!(built.strict_channel_mask_provenance());
+        assert!(built.strict_seektable_validation());
     }
 
     #[test]

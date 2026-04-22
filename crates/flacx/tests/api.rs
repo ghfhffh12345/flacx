@@ -260,6 +260,35 @@ fn api_top_level_public_api_uses_pcm_inspection_naming() {
 }
 
 #[test]
+fn api_docs_examples_use_reset_reader_entry_points() {
+    let lib_source = include_str!("../src/lib.rs");
+    let decode_source = include_str!("../src/decode.rs");
+    let readme = include_str!("../README.md");
+
+    assert!(lib_source.contains("use flacx::{EncoderConfig, PcmReader};"));
+    assert!(lib_source.contains("let source = PcmReader::new(input)?.into_source();"));
+    assert!(lib_source.contains("use flacx::{DecodeConfig, read_flac_reader};"));
+    assert!(lib_source.contains("let source = read_flac_reader(input)?.into_decode_source();"));
+    assert!(lib_source.contains(
+        "let source = read_flac_reader(input)?.into_recompress_source();"
+    ));
+    assert!(!lib_source.contains("use flacx::{EncoderConfig, WavReader};"));
+    assert!(!lib_source.contains("use flacx::{DecodeConfig, FlacReader};"));
+    assert!(!lib_source.contains("use flacx::{FlacReader, RecompressConfig};"));
+
+    assert!(decode_source.contains("use flacx::{DecodeConfig, read_flac_reader};"));
+    assert!(decode_source.contains(
+        "let reader = read_flac_reader(std::fs::File::open(\"input.flac\").unwrap()).unwrap();"
+    ));
+    assert!(!decode_source.contains("use flacx::{DecodeConfig, FlacReader};"));
+
+    assert!(readme.contains("`PcmReader` for PCM-container inputs, `read_flac_reader` for FLAC inputs,"));
+    assert!(readme.contains("`inspect_pcm_total_samples`"));
+    assert!(!readme.contains("`WavReader`, and"));
+    assert!(!readme.contains("`FlacReader`."));
+}
+
+#[test]
 fn api_public_error_surface_uses_pcm_container_variants() {
     let error_source = include_str!("../src/error.rs");
     assert!(error_source.contains("InvalidPcmContainer"));
@@ -281,9 +310,14 @@ fn api_config_accessors_replace_public_field_contract() {
     let config_source = include_str!("../src/config.rs");
     assert!(config_source.contains("pub fn level(&self) -> Level"));
     assert!(config_source.contains("pub fn threads(&self) -> usize"));
+    assert!(config_source.contains("pub fn emit_fxmd(&self) -> bool"));
     assert!(config_source.contains("pub fn output_container(&self) -> PcmContainer"));
+    assert!(config_source.contains(
+        "Their fields stay private; inspect the\n//! resulting values through the accessor methods"
+    ));
     assert!(!config_source.contains("pub level: Level"));
     assert!(!config_source.contains("pub threads: usize"));
+    assert!(!config_source.contains("pub emit_fxmd: bool"));
     assert!(!config_source.contains("pub output_container: PcmContainer"));
 }
 

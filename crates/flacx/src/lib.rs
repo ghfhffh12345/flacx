@@ -20,14 +20,14 @@
 //! Encode a supported PCM container to FLAC:
 //!
 //! ```no_run
-//! use flacx::{EncoderConfig, WavReader};
+//! use flacx::{EncoderConfig, PcmReader};
 //! use std::{
 //!     fs::File,
 //!     io::{BufReader, BufWriter},
 //! };
 //!
 //! let input = BufReader::new(File::open("input.wav")?);
-//! let source = WavReader::new(input)?.into_source();
+//! let source = PcmReader::new(input)?.into_source();
 //!
 //! let output = BufWriter::new(File::create("output.flac")?);
 //! let mut encoder = EncoderConfig::default().into_encoder(output);
@@ -67,14 +67,14 @@
 //! Decode a FLAC stream to a PCM container:
 //!
 //! ```no_run
-//! use flacx::{DecodeConfig, FlacReader};
+//! use flacx::{DecodeConfig, read_flac_reader};
 //! use std::{
 //!     fs::File,
 //!     io::{BufReader, BufWriter},
 //! };
 //!
 //! let input = BufReader::new(File::open("input.flac")?);
-//! let source = FlacReader::new(input)?.into_decode_source();
+//! let source = read_flac_reader(input)?.into_decode_source();
 //!
 //! let output = BufWriter::new(File::create("output.wav")?);
 //! let mut decoder = DecodeConfig::default().into_decoder(output);
@@ -85,14 +85,14 @@
 //! Recompress an existing FLAC stream:
 //!
 //! ```no_run
-//! use flacx::{FlacReader, RecompressConfig};
+//! use flacx::{RecompressConfig, read_flac_reader};
 //! use std::{
 //!     fs::File,
 //!     io::{BufReader, BufWriter},
 //! };
 //!
 //! let input = BufReader::new(File::open("input.flac")?);
-//! let source = FlacReader::new(input)?.into_recompress_source();
+//! let source = read_flac_reader(input)?.into_recompress_source();
 //!
 //! let output = BufWriter::new(File::create("recompressed.flac")?);
 //! let mut recompressor = RecompressConfig::default().into_recompressor(output);
@@ -311,11 +311,11 @@ pub struct _ProgressTypeFeatureDisabledDoc;
 
 #[cfg(not(feature = "progress"))]
 #[doc = r#"```compile_fail
-use flacx::{EncoderConfig, WavReader};
+use flacx::{EncoderConfig, PcmReader};
 
 fn main() {
     let input = std::io::Cursor::new(Vec::<u8>::new());
-    let reader = WavReader::new(input).unwrap();
+    let reader = PcmReader::new(input).unwrap();
     let source = reader.into_source();
     let output = std::io::Cursor::new(Vec::<u8>::new());
     let mut encoder = EncoderConfig::default().into_encoder(output);

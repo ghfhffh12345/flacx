@@ -114,9 +114,9 @@ where
     /// # Example
     ///
     /// ```no_run
-    /// use flacx::{DecodeConfig, FlacReader};
+    /// use flacx::{DecodeConfig, read_flac_reader};
     ///
-    /// let reader = FlacReader::new(std::fs::File::open("input.flac").unwrap()).unwrap();
+    /// let reader = read_flac_reader(std::fs::File::open("input.flac").unwrap()).unwrap();
     /// let source = reader.into_decode_source();
     /// let mut decoder = DecodeConfig::default()
     ///     .into_decoder(std::io::Cursor::new(Vec::new()));

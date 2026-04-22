@@ -39,9 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For finer control, use the explicit config and reader types such as
-`EncoderConfig`, `DecodeConfig`, `RecompressConfig`, `WavReader`, and
-`FlacReader`.
+For finer control, use the explicit pipeline:
+`PcmReader` for PCM-container inputs, `read_flac_reader` for FLAC inputs,
+`EncoderConfig` / `DecodeConfig` / `RecompressConfig` for session policy, and
+`inspect_pcm_total_samples` when you need a preflight sample count without a
+full decode.
 
 ## Feature flags
 
@@ -54,4 +56,3 @@ For finer control, use the explicit config and reader types such as
 
 For the full API, examples, and module documentation, see the rustdoc on
 <https://docs.rs/flacx> or run `cargo doc -p flacx --open`.
-
