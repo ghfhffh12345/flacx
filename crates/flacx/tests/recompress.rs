@@ -377,23 +377,29 @@ fn recompress_builder_matches_fluent_config() {
 }
 
 #[test]
-fn recompress_verifier_limits_take_decoded_samples_to_bounded_small_inputs() {
+fn recompress_session_has_no_eager_or_buffered_pcm_handoff() {
     let verify_source = include_str!("../src/recompress/verify.rs");
     let session_source = include_str!("../src/recompress/session.rs");
-    assert!(verify_source.contains("into_verified_pcm_stream"));
-    assert!(session_source.contains("EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD"));
+    let source_source = include_str!("../src/recompress/source.rs");
+
+    assert!(!verify_source.contains("into_verified_pcm_stream"));
+    assert!(!session_source.contains("EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD"));
+    assert!(!session_source.contains("BufferedRecompressPcmStream"));
+    assert!(!source_source.contains("into_verified_pcm_stream"));
+    assert!(session_source.contains("into_encode_parts()"));
 }
 
+#[cfg(feature = "progress")]
 #[test]
-fn recompress_session_avoids_buffered_encode_handoff() {
-    let session_source = include_str!("../src/recompress/session.rs");
-    let encoder_source = include_str!("../src/encoder.rs");
-    assert!(session_source.contains("into_verified_pcm_stream()?"));
-    assert!(session_source.contains("into_encode_parts()"));
-    assert!(session_source.contains("BufferedRecompressPcmStream"));
-    assert!(session_source.contains("counted_encode_pcm_stream"));
-    assert!(!encoder_source.contains("encode_buffered_pcm_with_sink"));
-    assert!(!encoder_source.contains("encode_buffered_frames"));
+fn recompress_source_streams_verified_pcm_for_small_inputs_too() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let config = RecompressConfig::default().with_threads(1);
+    let reader = read_flac_reader_with_options(Cursor::new(&flac), reader_options(config)).unwrap();
+    let source = reader.into_recompress_source();
+    let mut recompressor = config.into_recompressor(Cursor::new(Vec::new()));
+
+    recompressor.recompress(source).unwrap();
 }
 
 #[cfg(feature = "progress")]
