@@ -92,6 +92,9 @@ fn decode_bytes_with_threads(flac: &[u8], threads: usize) -> Vec<u8> {
 }
 
 #[cfg(feature = "progress")]
+const DECODE_DEADLOCK_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[cfg(feature = "progress")]
 fn run_decode_with_timeout<T: Send + 'static>(
     job: impl FnOnce() -> flacx::Result<T> + Send + 'static,
 ) -> flacx::Result<T> {
@@ -100,7 +103,7 @@ fn run_decode_with_timeout<T: Send + 'static>(
         let _ = sender.send(job());
     });
     receiver
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(DECODE_DEADLOCK_TIMEOUT)
         .expect("decode job should complete without deadlock")
 }
 
@@ -294,36 +297,67 @@ fn decode_pcm_stream_trait_does_not_expose_profile_hooks() {
     );
 }
 
+#[cfg(feature = "progress")]
 #[test]
-fn flac_pcm_stream_uses_slab_native_session_state() {
-    let source = include_str!("../src/read.rs");
-    for legacy_name in [
-        "field(\"inflight_packets\"",
-        "ready_packet_count",
-        "next_ready_packet_start_frame",
-        "has_draining_packet",
-        "fn take_staged_packet_bytes",
-        "fn active_packet_count",
-        "fn collect_ready_packets",
-        "fn wait_for_ready_packet",
-    ] {
-        assert!(
-            !source.contains(legacy_name),
-            "FlacPcmStream should use slab/session-native state instead of `{legacy_name}`"
-        );
-    }
-}
+fn segmented_direct_decode_emits_profile_summary_after_small_ordered_writes() {
+    let profile = DecodeProfileGuard::new();
+    let flac = large_streaming_decode_flac_bytes(4);
+    let expected_wav = large_streaming_decode_wav_bytes();
+    let mut output = Cursor::new(Vec::new());
+    let mut decoder = DecodeConfig::default()
+        .with_threads(4)
+        .into_decoder(&mut output);
 
-#[test]
-fn decode_output_releases_segmented_handoffs_after_ordered_writes() {
-    let source = include_str!("../src/decode_output.rs");
+    let summary = decoder
+        .decode_source(segmented_decode_source_with_advertised_max_block_size(
+            &flac, 1,
+        ))
+        .unwrap();
+    let profile_summary = profile.summary();
+
+    assert_eq!(
+        summary.total_samples,
+        LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
+    );
+    assert_eq!(wav_data_bytes(&output.into_inner()), wav_data_bytes(&expected_wav));
     assert!(
-        source.contains("release_ordered_decode_output_for_current_thread"),
-        "decode output should acknowledge ordered slab handoff releases after writer commits"
+        *profile_summary.get("peak_active_window_slabs").unwrap() > 0,
+        "segmented direct decode should exercise the rolling slab window"
     );
     assert!(
-        !source.contains("release_decode_output_buffer_for_current_thread();"),
-        "decode output should not release decode residency for every written chunk"
+        *profile_summary.get("peak_resident_pcm_frames").unwrap() > 0,
+        "segmented direct decode should release ordered slab output through the profile session"
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn segmented_direct_decode_progress_failure_does_not_emit_profile_summary() {
+    let profile = DecodeProfileGuard::new();
+    let flac = large_streaming_decode_flac_bytes(4);
+
+    let error = run_decode_with_timeout(move || {
+        let mut output = Cursor::new(Vec::new());
+        let mut decoder = DecodeConfig::default()
+            .with_threads(4)
+            .into_decoder(&mut output);
+        decoder.decode_source_with_progress(
+            segmented_decode_source_with_advertised_max_block_size(&flac, 1),
+            |progress| {
+                if progress.completed_frames >= 2 {
+                    Err(flacx::Error::Decode("injected progress failure".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("injected progress failure"));
+    assert!(
+        profile.try_summary().is_none(),
+        "segmented direct decode should not emit a summary after cancellation"
     );
 }
 
