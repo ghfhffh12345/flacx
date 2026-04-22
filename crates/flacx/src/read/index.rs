@@ -15,7 +15,6 @@ pub(super) struct RollingIndexConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FrameDescriptor {
     pub(super) frame: FrameIndex,
-    pub(super) bytes_consumed: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +92,21 @@ impl RollingIndexWindow {
         frame: ParsedFrame,
         offset: usize,
     ) -> Result<Option<DecodeSlabPlan>> {
+        if self.should_seal_before_adding(&frame) {
+            let sealed = self.seal_pending_slab();
+            self.append_frame(frame, offset);
+            return Ok(Some(sealed));
+        }
+
+        self.append_frame(frame, offset);
+        Ok(self.should_seal_slab().then(|| self.seal_pending_slab()))
+    }
+
+    pub(super) fn finish(&mut self) -> Option<DecodeSlabPlan> {
+        (!self.pending_frames.is_empty()).then(|| self.seal_pending_slab())
+    }
+
+    fn append_frame(&mut self, frame: ParsedFrame, offset: usize) {
         let frame_index = FrameIndex {
             header_number: frame.header_number,
             offset,
@@ -104,17 +118,9 @@ impl RollingIndexWindow {
         };
         self.pending_pcm_frames += usize::from(frame.block_size);
         self.pending_bytes += frame.bytes_consumed;
-        self.pending_frames.push(FrameDescriptor {
-            frame: frame_index,
-            bytes_consumed: frame.bytes_consumed,
-        });
+        self.pending_frames
+            .push(FrameDescriptor { frame: frame_index });
         self.next_frame_index += 1;
-
-        Ok(self.should_seal_slab().then(|| self.seal_pending_slab()))
-    }
-
-    pub(super) fn finish(&mut self) -> Option<DecodeSlabPlan> {
-        (!self.pending_frames.is_empty()).then(|| self.seal_pending_slab())
     }
 
     fn should_seal_slab(&self) -> bool {
@@ -122,6 +128,16 @@ impl RollingIndexWindow {
             && (self.pending_pcm_frames >= self.config.target_pcm_frames_per_slab
                 || self.pending_frames.len() >= self.config.max_frames_per_slab
                 || self.pending_bytes >= self.config.max_bytes_per_slab)
+    }
+
+    fn should_seal_before_adding(&self, frame: &ParsedFrame) -> bool {
+        !self.pending_frames.is_empty()
+            && (self
+                .pending_pcm_frames
+                .saturating_add(usize::from(frame.block_size))
+                > self.config.target_pcm_frames_per_slab
+                || self.pending_bytes.saturating_add(frame.bytes_consumed)
+                    > self.config.max_bytes_per_slab)
     }
 
     fn seal_pending_slab(&mut self) -> DecodeSlabPlan {
@@ -204,6 +220,7 @@ mod tests {
         assert_eq!(first.len(), 0);
 
         let second = window.push_mock_frame(16, 32).unwrap();
+        assert_eq!(second.len(), 1);
         assert_eq!(second[0].sequence, 0);
         assert_eq!(second[0].frame_block_sizes, vec![16, 16]);
         assert!(window.has_capacity());
@@ -224,6 +241,88 @@ mod tests {
         assert!(!window.has_capacity());
 
         window.retire_sequence(0);
+        assert!(window.has_capacity());
+    }
+
+    #[test]
+    fn seals_before_admitting_a_frame_that_would_exceed_the_pcm_budget() {
+        let config = RollingIndexConfig {
+            target_pcm_frames_per_slab: 24,
+            max_frames_per_slab: 4,
+            max_bytes_per_slab: 256,
+            max_slabs_ahead: 4,
+        };
+        let mut window = RollingIndexWindow::new(stream_info(), config);
+
+        assert!(window.push_mock_frame(16, 32).unwrap().is_empty());
+        let sealed = window.push_mock_frame(16, 32).unwrap();
+
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].sequence, 0);
+        assert_eq!(sealed[0].frame_block_sizes, vec![16]);
+
+        let flushed = window.finish().expect("partial slab flushes at EOF");
+        assert_eq!(flushed.sequence, 1);
+        assert_eq!(flushed.frame_block_sizes, vec![16]);
+    }
+
+    #[test]
+    fn seals_before_admitting_a_frame_that_would_exceed_the_byte_budget() {
+        let config = RollingIndexConfig {
+            target_pcm_frames_per_slab: 64,
+            max_frames_per_slab: 4,
+            max_bytes_per_slab: 48,
+            max_slabs_ahead: 4,
+        };
+        let mut window = RollingIndexWindow::new(stream_info(), config);
+
+        assert!(window.push_mock_frame(16, 24).unwrap().is_empty());
+        let sealed = window.push_mock_frame(16, 25).unwrap();
+
+        assert_eq!(sealed.len(), 1);
+        assert_eq!(sealed[0].sequence, 0);
+        assert_eq!(sealed[0].frame_block_sizes, vec![16]);
+
+        let flushed = window.finish().expect("partial slab flushes at EOF");
+        assert_eq!(flushed.sequence, 1);
+        assert_eq!(flushed.frame_block_sizes, vec![16]);
+    }
+
+    #[test]
+    fn finish_flushes_a_partial_slab() {
+        let config = RollingIndexConfig {
+            target_pcm_frames_per_slab: 64,
+            max_frames_per_slab: 4,
+            max_bytes_per_slab: 256,
+            max_slabs_ahead: 2,
+        };
+        let mut window = RollingIndexWindow::new(stream_info(), config);
+
+        assert!(window.push_mock_frame(16, 32).unwrap().is_empty());
+
+        let flushed = window.finish().expect("partial slab flushes at EOF");
+        assert_eq!(flushed.sequence, 0);
+        assert_eq!(flushed.frame_block_sizes, vec![16]);
+        assert!(window.finish().is_none());
+    }
+
+    #[test]
+    fn completed_input_frame_progress_reopens_capacity() {
+        let config = RollingIndexConfig {
+            target_pcm_frames_per_slab: 16,
+            max_frames_per_slab: 1,
+            max_bytes_per_slab: 128,
+            max_slabs_ahead: 2,
+        };
+        let mut window = RollingIndexWindow::new(stream_info(), config);
+
+        let first = window.push_mock_frame(16, 32).unwrap();
+        let second = window.push_mock_frame(16, 32).unwrap();
+        assert_eq!(first[0].sequence, 0);
+        assert_eq!(second[0].sequence, 1);
+        assert!(!window.has_capacity());
+
+        window.retire_completed_input_frames(1);
         assert!(window.has_capacity());
     }
 }
