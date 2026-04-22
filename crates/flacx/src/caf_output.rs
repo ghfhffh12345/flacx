@@ -64,13 +64,13 @@ pub(crate) fn write_caf<W: Write>(
     metadata: &Metadata,
 ) -> Result<[u8; 16]> {
     if !(1..=8).contains(&spec.channels) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only the ordinary 1..8 channel envelope is supported, found {} channels",
             spec.channels
         )));
     }
     if !matches!(spec.bits_per_sample, 4..=32) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only FLAC-native 4..32 valid bits/sample are supported, found {}",
             spec.bits_per_sample
         )));
@@ -83,7 +83,7 @@ pub(crate) fn write_caf<W: Write>(
 
     let container_bits_per_sample = container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
     if spec.bytes_per_sample * 8 != container_bits_per_sample {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "bytes/sample does not match the chosen container width for {} valid bits/sample",
             spec.bits_per_sample
         )));
@@ -100,7 +100,7 @@ pub(crate) fn write_caf<W: Write>(
     let data_bytes = u64::try_from(samples.len())
         .expect("sample slice length fits u64")
         .checked_mul(u64::from(container_bits_per_sample / 8))
-        .ok_or_else(|| Error::UnsupportedWav("CAF data chunk overflows".into()))?;
+        .ok_or_else(|| Error::UnsupportedPcmContainer("CAF data chunk overflows".into()))?;
 
     let channel_layout_chunk = caf_channel_layout_chunk(spec)?;
     let info_chunk = caf_info_chunk_payload(metadata)?;
@@ -133,13 +133,13 @@ impl<W: Write> CafStreamWriter<W> {
     pub(crate) fn new(writer: W, spec: PcmSpec, metadata: &Metadata) -> Result<Self> {
         let mut writer = CountingWrite::new(writer);
         if !(1..=8).contains(&spec.channels) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "only the ordinary 1..8 channel envelope is supported, found {} channels",
                 spec.channels
             )));
         }
         if !matches!(spec.bits_per_sample, 4..=32) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "only FLAC-native 4..32 valid bits/sample are supported, found {}",
                 spec.bits_per_sample
             )));
@@ -148,7 +148,7 @@ impl<W: Write> CafStreamWriter<W> {
         let container_bits_per_sample =
             container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
         if spec.bytes_per_sample * 8 != container_bits_per_sample {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "bytes/sample does not match the chosen container width for {} valid bits/sample",
                 spec.bits_per_sample
             )));
@@ -164,7 +164,7 @@ impl<W: Write> CafStreamWriter<W> {
             .total_samples
             .checked_mul(u64::from(spec.channels))
             .and_then(|count| count.checked_mul(u64::from(container_bits_per_sample / 8)))
-            .ok_or_else(|| Error::UnsupportedWav("CAF data chunk overflows".into()))?;
+            .ok_or_else(|| Error::UnsupportedPcmContainer("CAF data chunk overflows".into()))?;
         let channel_layout_chunk = caf_channel_layout_chunk(spec)?;
         let info_chunk = caf_info_chunk_payload(metadata)?;
         let mark_chunk = caf_mark_chunk_payload(metadata)?;
@@ -214,7 +214,7 @@ fn write_desc_chunk<W: Write>(
 ) -> Result<()> {
     let bytes_per_frame = u32::from(spec.channels)
         .checked_mul(u32::from(container_bits_per_sample / 8))
-        .ok_or_else(|| Error::UnsupportedWav("CAF bytes/frame overflows".into()))?;
+        .ok_or_else(|| Error::UnsupportedPcmContainer("CAF bytes/frame overflows".into()))?;
 
     let mut payload = Vec::with_capacity(32);
     payload.extend_from_slice(&(spec.sample_rate as f64).to_be_bytes());
@@ -231,9 +231,10 @@ fn write_desc_chunk<W: Write>(
 fn write_data_chunk_header<W: Write>(writer: &mut W, data_bytes: u64) -> Result<()> {
     let payload_size = 4u64
         .checked_add(data_bytes)
-        .ok_or_else(|| Error::UnsupportedWav("CAF data chunk overflows".into()))?;
-    let payload_size = i64::try_from(payload_size)
-        .map_err(|_| Error::UnsupportedWav("CAF data chunk exceeds signed size range".into()))?;
+        .ok_or_else(|| Error::UnsupportedPcmContainer("CAF data chunk overflows".into()))?;
+    let payload_size = i64::try_from(payload_size).map_err(|_| {
+        Error::UnsupportedPcmContainer("CAF data chunk exceeds signed size range".into())
+    })?;
 
     writer.write_all(&CAF_DATA_CHUNK_ID)?;
     writer.write_all(&payload_size.to_be_bytes())?;
@@ -253,20 +254,20 @@ fn caf_channel_layout_chunk(spec: PcmSpec) -> Result<Option<Vec<u8>>> {
         return if channels <= 2 {
             Ok(None)
         } else {
-            Err(Error::UnsupportedWav(format!(
+            Err(Error::UnsupportedPcmContainer(format!(
                 "CAF 3..8 channel outputs require a supported channel layout bitmap, found {mask:#010x}"
             )))
         };
     }
 
     if !is_supported_channel_mask(u16::from(spec.channels), mask) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "channel mask {mask:#010x} is not supported for {} channels",
             spec.channels
         )));
     }
     if mask.count_ones() != channels {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "channel mask {mask:#010x} does not describe {} channels",
             spec.channels
         )));
@@ -342,7 +343,7 @@ fn caf_mark_chunk_payload(metadata: &Metadata) -> Result<Option<Vec<u8>>> {
 
 fn parse_riff_info_payload(payload: &[u8]) -> Result<Vec<([u8; 4], String)>> {
     if payload.len() < 4 || &payload[..4] != b"INFO" {
-        return Err(Error::InvalidWav("RIFF INFO payload is invalid"));
+        return Err(Error::InvalidPcmContainer("RIFF INFO payload is invalid"));
     }
 
     let mut cursor = 4usize;
@@ -360,17 +361,19 @@ fn parse_riff_info_payload(payload: &[u8]) -> Result<Vec<([u8; 4], String)>> {
 
         let end = cursor
             .checked_add(chunk_len)
-            .ok_or(Error::InvalidWav("RIFF INFO payload length overflows"))?;
+            .ok_or(Error::InvalidPcmContainer(
+                "RIFF INFO payload length overflows",
+            ))?;
         if end > payload.len() {
-            return Err(Error::InvalidWav("RIFF INFO payload is truncated"));
+            return Err(Error::InvalidPcmContainer("RIFF INFO payload is truncated"));
         }
 
         let value = String::from_utf8(payload[cursor..end].to_vec())
-            .map_err(|_| Error::InvalidWav("RIFF INFO payload contains invalid UTF-8"))?;
+            .map_err(|_| Error::InvalidPcmContainer("RIFF INFO payload contains invalid UTF-8"))?;
         cursor = end;
         if !chunk_len.is_multiple_of(2) {
             if cursor >= payload.len() {
-                return Err(Error::InvalidWav("RIFF INFO payload is truncated"));
+                return Err(Error::InvalidPcmContainer("RIFF INFO payload is truncated"));
             }
             cursor += 1;
         }
@@ -379,7 +382,9 @@ fn parse_riff_info_payload(payload: &[u8]) -> Result<Vec<([u8; 4], String)>> {
     }
 
     if cursor != payload.len() {
-        return Err(Error::InvalidWav("RIFF INFO payload has trailing bytes"));
+        return Err(Error::InvalidPcmContainer(
+            "RIFF INFO payload has trailing bytes",
+        ));
     }
 
     Ok(entries)
@@ -387,7 +392,7 @@ fn parse_riff_info_payload(payload: &[u8]) -> Result<Vec<([u8; 4], String)>> {
 
 fn parse_riff_cue_payload(payload: &[u8]) -> Result<Vec<u32>> {
     if payload.len() < 4 {
-        return Err(Error::InvalidWav("RIFF cue payload is too short"));
+        return Err(Error::InvalidPcmContainer("RIFF cue payload is too short"));
     }
 
     let cue_count = u32::from_le_bytes(payload[..4].try_into().expect("fixed cue count")) as usize;
@@ -396,7 +401,7 @@ fn parse_riff_cue_payload(payload: &[u8]) -> Result<Vec<u32>> {
 
     for _ in 0..cue_count {
         if cursor + 24 > payload.len() {
-            return Err(Error::InvalidWav("RIFF cue payload is truncated"));
+            return Err(Error::InvalidPcmContainer("RIFF cue payload is truncated"));
         }
 
         cursor += 8; // cue point id + position
@@ -405,7 +410,7 @@ fn parse_riff_cue_payload(payload: &[u8]) -> Result<Vec<u32>> {
             .expect("fixed cue chunk id");
         cursor += 4;
         if chunk_id != *b"data" {
-            return Err(Error::InvalidWav(
+            return Err(Error::InvalidPcmContainer(
                 "RIFF cue payload references an unsupported chunk",
             ));
         }
@@ -420,7 +425,9 @@ fn parse_riff_cue_payload(payload: &[u8]) -> Result<Vec<u32>> {
     }
 
     if cursor != payload.len() {
-        return Err(Error::InvalidWav("RIFF cue payload has trailing bytes"));
+        return Err(Error::InvalidPcmContainer(
+            "RIFF cue payload has trailing bytes",
+        ));
     }
 
     Ok(cue_points)
@@ -448,8 +455,9 @@ fn caf_info_key_for_riff_chunk_id(chunk_id: [u8; 4], value: &str) -> Option<Stri
 }
 
 fn write_chunk<W: Write>(writer: &mut W, chunk_id: [u8; 4], payload: &[u8]) -> Result<()> {
-    let payload_len = i64::try_from(payload.len())
-        .map_err(|_| Error::UnsupportedWav("CAF chunk exceeds signed size range".into()))?;
+    let payload_len = i64::try_from(payload.len()).map_err(|_| {
+        Error::UnsupportedPcmContainer("CAF chunk exceeds signed size range".into())
+    })?;
     writer.write_all(&chunk_id)?;
     writer.write_all(&payload_len.to_be_bytes())?;
     writer.write_all(payload)?;
@@ -477,11 +485,11 @@ fn append_caf_encoded_sample(
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
-        .ok_or(Error::InvalidWav(
+        .ok_or(Error::InvalidPcmContainer(
             "valid bits cannot exceed container bits for encoding",
         ))? as u32;
     let sample = sample.checked_shl(shift).ok_or_else(|| {
-        Error::UnsupportedWav(format!(
+        Error::UnsupportedPcmContainer(format!(
             "unsupported valid bits/container bits combination: {}/{}",
             envelope.valid_bits_per_sample, envelope.container_bits_per_sample
         ))
@@ -489,20 +497,22 @@ fn append_caf_encoded_sample(
 
     match envelope.container_bits_per_sample {
         8 => {
-            let value = i8::try_from(sample)
-                .map_err(|_| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+            let value = i8::try_from(sample).map_err(|_| {
+                Error::UnsupportedPcmContainer("8-bit sample is out of range".into())
+            })?;
             buffer.push(value as u8);
             Ok(())
         }
         16 => {
-            let value = i16::try_from(sample)
-                .map_err(|_| Error::UnsupportedWav("16-bit sample is out of range".into()))?;
+            let value = i16::try_from(sample).map_err(|_| {
+                Error::UnsupportedPcmContainer("16-bit sample is out of range".into())
+            })?;
             buffer.extend_from_slice(&value.to_le_bytes());
             Ok(())
         }
         24 => {
             if !(-8_388_608..=8_388_607).contains(&sample) {
-                return Err(Error::UnsupportedWav(
+                return Err(Error::UnsupportedPcmContainer(
                     "24-bit sample is out of range".into(),
                 ));
             }
@@ -513,7 +523,7 @@ fn append_caf_encoded_sample(
             buffer.extend_from_slice(&sample.to_le_bytes());
             Ok(())
         }
-        _ => Err(Error::UnsupportedWav(format!(
+        _ => Err(Error::UnsupportedPcmContainer(format!(
             "unsupported container bits/sample for encoder: {}",
             envelope.container_bits_per_sample
         ))),

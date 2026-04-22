@@ -144,7 +144,9 @@ impl<W: Write> AiffStreamWriter<W> {
         let frame_bytes =
             u64::from(envelope.channels) * u64::from(envelope.container_bits_per_sample / 8);
         let data_bytes = spec.total_samples.checked_mul(frame_bytes).ok_or_else(|| {
-            Error::UnsupportedWav("AIFF/AIFC data section exceeds addressable range".into())
+            Error::UnsupportedPcmContainer(
+                "AIFF/AIFC data section exceeds addressable range".into(),
+            )
         })?;
         let ssnd_payload_len = ssnd_chunk_payload_len(data_bytes);
         let form_type = match container {
@@ -159,7 +161,9 @@ impl<W: Write> AiffStreamWriter<W> {
         writer.write_all(&SSND_CHUNK_ID)?;
         writer.write_all(
             &u32::try_from(ssnd_payload_len)
-                .map_err(|_| Error::UnsupportedWav("AIFF SSND chunk exceeds 4 GiB".into()))?
+                .map_err(|_| {
+                    Error::UnsupportedPcmContainer("AIFF SSND chunk exceeds 4 GiB".into())
+                })?
                 .to_be_bytes(),
         )?;
         writer.write_all(&0u32.to_be_bytes())?;
@@ -222,27 +226,27 @@ fn validate_aiff_output_shape(spec: PcmSpec, samples: &[i32]) -> Result<PcmEnvel
 
 fn validate_aiff_output_spec(spec: PcmSpec) -> Result<PcmEnvelope> {
     if !(1..=8).contains(&spec.channels) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "AIFF/AIFC output only supports ordinary 1..8 channel PCM, found {} channels",
             spec.channels
         )));
     }
 
     let ordinary_mask = ordinary_channel_mask(u16::from(spec.channels)).ok_or_else(|| {
-        Error::UnsupportedWav(format!(
+        Error::UnsupportedPcmContainer(format!(
             "no ordinary channel mask exists for {} channels",
             spec.channels
         ))
     })?;
     if spec.channel_mask != ordinary_mask {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "AIFF/AIFC output cannot preserve non-ordinary channel mask {:#010x} for {} channels",
             spec.channel_mask, spec.channels
         )));
     }
 
     if !(4..=32).contains(&spec.bits_per_sample) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only FLAC-native 4..32 valid bits/sample are supported, found {}",
             spec.bits_per_sample
         )));
@@ -250,19 +254,19 @@ fn validate_aiff_output_spec(spec: PcmSpec) -> Result<PcmEnvelope> {
 
     let container_bits_per_sample = container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
     if !matches!(container_bits_per_sample, 8 | 16 | 24 | 32) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "AIFF/AIFC output only supports byte-aligned PCM containers, found {} bits/sample",
             container_bits_per_sample
         )));
     }
     if spec.bytes_per_sample * 8 != container_bits_per_sample {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "bytes/sample does not match the chosen container width for {} valid bits/sample",
             spec.bits_per_sample
         )));
     }
     if spec.total_samples > u64::from(u32::MAX) {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "AIFF/AIFC output only supports up to 4,294,967,295 sample frames".into(),
         ));
     }
@@ -385,17 +389,20 @@ fn aiff_form_size(chunks: &[([u8; 4], Vec<u8>)], ssnd_payload_len: u64) -> Resul
         total = total
             .checked_add(aiff_chunk_serialized_size(payload.len()))
             .ok_or_else(|| {
-                Error::UnsupportedWav("AIFF output size exceeds supported range".into())
+                Error::UnsupportedPcmContainer("AIFF output size exceeds supported range".into())
             })?;
     }
     total = total
         .checked_add(aiff_chunk_serialized_size(
             usize::try_from(ssnd_payload_len).map_err(|_| {
-                Error::UnsupportedWav("AIFF output size exceeds supported range".into())
+                Error::UnsupportedPcmContainer("AIFF output size exceeds supported range".into())
             })?,
         ))
-        .ok_or_else(|| Error::UnsupportedWav("AIFF output size exceeds supported range".into()))?;
-    u32::try_from(total).map_err(|_| Error::UnsupportedWav("AIFF output exceeds 4 GiB".into()))
+        .ok_or_else(|| {
+            Error::UnsupportedPcmContainer("AIFF output size exceeds supported range".into())
+        })?;
+    u32::try_from(total)
+        .map_err(|_| Error::UnsupportedPcmContainer("AIFF output exceeds 4 GiB".into()))
 }
 
 fn aiff_chunk_serialized_size(payload_len: usize) -> u64 {
@@ -409,7 +416,9 @@ fn encoded_sample_bytes_len(samples: &[i32], envelope: PcmEnvelope) -> Result<u6
         .len()
         .checked_mul(bytes_per_sample as usize)
         .map(|len| len as u64)
-        .ok_or_else(|| Error::UnsupportedWav("AIFF audio payload exceeds supported range".into()))
+        .ok_or_else(|| {
+            Error::UnsupportedPcmContainer("AIFF audio payload exceeds supported range".into())
+        })
 }
 
 fn ssnd_chunk_payload_len(data_bytes: u64) -> u64 {
@@ -442,7 +451,7 @@ fn write_aiff_ssnd_chunk<W: Write>(
     writer.write_all(&SSND_CHUNK_ID)?;
     writer.write_all(
         &u32::try_from(ssnd_payload_len)
-            .map_err(|_| Error::UnsupportedWav("AIFF SSND chunk exceeds 4 GiB".into()))?
+            .map_err(|_| Error::UnsupportedPcmContainer("AIFF SSND chunk exceeds 4 GiB".into()))?
             .to_be_bytes(),
     )?;
     writer.write_all(&0u32.to_be_bytes())?;
@@ -466,11 +475,11 @@ fn append_aiff_encoded_sample(
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
-        .ok_or(Error::InvalidWav(
+        .ok_or(Error::InvalidPcmContainer(
             "valid bits cannot exceed container bits for encoding",
         ))? as u32;
     let sample = sample.checked_shl(shift).ok_or_else(|| {
-        Error::UnsupportedWav(format!(
+        Error::UnsupportedPcmContainer(format!(
             "unsupported valid bits/container bits combination: {}/{}",
             envelope.valid_bits_per_sample, envelope.container_bits_per_sample
         ))
@@ -478,20 +487,22 @@ fn append_aiff_encoded_sample(
 
     match envelope.container_bits_per_sample {
         8 => {
-            let value = i8::try_from(sample)
-                .map_err(|_| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+            let value = i8::try_from(sample).map_err(|_| {
+                Error::UnsupportedPcmContainer("8-bit sample is out of range".into())
+            })?;
             buffer.push(value as u8);
             Ok(())
         }
         16 => {
-            let value = i16::try_from(sample)
-                .map_err(|_| Error::UnsupportedWav("16-bit sample is out of range".into()))?;
+            let value = i16::try_from(sample).map_err(|_| {
+                Error::UnsupportedPcmContainer("16-bit sample is out of range".into())
+            })?;
             buffer.extend_from_slice(&value.to_be_bytes());
             Ok(())
         }
         24 => {
             if !(-8_388_608..=8_388_607).contains(&sample) {
-                return Err(Error::UnsupportedWav(
+                return Err(Error::UnsupportedPcmContainer(
                     "24-bit sample is out of range".into(),
                 ));
             }
@@ -502,7 +513,7 @@ fn append_aiff_encoded_sample(
             buffer.extend_from_slice(&sample.to_be_bytes());
             Ok(())
         }
-        _ => Err(Error::UnsupportedWav(format!(
+        _ => Err(Error::UnsupportedPcmContainer(format!(
             "unsupported container bits/sample for encoder: {}",
             envelope.container_bits_per_sample
         ))),

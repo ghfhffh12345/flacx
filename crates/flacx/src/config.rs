@@ -25,17 +25,17 @@ use crate::{PcmContainer, level::Level};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderConfig {
     /// Compression level preset to use for encoding.
-    pub level: Level,
+    level: Level,
     /// Number of worker threads the encoder may use.
-    pub threads: usize,
+    threads: usize,
     /// Fixed block size in samples when no custom block schedule is supplied.
-    pub block_size: u16,
+    block_size: u16,
     /// Optional sequence of block sizes to use instead of a single block size.
-    pub block_schedule: Option<Vec<u16>>,
+    block_schedule: Option<Vec<u16>>,
     /// Whether to import the private `fxmd` WAV chunk during encode-side metadata capture.
-    pub capture_fxmd: bool,
+    capture_fxmd: bool,
     /// Whether invalid or duplicate `fxmd` chunks should fail encode-side metadata capture.
-    pub strict_fxmd_validation: bool,
+    strict_fxmd_validation: bool,
 }
 
 impl Default for EncoderConfig {
@@ -68,12 +68,48 @@ impl EncoderConfig {
     ///     .threads(4)
     ///     .build();
     ///
-    /// assert_eq!(config.level, Level::Level8);
-    /// assert_eq!(config.threads, 4);
+    /// assert_eq!(config.level(), Level::Level8);
+    /// assert_eq!(config.threads(), 4);
     /// ```
     #[must_use]
     pub fn builder() -> EncoderBuilder {
         EncoderBuilder::default()
+    }
+
+    /// Return the compression level preset used for encoding.
+    #[must_use]
+    pub fn level(&self) -> Level {
+        self.level
+    }
+
+    /// Return the worker thread count.
+    #[must_use]
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Return the fixed block size in samples when no custom block schedule is supplied.
+    #[must_use]
+    pub fn block_size(&self) -> u16 {
+        self.block_size
+    }
+
+    /// Return the optional custom block schedule.
+    #[must_use]
+    pub fn block_schedule(&self) -> Option<&[u16]> {
+        self.block_schedule.as_deref()
+    }
+
+    /// Return whether encode-side metadata capture imports the private `fxmd` chunk.
+    #[must_use]
+    pub fn capture_fxmd(&self) -> bool {
+        self.capture_fxmd
+    }
+
+    /// Return whether invalid or duplicate `fxmd` chunks fail metadata capture.
+    #[must_use]
+    pub fn strict_fxmd_validation(&self) -> bool {
+        self.strict_fxmd_validation
     }
 
     /// Set the compression level preset.
@@ -205,15 +241,15 @@ impl EncoderBuilder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeConfig {
     /// Number of worker threads the decoder may use.
-    pub threads: usize,
+    threads: usize,
     /// Whether to emit the private `fxmd` chunk when RIFF-family metadata is preserved during decode.
-    pub emit_fxmd: bool,
+    emit_fxmd: bool,
     /// Which PCM container family to emit for decoded output.
-    pub output_container: PcmContainer,
+    output_container: PcmContainer,
     /// Require channel-layout provenance metadata before restoring a non-ordinary mask.
-    pub strict_channel_mask_provenance: bool,
+    strict_channel_mask_provenance: bool,
     /// Require RFC 9639 seektable validation instead of tolerating malformed tables.
-    pub strict_seektable_validation: bool,
+    strict_seektable_validation: bool,
 }
 
 impl Default for DecodeConfig {
@@ -244,13 +280,43 @@ impl DecodeConfig {
     ///     .strict_seektable_validation(true)
     ///     .build();
     ///
-    /// assert_eq!(config.threads, 4);
-    /// assert!(config.strict_channel_mask_provenance);
-    /// assert!(config.strict_seektable_validation);
+    /// assert_eq!(config.threads(), 4);
+    /// assert!(config.strict_channel_mask_provenance());
+    /// assert!(config.strict_seektable_validation());
     /// ```
     #[must_use]
     pub fn builder() -> DecodeBuilder {
         DecodeBuilder::default()
+    }
+
+    /// Return the worker thread count.
+    #[must_use]
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Return whether decode-side RIFF-family output emits the private `fxmd` chunk.
+    #[must_use]
+    pub fn emit_fxmd(&self) -> bool {
+        self.emit_fxmd
+    }
+
+    /// Return the selected output PCM container family.
+    #[must_use]
+    pub fn output_container(&self) -> PcmContainer {
+        self.output_container
+    }
+
+    /// Return whether strict channel-mask provenance checks are enabled.
+    #[must_use]
+    pub fn strict_channel_mask_provenance(&self) -> bool {
+        self.strict_channel_mask_provenance
+    }
+
+    /// Return whether strict seektable validation is enabled.
+    #[must_use]
+    pub fn strict_seektable_validation(&self) -> bool {
+        self.strict_seektable_validation
     }
 
     /// Set the worker thread count.
@@ -360,7 +426,7 @@ mod tests {
 
     #[test]
     fn with_threads_clamps_to_one() {
-        assert_eq!(EncoderConfig::default().with_threads(0).threads, 1);
+        assert_eq!(EncoderConfig::default().with_threads(0).threads(), 1);
     }
 
     #[test]
@@ -368,7 +434,7 @@ mod tests {
         let config = EncoderConfig::default()
             .with_block_size(576)
             .with_level(Level::Level6);
-        assert_eq!(config.block_size, Level::Level6.profile().block_size);
+        assert_eq!(config.block_size(), Level::Level6.profile().block_size);
     }
 
     #[test]
@@ -397,7 +463,7 @@ mod tests {
         let schedule = vec![576, 1152, 576];
         let config = EncoderConfig::default().with_block_schedule(schedule.clone());
 
-        assert_eq!(config.block_schedule, Some(schedule));
+        assert_eq!(config.block_schedule(), Some(schedule.as_slice()));
     }
 
     #[test]
@@ -406,8 +472,8 @@ mod tests {
             .with_block_schedule(vec![576, 1152])
             .with_block_size(1024);
 
-        assert_eq!(config.block_schedule, None);
-        assert_eq!(config.block_size, 1024);
+        assert_eq!(config.block_schedule(), None);
+        assert_eq!(config.block_size(), 1024);
     }
 
     #[test]
@@ -430,7 +496,7 @@ mod tests {
 
     #[test]
     fn decode_with_threads_clamps_to_one() {
-        assert_eq!(DecodeConfig::default().with_threads(0).threads, 1);
+        assert_eq!(DecodeConfig::default().with_threads(0).threads(), 1);
     }
 
     #[test]
@@ -457,16 +523,16 @@ mod tests {
     #[test]
     fn encoder_default_preserves_fxmd_with_strict_validation() {
         let config = EncoderConfig::default();
-        assert!(config.capture_fxmd);
-        assert!(config.strict_fxmd_validation);
+        assert!(config.capture_fxmd());
+        assert!(config.strict_fxmd_validation());
     }
 
     #[test]
     fn decode_default_emits_fxmd_without_extra_validation() {
         let config = DecodeConfig::default();
-        assert!(config.emit_fxmd);
-        assert_eq!(config.output_container, PcmContainer::Auto);
-        assert!(!config.strict_channel_mask_provenance);
-        assert!(!config.strict_seektable_validation);
+        assert!(config.emit_fxmd());
+        assert_eq!(config.output_container(), PcmContainer::Auto);
+        assert!(!config.strict_channel_mask_provenance());
+        assert!(!config.strict_seektable_validation());
     }
 }

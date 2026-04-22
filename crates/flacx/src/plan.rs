@@ -51,7 +51,7 @@ impl EncodePlan {
         Ok(Self {
             spec,
             framing,
-            profile: config.level.profile(),
+            profile: config.level().profile(),
             total_frames,
         })
     }
@@ -147,12 +147,12 @@ fn validate_stream(spec: &PcmSpec, block_size: u16) -> Result<()> {
 }
 
 fn framing_plan(spec: &PcmSpec, config: &EncoderConfig) -> Result<FramingPlan> {
-    match &config.block_schedule {
+    match config.block_schedule() {
         Some(block_schedule) => variable_framing_plan(spec, block_schedule),
         None => {
-            validate_stream(spec, config.block_size)?;
+            validate_stream(spec, config.block_size())?;
             Ok(FramingPlan::Fixed {
-                block_size: config.block_size,
+                block_size: config.block_size(),
             })
         }
     }

@@ -198,7 +198,7 @@ where
     let output_path = output_path.as_ref();
     let (temp_path, temp_file) = open_temp_output(output_path)?;
     let output_container =
-        inferred_output_container_from_path(output_path)?.unwrap_or(config.output_container);
+        inferred_output_container_from_path(output_path)?.unwrap_or(config.output_container());
 
     let result =
         (|| {
@@ -247,15 +247,15 @@ where
 
 fn pcm_reader_options(config: &EncoderConfig) -> PcmReaderOptions {
     PcmReaderOptions {
-        capture_fxmd: config.capture_fxmd,
-        strict_fxmd_validation: config.strict_fxmd_validation,
+        capture_fxmd: config.capture_fxmd(),
+        strict_fxmd_validation: config.strict_fxmd_validation(),
     }
 }
 
 fn flac_reader_options(config: &DecodeConfig) -> FlacReaderOptions {
     FlacReaderOptions {
-        strict_seektable_validation: config.strict_seektable_validation,
-        strict_channel_mask_provenance: config.strict_channel_mask_provenance,
+        strict_seektable_validation: config.strict_seektable_validation(),
+        strict_channel_mask_provenance: config.strict_channel_mask_provenance(),
     }
 }
 

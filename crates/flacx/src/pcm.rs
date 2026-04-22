@@ -125,7 +125,7 @@ pub(crate) fn append_encoded_sample(
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
-        .ok_or(Error::InvalidWav(
+        .ok_or(Error::InvalidPcmContainer(
             "valid bits cannot exceed container bits for encoding",
         ))? as u32;
 
@@ -134,27 +134,28 @@ pub(crate) fn append_encoded_sample(
             let bias = 1i32 << (envelope.valid_bits_per_sample - 1);
             let stored = (i64::from(sample) + i64::from(bias))
                 .checked_shl(shift)
-                .ok_or_else(|| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
-            let stored = u8::try_from(stored)
-                .map_err(|_| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+                .ok_or_else(|| {
+                    Error::UnsupportedPcmContainer("8-bit sample is out of range".into())
+                })?;
+            let stored = u8::try_from(stored).map_err(|_| {
+                Error::UnsupportedPcmContainer("8-bit sample is out of range".into())
+            })?;
             buffer.push(stored);
             Ok(())
         }
         16 => {
-            let stored =
-                i16::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
-                    Error::UnsupportedWav("16-bit sample is out of range".into())
-                })?)
-                .map_err(|_| Error::UnsupportedWav("16-bit sample is out of range".into()))?;
+            let stored = i16::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                Error::UnsupportedPcmContainer("16-bit sample is out of range".into())
+            })?)
+            .map_err(|_| Error::UnsupportedPcmContainer("16-bit sample is out of range".into()))?;
             buffer.extend_from_slice(&stored.to_le_bytes());
             Ok(())
         }
         24 => {
-            let stored =
-                i32::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
-                    Error::UnsupportedWav("24-bit sample is out of range".into())
-                })?)
-                .map_err(|_| Error::UnsupportedWav("24-bit sample is out of range".into()))?;
+            let stored = i32::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                Error::UnsupportedPcmContainer("24-bit sample is out of range".into())
+            })?)
+            .map_err(|_| Error::UnsupportedPcmContainer("24-bit sample is out of range".into()))?;
             let value = stored as u32;
             buffer.extend_from_slice(&[
                 (value & 0xff) as u8,
@@ -164,15 +165,14 @@ pub(crate) fn append_encoded_sample(
             Ok(())
         }
         32 => {
-            let stored =
-                i32::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
-                    Error::UnsupportedWav("32-bit sample is out of range".into())
-                })?)
-                .map_err(|_| Error::UnsupportedWav("32-bit sample is out of range".into()))?;
+            let stored = i32::try_from(i64::from(sample).checked_shl(shift).ok_or_else(|| {
+                Error::UnsupportedPcmContainer("32-bit sample is out of range".into())
+            })?)
+            .map_err(|_| Error::UnsupportedPcmContainer("32-bit sample is out of range".into()))?;
             buffer.extend_from_slice(&stored.to_le_bytes());
             Ok(())
         }
-        _ => Err(Error::UnsupportedWav(format!(
+        _ => Err(Error::UnsupportedPcmContainer(format!(
             "unsupported container bits/sample for encoder: {}",
             envelope.container_bits_per_sample
         ))),

@@ -136,7 +136,7 @@ where
             .unwrap_or(ENCODE_CHUNK_TARGET_PCM_FRAMES),
     };
     let plan = EncodePlan::new(spec, config.clone())?;
-    let worker_count = config.threads.max(1).min(plan.total_frames.max(1));
+    let worker_count = config.threads().max(1).min(plan.total_frames.max(1));
     let stream_info = plan.stream_info();
     let has_preserved_bundle = metadata.has_preserved_bundle();
     let metadata_blocks = metadata.flac_blocks(spec.total_samples);
@@ -720,7 +720,7 @@ pub(crate) fn encode_chunk(
     chunk_samples: &mut Vec<i32>,
 ) -> Result<EncodedChunk> {
     let frame_count = chunk_end - chunk_start;
-    let worker_count = config.threads.max(1).min(frame_count.max(1));
+    let worker_count = config.threads().max(1).min(frame_count.max(1));
     let chunk_base_sample = plan.frame(chunk_start).sample_offset;
 
     if worker_count == 1 || frame_count <= FRAME_CHUNK_SIZE {

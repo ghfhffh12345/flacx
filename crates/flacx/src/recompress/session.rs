@@ -215,7 +215,7 @@ where
         crate::metadata::align_metadata_to_stream_spec(
             &mut metadata,
             source.spec(),
-            self.config.decode_config().strict_channel_mask_provenance,
+            self.config.decode_config().strict_channel_mask_provenance(),
         )?;
         source.set_metadata(metadata);
         source.set_threads(self.config.threads());

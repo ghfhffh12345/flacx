@@ -149,7 +149,7 @@ impl MetadataDraft {
 
         if self.preserved.is_some() {
             if fxmd_policy.strict {
-                return Err(crate::error::Error::InvalidWav(
+                return Err(crate::error::Error::InvalidPcmContainer(
                     "duplicate fxmd chunk is not allowed",
                 ));
             }
@@ -225,14 +225,14 @@ pub(crate) fn parse_cuesheet_tracks(
     payload: &[u8],
 ) -> crate::error::Result<Vec<CueSheetTrackProjection>> {
     if payload.len() < CUESHEET_HEADER_LEN {
-        return Err(crate::error::Error::InvalidWav(
+        return Err(crate::error::Error::InvalidPcmContainer(
             "cuesheet payload header is truncated",
         ));
     }
 
     let track_count = payload[CUESHEET_HEADER_LEN - 1] as usize;
     if track_count == 0 {
-        return Err(crate::error::Error::InvalidWav(
+        return Err(crate::error::Error::InvalidPcmContainer(
             "cuesheet payload must include a lead-out track",
         ));
     }
@@ -241,7 +241,7 @@ pub(crate) fn parse_cuesheet_tracks(
     let mut tracks = Vec::with_capacity(track_count);
     for track_index in 0..track_count {
         if cursor + CUESHEET_TRACK_HEADER_LEN > payload.len() {
-            return Err(crate::error::Error::InvalidWav(
+            return Err(crate::error::Error::InvalidPcmContainer(
                 "cuesheet track header is truncated",
             ));
         }
@@ -253,7 +253,7 @@ pub(crate) fn parse_cuesheet_tracks(
         );
         let track_number = payload[cursor + 8];
         if track_number == 0 {
-            return Err(crate::error::Error::InvalidWav(
+            return Err(crate::error::Error::InvalidPcmContainer(
                 "cuesheet track number must be non-zero",
             ));
         }
@@ -261,7 +261,7 @@ pub(crate) fn parse_cuesheet_tracks(
             .iter()
             .any(|track: &CueSheetTrackProjection| track.number == track_number)
         {
-            return Err(crate::error::Error::InvalidWav(
+            return Err(crate::error::Error::InvalidPcmContainer(
                 "cuesheet track numbers must be unique",
             ));
         }
@@ -272,12 +272,12 @@ pub(crate) fn parse_cuesheet_tracks(
 
         if is_lead_out {
             if track_number != CUESHEET_LEADOUT_TRACK_NUMBER && track_number != 255 {
-                return Err(crate::error::Error::InvalidWav(
+                return Err(crate::error::Error::InvalidPcmContainer(
                     "cuesheet lead-out track number is invalid",
                 ));
             }
             if index_count != 0 {
-                return Err(crate::error::Error::InvalidWav(
+                return Err(crate::error::Error::InvalidPcmContainer(
                     "cuesheet lead-out track must not contain index points",
                 ));
             }
@@ -286,7 +286,7 @@ pub(crate) fn parse_cuesheet_tracks(
         let mut index_points: Vec<CueSheetIndexPoint> = Vec::with_capacity(index_count);
         for index_position in 0..index_count {
             if cursor + CUESHEET_INDEX_LEN > payload.len() {
-                return Err(crate::error::Error::InvalidWav(
+                return Err(crate::error::Error::InvalidPcmContainer(
                     "cuesheet index point is truncated",
                 ));
             }
@@ -298,14 +298,14 @@ pub(crate) fn parse_cuesheet_tracks(
             );
             let index_number = payload[cursor + 8];
             if index_position == 0 && !matches!(index_number, 0 | 1) {
-                return Err(crate::error::Error::InvalidWav(
+                return Err(crate::error::Error::InvalidPcmContainer(
                     "cuesheet track must start at index 0 or 1",
                 ));
             }
             if let Some(previous) = index_points.last()
                 && index_number <= previous.number
             {
-                return Err(crate::error::Error::InvalidWav(
+                return Err(crate::error::Error::InvalidPcmContainer(
                     "cuesheet index numbers must be strictly increasing",
                 ));
             }
@@ -325,7 +325,7 @@ pub(crate) fn parse_cuesheet_tracks(
     }
 
     if cursor != payload.len() {
-        return Err(crate::error::Error::InvalidWav(
+        return Err(crate::error::Error::InvalidPcmContainer(
             "cuesheet payload has trailing bytes",
         ));
     }
@@ -458,7 +458,7 @@ pub(crate) fn read_u32_le_strict(
     cursor: &mut usize,
     truncated_message: &'static str,
 ) -> crate::error::Result<u32> {
-    read_u32_le(bytes, cursor).ok_or(crate::error::Error::InvalidWav(truncated_message))
+    read_u32_le(bytes, cursor).ok_or(crate::error::Error::InvalidPcmContainer(truncated_message))
 }
 
 pub(crate) fn read_utf8_entry(bytes: &[u8], cursor: &mut usize, len: usize) -> Option<String> {
@@ -479,9 +479,9 @@ pub(crate) fn read_bytes_strict(
 ) -> crate::error::Result<Vec<u8>> {
     let end = cursor
         .checked_add(len)
-        .ok_or(crate::error::Error::InvalidWav(truncated_message))?;
+        .ok_or(crate::error::Error::InvalidPcmContainer(truncated_message))?;
     if end > bytes.len() {
-        return Err(crate::error::Error::InvalidWav(truncated_message));
+        return Err(crate::error::Error::InvalidPcmContainer(truncated_message));
     }
     let entry = bytes[*cursor..end].to_vec();
     *cursor = end;

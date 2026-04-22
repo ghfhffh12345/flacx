@@ -389,14 +389,14 @@ pub(crate) fn align_metadata_to_stream_spec(
 ) -> Result<()> {
     let channels = u16::from(spec.channels);
     let ordinary_mask = ordinary_channel_mask(channels).ok_or_else(|| {
-        Error::UnsupportedWav(format!(
+        Error::UnsupportedPcmContainer(format!(
             "only 1..8 channel layouts are supported for direct stream construction, found {}",
             spec.channels
         ))
     })?;
 
     if !is_supported_channel_mask(channels, spec.channel_mask) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "channel mask {:#010x} is not supported for {} channels",
             spec.channel_mask, spec.channels
         )));
@@ -404,7 +404,7 @@ pub(crate) fn align_metadata_to_stream_spec(
 
     match metadata.channel_mask() {
         Some(mask) if mask != spec.channel_mask => {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "metadata channel mask {mask:#010x} does not match stream channel mask {:#010x}",
                 spec.channel_mask
             )));

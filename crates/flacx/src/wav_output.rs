@@ -146,19 +146,19 @@ impl<W: Write> StreamingPcmWriter<W> {
         let mut writer = CountingWrite::new(writer);
 
         if !(1..=8).contains(&spec.channels) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "only the ordinary 1..8 channel envelope is supported, found {} channels",
                 spec.channels
             )));
         }
         if !matches!(spec.bytes_per_sample, 1..=4) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "only byte-aligned PCM containers are supported, found {} bytes/sample",
                 spec.bytes_per_sample
             )));
         }
         if !(4..=32).contains(&spec.bits_per_sample) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "only FLAC-native 4..32 valid bits/sample are supported, found {}",
                 spec.bits_per_sample
             )));
@@ -167,20 +167,20 @@ impl<W: Write> StreamingPcmWriter<W> {
         let container_bits_per_sample =
             container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
         if spec.bytes_per_sample * 8 != container_bits_per_sample {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "bytes/sample does not match the chosen container width for {} valid bits/sample",
                 spec.bits_per_sample
             )));
         }
         let ordinary_mask = ordinary_channel_mask(u16::from(spec.channels)).ok_or_else(|| {
-            Error::UnsupportedWav(format!(
+            Error::UnsupportedPcmContainer(format!(
                 "no ordinary channel mask exists for {} channels",
                 spec.channels
             ))
         })?;
         let channel_mask = spec.channel_mask;
         if !is_supported_channel_mask(u16::from(spec.channels), channel_mask) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "channel mask {channel_mask:#010x} is not supported on output for {} channels",
                 spec.channels
             )));
@@ -207,7 +207,9 @@ impl<W: Write> StreamingPcmWriter<W> {
             .total_samples
             .checked_mul(u64::from(spec.channels))
             .and_then(|count| count.checked_mul(u64::from(container_bits_per_sample / 8)))
-            .ok_or_else(|| Error::UnsupportedWav("decoded sample bytes overflow".into()))?;
+            .ok_or_else(|| {
+                Error::UnsupportedPcmContainer("decoded sample bytes overflow".into())
+            })?;
         let resolved_container = resolve_pcm_container(
             options.container,
             fmt_payload.len(),
@@ -312,7 +314,7 @@ impl<W: Write> RiffStreamWriter<W> {
             16 => self.write_16_bit_samples(samples, md5),
             24 => self.write_24_bit_samples(samples, md5),
             32 => self.write_32_bit_samples(samples, md5),
-            _ => Err(Error::UnsupportedWav(format!(
+            _ => Err(Error::UnsupportedPcmContainer(format!(
                 "unsupported container bits/sample for encoder: {}",
                 self.envelope.container_bits_per_sample
             ))),
@@ -344,14 +346,15 @@ impl<W: Write> RiffStreamWriter<W> {
             self.buffer.clear();
             self.buffer.resize(chunk.len(), 0);
             for (sample, slot) in chunk.iter().zip(self.buffer.iter_mut()) {
-                let shifted = sample
-                    .checked_shl(shift)
-                    .ok_or_else(|| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
-                let value = shifted
-                    .checked_add(bias)
-                    .ok_or_else(|| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
-                *slot = u8::try_from(value)
-                    .map_err(|_| Error::UnsupportedWav("8-bit sample is out of range".into()))?;
+                let shifted = sample.checked_shl(shift).ok_or_else(|| {
+                    Error::UnsupportedPcmContainer("8-bit sample is out of range".into())
+                })?;
+                let value = shifted.checked_add(bias).ok_or_else(|| {
+                    Error::UnsupportedPcmContainer("8-bit sample is out of range".into())
+                })?;
+                *slot = u8::try_from(value).map_err(|_| {
+                    Error::UnsupportedPcmContainer("8-bit sample is out of range".into())
+                })?;
             }
             self.writer.write_all(&self.buffer)?;
             md5.update_bytes(&self.buffer);
@@ -377,14 +380,14 @@ impl<W: Write> RiffStreamWriter<W> {
                     *sample
                 } else {
                     sample.checked_shl(shift).ok_or_else(|| {
-                        Error::UnsupportedWav("16-bit sample is out of range".into())
+                        Error::UnsupportedPcmContainer("16-bit sample is out of range".into())
                     })?
                 };
                 let value = if shift == 0 {
                     shifted as i16
                 } else {
                     i16::try_from(shifted).map_err(|_| {
-                        Error::UnsupportedWav("16-bit sample is out of range".into())
+                        Error::UnsupportedPcmContainer("16-bit sample is out of range".into())
                     })?
                 };
                 bytes.copy_from_slice(&value.to_le_bytes());
@@ -411,11 +414,11 @@ impl<W: Write> RiffStreamWriter<W> {
                     *sample
                 } else {
                     sample.checked_shl(shift).ok_or_else(|| {
-                        Error::UnsupportedWav("24-bit sample is out of range".into())
+                        Error::UnsupportedPcmContainer("24-bit sample is out of range".into())
                     })?
                 };
                 if shift != 0 && !(-8_388_608..=8_388_607).contains(&shifted) {
-                    return Err(Error::UnsupportedWav(
+                    return Err(Error::UnsupportedPcmContainer(
                         "24-bit sample is out of range".into(),
                     ));
                 }
@@ -445,7 +448,7 @@ impl<W: Write> RiffStreamWriter<W> {
                     *sample
                 } else {
                     sample.checked_shl(shift).ok_or_else(|| {
-                        Error::UnsupportedWav(
+                        Error::UnsupportedPcmContainer(
                             "unsupported valid bits/container bits combination".into(),
                         )
                     })?
@@ -465,7 +468,7 @@ fn sample_shift_bits(envelope: PcmEnvelope) -> Result<u32> {
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
         .map(u32::from)
-        .ok_or(Error::InvalidWav(
+        .ok_or(Error::InvalidPcmContainer(
             "valid bits cannot exceed container bits for encoding",
         ))
 }
@@ -481,17 +484,19 @@ impl Default for WavMetadataWriteOptions {
 
 #[allow(dead_code)]
 fn wav_feature_disabled_error() -> Error {
-    Error::UnsupportedWav("RIFF/WAVE family output requires the `wav` cargo feature".into())
+    Error::UnsupportedPcmContainer(
+        "RIFF/WAVE family output requires the `wav` cargo feature".into(),
+    )
 }
 
 #[allow(dead_code)]
 fn aiff_feature_disabled_error() -> Error {
-    Error::UnsupportedWav("AIFF/AIFC output requires the `aiff` cargo feature".into())
+    Error::UnsupportedPcmContainer("AIFF/AIFC output requires the `aiff` cargo feature".into())
 }
 
 #[allow(dead_code)]
 fn caf_feature_disabled_error() -> Error {
-    Error::UnsupportedWav("CAF output requires the `caf` cargo feature".into())
+    Error::UnsupportedPcmContainer("CAF output requires the `caf` cargo feature".into())
 }
 
 #[allow(dead_code)]
@@ -564,19 +569,19 @@ pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
     }
 
     if !(1..=8).contains(&spec.channels) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only the ordinary 1..8 channel envelope is supported, found {} channels",
             spec.channels
         )));
     }
     if !matches!(spec.bytes_per_sample, 1..=4) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only byte-aligned PCM containers are supported, found {} bytes/sample",
             spec.bytes_per_sample
         )));
     }
     if !(4..=32).contains(&spec.bits_per_sample) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only FLAC-native 4..32 valid bits/sample are supported, found {}",
             spec.bits_per_sample
         )));
@@ -589,21 +594,21 @@ pub(crate) fn write_wav_with_metadata_and_md5_with_options<W: Write>(
 
     let container_bits_per_sample = container_bits_from_valid_bits(u16::from(spec.bits_per_sample));
     if spec.bytes_per_sample * 8 != container_bits_per_sample {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "bytes/sample does not match the chosen container width for {} valid bits/sample",
             spec.bits_per_sample
         )));
     }
 
     let ordinary_mask = ordinary_channel_mask(u16::from(spec.channels)).ok_or_else(|| {
-        Error::UnsupportedWav(format!(
+        Error::UnsupportedPcmContainer(format!(
             "no ordinary channel mask exists for {} channels",
             spec.channels
         ))
     })?;
     let channel_mask = spec.channel_mask;
     if !is_supported_channel_mask(u16::from(spec.channels), channel_mask) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "channel mask {channel_mask:#010x} is not supported on output for {} channels",
             spec.channels
         )));
@@ -747,7 +752,7 @@ fn resolve_pcm_container(
         PcmContainer::Wave => {
             ensure_output_container_enabled(PcmContainer::Wave)?;
             if wave_riff_size > u64::from(u32::MAX) {
-                Err(Error::UnsupportedWav(
+                Err(Error::UnsupportedPcmContainer(
                     "decoded WAV output exceeds RIFF size limits; use RF64 or Wave64".into(),
                 ))
             } else {
@@ -813,7 +818,7 @@ fn resolve_pcm_container_without_wav(requested: PcmContainer) -> Result<PcmConta
 }
 
 fn feature_disabled_output_error(container: PcmContainer) -> Error {
-    Error::UnsupportedWav(format!(
+    Error::UnsupportedPcmContainer(format!(
         "{} output requires the `{}` cargo feature",
         container.family_label(),
         container.feature_name()
@@ -903,7 +908,7 @@ fn write_wave_header_and_chunks<W: Write>(
         + 8
         + data_bytes;
     let riff_size = u32::try_from(riff_size)
-        .map_err(|_| Error::UnsupportedWav("RIFF output exceeds 4 GiB".into()))?;
+        .map_err(|_| Error::UnsupportedPcmContainer("RIFF output exceeds 4 GiB".into()))?;
 
     writer.write_all(b"RIFF")?;
     writer.write_all(&riff_size.to_le_bytes())?;
@@ -915,7 +920,7 @@ fn write_wave_header_and_chunks<W: Write>(
     writer.write_all(b"data")?;
     writer.write_all(
         &u32::try_from(data_bytes)
-            .map_err(|_| Error::UnsupportedWav("RIFF data chunk exceeds 4 GiB".into()))?
+            .map_err(|_| Error::UnsupportedPcmContainer("RIFF data chunk exceeds 4 GiB".into()))?
             .to_le_bytes(),
     )?;
     Ok(())

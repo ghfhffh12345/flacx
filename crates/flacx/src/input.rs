@@ -447,17 +447,19 @@ fn read_caf_reader_with_features<R: Read + Seek>(_reader: R) -> Result<PcmReader
 
 #[allow(dead_code)]
 fn wav_feature_disabled_error() -> Error {
-    Error::UnsupportedWav("RIFF/WAVE family support requires the `wav` cargo feature".into())
+    Error::UnsupportedPcmContainer(
+        "RIFF/WAVE family support requires the `wav` cargo feature".into(),
+    )
 }
 
 #[allow(dead_code)]
 fn aiff_feature_disabled_error() -> Error {
-    Error::UnsupportedWav("AIFF/AIFC support requires the `aiff` cargo feature".into())
+    Error::UnsupportedPcmContainer("AIFF/AIFC support requires the `aiff` cargo feature".into())
 }
 
 #[allow(dead_code)]
 fn caf_feature_disabled_error() -> Error {
-    Error::UnsupportedWav("CAF support requires the `caf` cargo feature".into())
+    Error::UnsupportedPcmContainer("CAF support requires the `caf` cargo feature".into())
 }
 
 fn ensure_wav_family_enabled() -> Result<()> {

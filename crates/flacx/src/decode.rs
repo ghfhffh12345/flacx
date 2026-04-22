@@ -133,7 +133,7 @@ where
         S: DecodePcmStream,
     {
         let mut progress = NoProgress;
-        stream.set_threads(self.config.threads);
+        stream.set_threads(self.config.threads());
         self.decode_with_sink(stream, &mut progress)
     }
 
@@ -158,7 +158,7 @@ where
         F: FnMut(ProgressSnapshot) -> Result<()>,
     {
         let mut progress = CallbackProgress::new(&mut on_progress);
-        stream.set_threads(self.config.threads);
+        stream.set_threads(self.config.threads());
         self.decode_with_sink(stream, &mut progress)
     }
 
@@ -202,9 +202,9 @@ where
         crate::metadata::align_metadata_to_stream_spec(
             &mut metadata,
             stream.spec(),
-            self.config.strict_channel_mask_provenance,
+            self.config.strict_channel_mask_provenance(),
         )?;
-        stream.set_threads(self.config.threads);
+        stream.set_threads(self.config.threads());
         decode_stream_to_container(stream, &mut self.writer, metadata, self.config, progress)
     }
 }

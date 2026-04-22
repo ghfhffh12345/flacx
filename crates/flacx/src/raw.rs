@@ -141,10 +141,12 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for RawPcmStream<R> {
         let byte_len = usize::try_from(
             (frames as u64)
                 .checked_mul(self.validated.frame_bytes)
-                .ok_or_else(|| Error::UnsupportedWav("raw PCM chunk size overflows".into()))?,
+                .ok_or_else(|| {
+                    Error::UnsupportedPcmContainer("raw PCM chunk size overflows".into())
+                })?,
         )
         .map_err(|_| {
-            Error::UnsupportedWav("raw PCM chunk size exceeds addressable memory".into())
+            Error::UnsupportedPcmContainer("raw PCM chunk size exceeds addressable memory".into())
         })?;
         self.last_chunk_bytes.clear();
         self.last_chunk_bytes.resize(byte_len, 0);
@@ -202,28 +204,30 @@ fn spec_from_validated_descriptor(
 
 fn validate_raw_descriptor(descriptor: RawPcmDescriptor) -> Result<ValidatedRawDescriptor> {
     if descriptor.sample_rate == 0 {
-        return Err(Error::UnsupportedWav("sample rate 0 is not allowed".into()));
+        return Err(Error::UnsupportedPcmContainer(
+            "sample rate 0 is not allowed".into(),
+        ));
     }
     if !(1..=8).contains(&descriptor.channels) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "raw PCM input only supports 1..8 channel layouts, found {} channels",
             descriptor.channels
         )));
     }
     if !(4..=32).contains(&descriptor.valid_bits_per_sample) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "valid bits must be in the FLAC-native 4..32 range, found {}",
             descriptor.valid_bits_per_sample
         )));
     }
     if !matches!(descriptor.container_bits_per_sample, 8 | 16 | 24 | 32) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only byte-aligned PCM containers are supported, found {} bits/sample",
             descriptor.container_bits_per_sample
         )));
     }
     if descriptor.valid_bits_per_sample > descriptor.container_bits_per_sample {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "valid bits cannot exceed container bits ({} > {})",
             descriptor.valid_bits_per_sample, descriptor.container_bits_per_sample
         )));
@@ -236,7 +240,7 @@ fn validate_raw_descriptor(descriptor: RawPcmDescriptor) -> Result<ValidatedRawD
         }
         (3..=8, Some(mask)) if mask != 0 => mask,
         (3..=8, Some(_)) | (3..=8, None) => {
-            return Err(Error::UnsupportedWav(
+            return Err(Error::UnsupportedPcmContainer(
                 "raw PCM 3..8 channel inputs require an explicit non-zero channel mask".into(),
             ));
         }
@@ -244,7 +248,7 @@ fn validate_raw_descriptor(descriptor: RawPcmDescriptor) -> Result<ValidatedRawD
     };
 
     if !is_supported_channel_mask(u16::from(descriptor.channels), channel_mask) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "channel mask {channel_mask:#010x} is not supported for {} channels",
             descriptor.channels
         )));
@@ -252,7 +256,7 @@ fn validate_raw_descriptor(descriptor: RawPcmDescriptor) -> Result<ValidatedRawD
 
     let frame_bytes = u64::from(descriptor.channels)
         .checked_mul(u64::from(descriptor.container_bits_per_sample / 8))
-        .ok_or_else(|| Error::UnsupportedWav("raw PCM frame size overflows".into()))?;
+        .ok_or_else(|| Error::UnsupportedPcmContainer("raw PCM frame size overflows".into()))?;
 
     Ok(ValidatedRawDescriptor {
         descriptor,
@@ -269,10 +273,10 @@ fn validate_raw_descriptor(descriptor: RawPcmDescriptor) -> Result<ValidatedRawD
 
 fn total_samples_from_byte_len(byte_len: u64, frame_bytes: u64) -> Result<u64> {
     if frame_bytes == 0 {
-        return Err(Error::InvalidWav("frame size must be non-zero"));
+        return Err(Error::InvalidPcmContainer("frame size must be non-zero"));
     }
     if !byte_len.is_multiple_of(frame_bytes) {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "PCM payload is not aligned to the sample frame size",
         ));
     }
@@ -288,7 +292,7 @@ fn decode_raw_samples_into(
         .envelope
         .container_bits_per_sample
         .checked_sub(descriptor.envelope.valid_bits_per_sample)
-        .ok_or(Error::InvalidWav(
+        .ok_or(Error::InvalidPcmContainer(
             "valid bits cannot exceed container bits for decoding",
         ))? as u32;
 
@@ -354,7 +358,7 @@ fn decode_raw_samples_into(
             }
             Ok(())
         }
-        _ => Err(Error::UnsupportedWav(format!(
+        _ => Err(Error::UnsupportedPcmContainer(format!(
             "unsupported container bits/sample for decoder: {}",
             descriptor.envelope.container_bits_per_sample
         ))),

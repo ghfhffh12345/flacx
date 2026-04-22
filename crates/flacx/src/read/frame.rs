@@ -206,7 +206,7 @@ where
     }
 
     samples.reserve(total_interleaved_sample_count(&frames));
-    let worker_count = config.threads.max(1).min(frames.len());
+    let worker_count = config.threads().max(1).min(frames.len());
     if worker_count == 1 || frames.len() <= FRAME_CHUNK_SIZE {
         let mut processed_samples = 0u64;
         #[cfg(feature = "progress")]

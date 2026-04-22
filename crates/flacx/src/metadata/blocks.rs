@@ -86,11 +86,13 @@ impl PreservedMetadataBundle {
 
     pub(crate) fn from_fxmd_payload(payload: &[u8]) -> crate::error::Result<Self> {
         if payload.len() < 16 {
-            return Err(crate::error::Error::InvalidWav("fxmd payload is too short"));
+            return Err(crate::error::Error::InvalidPcmContainer(
+                "fxmd payload is too short",
+            ));
         }
         let mut cursor = 0usize;
         if payload[cursor..cursor + 4] != FXMD_MAGIC {
-            return Err(crate::error::Error::InvalidWav(
+            return Err(crate::error::Error::InvalidPcmContainer(
                 "fxmd payload magic is invalid",
             ));
         }
@@ -102,7 +104,7 @@ impl PreservedMetadataBundle {
         );
         cursor += 2;
         if version != FXMD_VERSION {
-            return Err(crate::error::Error::InvalidWav(
+            return Err(crate::error::Error::InvalidPcmContainer(
                 "fxmd payload version is unsupported",
             ));
         }
@@ -113,7 +115,7 @@ impl PreservedMetadataBundle {
         );
         cursor += 2;
         if flags != FXMD_HEADER_FLAGS {
-            return Err(crate::error::Error::InvalidWav(
+            return Err(crate::error::Error::InvalidPcmContainer(
                 "fxmd payload flags are unsupported",
             ));
         }
@@ -137,7 +139,7 @@ impl PreservedMetadataBundle {
         let mut previous_ordinal = None;
         for _ in 0..record_count {
             if cursor + 12 > payload.len() {
-                return Err(crate::error::Error::InvalidWav(
+                return Err(crate::error::Error::InvalidPcmContainer(
                     "fxmd record entry is truncated",
                 ));
             }
@@ -160,25 +162,26 @@ impl PreservedMetadataBundle {
             cursor += 4;
 
             if previous_ordinal.is_some_and(|prev| ordinal < prev) {
-                return Err(crate::error::Error::InvalidWav(
+                return Err(crate::error::Error::InvalidPcmContainer(
                     "fxmd record ordinals must be ascending",
                 ));
             }
             previous_ordinal = Some(ordinal);
-            let blob = blobs
-                .get(blob_index as usize)
-                .ok_or(crate::error::Error::InvalidWav(
-                    "fxmd blob index is out of range",
-                ))?;
+            let blob =
+                blobs
+                    .get(blob_index as usize)
+                    .ok_or(crate::error::Error::InvalidPcmContainer(
+                        "fxmd blob index is out of range",
+                    ))?;
             validate_preserved_block_payload(block_type, blob)
-                .map_err(crate::error::Error::InvalidWav)?;
+                .map_err(crate::error::Error::InvalidPcmContainer)?;
             records.push(PreservedMetadataRecord {
                 block_type,
                 payload: blob.clone(),
             });
         }
         if cursor != payload.len() {
-            return Err(crate::error::Error::InvalidWav(
+            return Err(crate::error::Error::InvalidPcmContainer(
                 "fxmd payload has trailing bytes",
             ));
         }

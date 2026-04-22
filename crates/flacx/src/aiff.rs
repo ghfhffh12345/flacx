@@ -150,7 +150,7 @@ impl<R: Read + Seek> AiffPcmStream<R> {
     ) -> Result<Self> {
         let frame_bytes = usize::from(envelope.channels)
             .checked_mul(usize::from(envelope.container_bits_per_sample / 8))
-            .ok_or_else(|| Error::UnsupportedWav("AIFF frame size overflows".into()))?;
+            .ok_or_else(|| Error::UnsupportedPcmContainer("AIFF frame size overflows".into()))?;
         Ok(Self {
             reader,
             spec,
@@ -177,7 +177,7 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for AiffPcmStream<R> {
 
         let byte_len = frames
             .checked_mul(self.frame_bytes)
-            .ok_or_else(|| Error::UnsupportedWav("AIFF chunk size overflows".into()))?;
+            .ok_or_else(|| Error::UnsupportedPcmContainer("AIFF chunk size overflows".into()))?;
         let mut data = vec![0u8; byte_len];
         self.reader.read_exact(&mut data)?;
         let samples = decode_aiff_samples(&data, self.envelope, self.endianness)?;
@@ -223,7 +223,7 @@ fn validate_direct_descriptor(
     };
     let envelope = validate_common_chunk(common)?;
     if matches!(endianness, SampleEndianness::Little) && envelope.valid_bits_per_sample != 16 {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "AIFC compression 'sowt' is only supported for 16-bit signed PCM".into(),
         ));
     }
@@ -243,13 +243,17 @@ fn parse_aiff_layout<R: Read + Seek>(reader: &mut R) -> Result<ParsedAiffLayout>
     let mut header = [0u8; 12];
     reader.read_exact(&mut header)?;
     if header[..4] != FORM_ID {
-        return Err(Error::InvalidWav("expected FORM header"));
+        return Err(Error::InvalidPcmContainer("expected FORM header"));
     }
     let form_type: [u8; 4] = header[8..12].try_into().expect("fixed form type");
     let is_aifc = match form_type {
         AIFF_FORM_TYPE => false,
         AIFC_FORM_TYPE => true,
-        _ => return Err(Error::InvalidWav("expected AIFF or AIFC form type")),
+        _ => {
+            return Err(Error::InvalidPcmContainer(
+                "expected AIFF or AIFC form type",
+            ));
+        }
     };
 
     let mut common = None;
@@ -276,20 +280,20 @@ fn parse_aiff_layout<R: Read + Seek>(reader: &mut R) -> Result<ParsedAiffLayout>
             }
             SSND_CHUNK_ID => {
                 if chunk_size < 8 {
-                    return Err(Error::InvalidWav("AIFF SSND chunk is too short"));
+                    return Err(Error::InvalidPcmContainer("AIFF SSND chunk is too short"));
                 }
                 let offset = read_u32_be(reader)?;
                 let _block_size = read_u32_be(reader)?;
                 let sample_data_size = u64::from(chunk_size)
                     .checked_sub(8)
                     .and_then(|size| size.checked_sub(u64::from(offset)))
-                    .ok_or(Error::InvalidWav(
+                    .ok_or(Error::InvalidPcmContainer(
                         "AIFF SSND offset exceeds the chunk payload",
                     ))?;
                 let data_start = reader
                     .stream_position()?
                     .checked_add(u64::from(offset))
-                    .ok_or(Error::InvalidWav(
+                    .ok_or(Error::InvalidPcmContainer(
                         "AIFF SSND offset overflows the file cursor",
                     ))?;
                 data_offset = Some(data_start);
@@ -306,23 +310,25 @@ fn parse_aiff_layout<R: Read + Seek>(reader: &mut R) -> Result<ParsedAiffLayout>
         }
     }
 
-    let common = common.ok_or(Error::InvalidWav("missing COMM chunk"))?;
-    let data_offset = data_offset.ok_or(Error::InvalidWav("missing SSND chunk"))?;
-    let data_size = data_size.ok_or(Error::InvalidWav("missing SSND data size"))?;
+    let common = common.ok_or(Error::InvalidPcmContainer("missing COMM chunk"))?;
+    let data_offset = data_offset.ok_or(Error::InvalidPcmContainer("missing SSND chunk"))?;
+    let data_size = data_size.ok_or(Error::InvalidPcmContainer("missing SSND data size"))?;
     let envelope = validate_common_chunk(common)?;
     let block_align =
         u64::from(envelope.channels) * u64::from(envelope.container_bits_per_sample / 8);
     if block_align == 0 {
-        return Err(Error::InvalidWav("AIFF block alignment must be non-zero"));
+        return Err(Error::InvalidPcmContainer(
+            "AIFF block alignment must be non-zero",
+        ));
     }
     if data_size % block_align != 0 {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "SSND audio data is not aligned to the sample frame size",
         ));
     }
     let total_samples = data_size / block_align;
     if total_samples != common.sample_frames {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "COMM sample frame count does not match SSND audio payload size",
         ));
     }
@@ -344,7 +350,7 @@ fn read_common_chunk<R: Read>(
 ) -> Result<CommonChunk> {
     let minimum_size = if is_aifc { 23 } else { 18 };
     if chunk_size < minimum_size {
-        return Err(Error::InvalidWav(if is_aifc {
+        return Err(Error::InvalidPcmContainer(if is_aifc {
             "AIFC COMM chunk is too short"
         } else {
             "AIFF COMM chunk is too short"
@@ -363,20 +369,20 @@ fn read_common_chunk<R: Read>(
             AIFC_NONE => SampleEndianness::Big,
             AIFC_SOWT => {
                 if valid_bits_per_sample != 16 {
-                    return Err(Error::UnsupportedWav(
+                    return Err(Error::UnsupportedPcmContainer(
                         "AIFC compression 'sowt' is only supported for 16-bit signed PCM".into(),
                     ));
                 }
                 SampleEndianness::Little
             }
             AIFC_FL32 | AIFC_FL64 => {
-                return Err(Error::UnsupportedWav(format!(
+                return Err(Error::UnsupportedPcmContainer(format!(
                     "float AIFC compression '{}' is not supported",
                     fourcc_to_string(compression_id)
                 )));
             }
             _ => {
-                return Err(Error::UnsupportedWav(format!(
+                return Err(Error::UnsupportedPcmContainer(format!(
                     "AIFC compression '{}' is not supported",
                     fourcc_to_string(compression_id)
                 )));
@@ -397,16 +403,18 @@ fn read_common_chunk<R: Read>(
 
 fn validate_common_chunk(common: CommonChunk) -> Result<PcmEnvelope> {
     if common.sample_rate == 0 {
-        return Err(Error::UnsupportedWav("sample rate 0 is not allowed".into()));
+        return Err(Error::UnsupportedPcmContainer(
+            "sample rate 0 is not allowed".into(),
+        ));
     }
     if !(1..=8).contains(&common.channels) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "AIFF/AIFC input only supports ordinary 1..8 channel layouts, found {} channels",
             common.channels
         )));
     }
     if !(4..=32).contains(&common.valid_bits_per_sample) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "valid bits must be in the FLAC-native 4..32 range, found {}",
             common.valid_bits_per_sample
         )));
@@ -414,7 +422,7 @@ fn validate_common_chunk(common: CommonChunk) -> Result<PcmEnvelope> {
 
     let container_bits_per_sample = container_bits_from_valid_bits(common.valid_bits_per_sample);
     if !matches!(container_bits_per_sample, 8 | 16 | 24 | 32) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only byte-aligned PCM containers are supported, found {container_bits_per_sample} bits/sample"
         )));
     }
@@ -424,7 +432,7 @@ fn validate_common_chunk(common: CommonChunk) -> Result<PcmEnvelope> {
         valid_bits_per_sample: common.valid_bits_per_sample,
         container_bits_per_sample,
         channel_mask: ordinary_channel_mask(common.channels).ok_or_else(|| {
-            Error::UnsupportedWav(format!(
+            Error::UnsupportedPcmContainer(format!(
                 "no ordinary channel mask exists for {} channels",
                 common.channels
             ))
@@ -440,7 +448,7 @@ fn decode_aiff_samples(
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
-        .ok_or(Error::InvalidWav(
+        .ok_or(Error::InvalidPcmContainer(
             "valid bits cannot exceed container bits for decoding",
         ))? as u32;
 
@@ -497,7 +505,7 @@ fn decode_aiff_samples(
                 if shift == 0 { value } else { value >> shift }
             })
             .collect()),
-        _ => Err(Error::UnsupportedWav(format!(
+        _ => Err(Error::UnsupportedPcmContainer(format!(
             "unsupported container bits/sample for decoder: {}",
             envelope.container_bits_per_sample
         ))),
@@ -513,12 +521,12 @@ fn read_extended_sample_rate<R: Read>(reader: &mut R) -> Result<u32> {
     let mantissa = u64::from_be_bytes(bytes[2..].try_into().expect("fixed mantissa"));
 
     if sign != 0 {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "negative AIFF sample rates are not supported".into(),
         ));
     }
     if exponent == 0x7fff {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "non-finite AIFF sample rates are not supported".into(),
         ));
     }
@@ -531,13 +539,13 @@ fn read_extended_sample_rate<R: Read>(reader: &mut R) -> Result<u32> {
     let value = if integer_shift >= 0 {
         let shift = u32::try_from(integer_shift).expect("non-negative shift");
         if shift >= 64 {
-            return Err(Error::UnsupportedWav(
+            return Err(Error::UnsupportedPcmContainer(
                 "fractional AIFF sample rates are not supported".into(),
             ));
         }
         let remainder_mask = if shift == 0 { 0 } else { (1u64 << shift) - 1 };
         if mantissa & remainder_mask != 0 {
-            return Err(Error::UnsupportedWav(
+            return Err(Error::UnsupportedPcmContainer(
                 "fractional AIFF sample rates are not supported".into(),
             ));
         }
@@ -546,12 +554,13 @@ fn read_extended_sample_rate<R: Read>(reader: &mut R) -> Result<u32> {
         mantissa
             .checked_shl(integer_shift.unsigned_abs())
             .ok_or_else(|| {
-                Error::UnsupportedWav("AIFF sample rate exceeds supported range".into())
+                Error::UnsupportedPcmContainer("AIFF sample rate exceeds supported range".into())
             })?
     };
 
-    u32::try_from(value)
-        .map_err(|_| Error::UnsupportedWav("AIFF sample rate exceeds supported range".into()))
+    u32::try_from(value).map_err(|_| {
+        Error::UnsupportedPcmContainer("AIFF sample rate exceeds supported range".into())
+    })
 }
 
 fn read_u16_be<R: Read>(reader: &mut R) -> Result<u16> {
@@ -569,7 +578,9 @@ fn read_u32_be<R: Read>(reader: &mut R) -> Result<u32> {
 fn seek_forward<R: Seek>(reader: &mut R, chunk_start: u64, chunk_size: u64) -> Result<()> {
     let target = chunk_start
         .checked_add(chunk_size)
-        .ok_or(Error::InvalidWav("chunk length overflows the file cursor"))?;
+        .ok_or(Error::InvalidPcmContainer(
+            "chunk length overflows the file cursor",
+        ))?;
     reader.seek(SeekFrom::Start(target))?;
     Ok(())
 }

@@ -114,8 +114,8 @@ impl RecompressConfig {
     pub(crate) fn flac_reader_options(self) -> crate::FlacReaderOptions {
         let decode = self.decode_config();
         crate::FlacReaderOptions {
-            strict_seektable_validation: decode.strict_seektable_validation,
-            strict_channel_mask_provenance: decode.strict_channel_mask_provenance,
+            strict_seektable_validation: decode.strict_seektable_validation(),
+            strict_channel_mask_provenance: decode.strict_channel_mask_provenance(),
         }
     }
 

@@ -9,11 +9,11 @@ pub enum Error {
     /// Wrapper for I/O failures from callers or owned readers/writers.
     Io(io::Error),
     /// The input PCM container is structurally invalid.
-    InvalidWav(&'static str),
+    InvalidPcmContainer(&'static str),
     /// The FLAC input is structurally invalid.
     InvalidFlac(&'static str),
     /// The input PCM container is valid enough to parse but uses unsupported features.
-    UnsupportedWav(String),
+    UnsupportedPcmContainer(String),
     /// The FLAC input is valid enough to parse but uses unsupported features.
     UnsupportedFlac(String),
     /// The encode pipeline failed after input validation.
@@ -28,9 +28,11 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "{error}"),
-            Self::InvalidWav(message) => write!(f, "invalid wav: {message}"),
+            Self::InvalidPcmContainer(message) => write!(f, "invalid pcm container: {message}"),
             Self::InvalidFlac(message) => write!(f, "invalid flac: {message}"),
-            Self::UnsupportedWav(message) => write!(f, "unsupported wav: {message}"),
+            Self::UnsupportedPcmContainer(message) => {
+                write!(f, "unsupported pcm container: {message}")
+            }
             Self::UnsupportedFlac(message) => write!(f, "unsupported flac: {message}"),
             Self::Encode(message) => write!(f, "encode error: {message}"),
             Self::Decode(message) => write!(f, "decode error: {message}"),

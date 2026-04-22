@@ -191,7 +191,7 @@ impl<R: Read + Seek> WavPcmStream<R> {
     fn from_parts(reader: R, spec: PcmSpec, envelope: PcmEnvelope) -> Result<Self> {
         let frame_bytes = usize::from(envelope.channels)
             .checked_mul(usize::from(envelope.container_bits_per_sample / 8))
-            .ok_or_else(|| Error::UnsupportedWav("PCM frame size overflows".into()))?;
+            .ok_or_else(|| Error::UnsupportedPcmContainer("PCM frame size overflows".into()))?;
         Ok(Self {
             reader,
             spec,
@@ -286,18 +286,18 @@ impl<R: Read + Seek> WavPcmStreamBuilder<R> {
         let channel_mask = match self.channel_mask {
             Some(mask) => mask,
             None => ordinary_channel_mask(channels_u16).ok_or_else(|| {
-                Error::UnsupportedWav(format!(
+                Error::UnsupportedPcmContainer(format!(
                     "no ordinary channel mask exists for {channels} channels"
                 ))
             })?,
         };
         let bytes_per_sample = u16::from(container_bits_per_sample / 8);
-        let block_align = channels_u16
-            .checked_mul(bytes_per_sample)
-            .ok_or_else(|| Error::UnsupportedWav("fmt block alignment overflows".into()))?;
+        let block_align = channels_u16.checked_mul(bytes_per_sample).ok_or_else(|| {
+            Error::UnsupportedPcmContainer("fmt block alignment overflows".into())
+        })?;
         let byte_rate = sample_rate
             .checked_mul(u32::from(block_align))
-            .ok_or_else(|| Error::UnsupportedWav("fmt byte rate overflows".into()))?;
+            .ok_or_else(|| Error::UnsupportedPcmContainer("fmt byte rate overflows".into()))?;
         let ordinary_mask = ordinary_channel_mask(channels_u16);
         let uses_extensible = channels > 2
             || valid_bits_per_sample != container_bits_per_sample
@@ -338,7 +338,7 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
 
         let byte_len = frames
             .checked_mul(self.frame_bytes)
-            .ok_or_else(|| Error::UnsupportedWav("PCM chunk size overflows".into()))?;
+            .ok_or_else(|| Error::UnsupportedPcmContainer("PCM chunk size overflows".into()))?;
         self.last_chunk_bytes.clear();
         self.last_chunk_bytes.resize(byte_len, 0);
         self.reader.read_exact(&mut self.last_chunk_bytes)?;
@@ -392,7 +392,7 @@ pub(crate) fn inspect_total_samples<R: Read + Seek>(mut reader: R) -> Result<u64
 
 fn required_builder_field<T>(name: &str, value: Option<T>) -> Result<T> {
     value.ok_or_else(|| {
-        Error::UnsupportedWav(format!(
+        Error::UnsupportedPcmContainer(format!(
             "direct WAV stream construction requires `{name}` to be set"
         ))
     })
@@ -436,14 +436,14 @@ fn parse_wav_layout<R: Read + Seek>(
     match reader.read_exact(&mut header[4..]) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-            return Err(Error::InvalidWav("expected RIFF header"));
+            return Err(Error::InvalidPcmContainer("expected RIFF header"));
         }
         Err(error) => return Err(error.into()),
     }
     if header == W64_RIFF_GUID {
         return parse_w64_layout(reader, capture_metadata, fxmd_policy);
     }
-    Err(Error::InvalidWav("expected RIFF header"))
+    Err(Error::InvalidPcmContainer("expected RIFF header"))
 }
 
 fn parse_riff_layout_from_header<R: Read + Seek>(
@@ -458,7 +458,7 @@ fn parse_riff_layout_from_header<R: Read + Seek>(
     let mut chunk_id = [0u8; 4];
     reader.read_exact(&mut chunk_id)?;
     if &chunk_id != b"WAVE" {
-        return Err(Error::InvalidWav("expected WAVE signature"));
+        return Err(Error::InvalidPcmContainer("expected WAVE signature"));
     }
     let mut ds64 = None;
 
@@ -490,7 +490,7 @@ fn parse_riff_layout_from_header<R: Read + Seek>(
             b"data" => {
                 data_offset = Some(chunk_start);
                 let resolved_size = if is_rf64 && chunk_size == RF64_PLACEHOLDER_SIZE {
-                    ds64.ok_or(Error::InvalidWav(
+                    ds64.ok_or(Error::InvalidPcmContainer(
                         "RF64 data chunk is missing ds64 metadata",
                     ))?
                     .data_size
@@ -502,7 +502,7 @@ fn parse_riff_layout_from_header<R: Read + Seek>(
             }
             id if capture_metadata && is_captured_metadata_chunk(*id) => {
                 if chunk_size == RF64_PLACEHOLDER_SIZE {
-                    return Err(Error::UnsupportedWav(
+                    return Err(Error::UnsupportedPcmContainer(
                         "oversized RF64 metadata chunks are not supported yet".into(),
                     ));
                 }
@@ -511,7 +511,7 @@ fn parse_riff_layout_from_header<R: Read + Seek>(
             }
             _ => {
                 if chunk_size == RF64_PLACEHOLDER_SIZE {
-                    return Err(Error::UnsupportedWav(
+                    return Err(Error::UnsupportedPcmContainer(
                         "oversized RF64 non-audio chunks are not supported yet".into(),
                     ));
                 }
@@ -529,26 +529,28 @@ fn parse_riff_layout_from_header<R: Read + Seek>(
         }
     }
 
-    let format = format.ok_or(Error::InvalidWav("missing fmt chunk"))?;
-    let data_offset = data_offset.ok_or(Error::InvalidWav("missing data chunk"))?;
-    let data_size = data_size.ok_or(Error::InvalidWav("missing data size"))?;
+    let format = format.ok_or(Error::InvalidPcmContainer("missing fmt chunk"))?;
+    let data_offset = data_offset.ok_or(Error::InvalidPcmContainer("missing data chunk"))?;
+    let data_size = data_size.ok_or(Error::InvalidPcmContainer("missing data size"))?;
 
     let envelope = validate_format(format)?;
 
     let expected_block_align = envelope.channels * (envelope.container_bits_per_sample / 8);
     if format.block_align != expected_block_align {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "fmt block alignment does not match channels * bytes/sample",
         ));
     }
 
     let block_align = u64::from(format.block_align);
     if block_align == 0 {
-        return Err(Error::InvalidWav("fmt block alignment must be non-zero"));
+        return Err(Error::InvalidPcmContainer(
+            "fmt block alignment must be non-zero",
+        ));
     }
 
     if data_size % block_align != 0 {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "data chunk is not aligned to the sample frame size",
         ));
     }
@@ -556,12 +558,14 @@ fn parse_riff_layout_from_header<R: Read + Seek>(
     let total_samples = data_size / u64::from(format.block_align);
     if let Some(ds64) = ds64 {
         if ds64.sample_count != 0 && ds64.sample_count != total_samples {
-            return Err(Error::InvalidWav(
+            return Err(Error::InvalidPcmContainer(
                 "RF64 ds64 sample count does not match PCM payload size",
             ));
         }
         if ds64.riff_size < data_offset {
-            return Err(Error::InvalidWav("RF64 ds64 RIFF size is truncated"));
+            return Err(Error::InvalidPcmContainer(
+                "RF64 ds64 RIFF size is truncated",
+            ));
         }
     }
 
@@ -588,7 +592,7 @@ fn parse_w64_layout<R: Read + Seek>(
     let mut wave_guid = [0u8; 16];
     reader.read_exact(&mut wave_guid)?;
     if wave_guid != w64_chunk_guid(*b"wave") {
-        return Err(Error::InvalidWav("expected Wave64 wave signature"));
+        return Err(Error::InvalidPcmContainer("expected Wave64 wave signature"));
     }
 
     let mut format = None;
@@ -605,22 +609,26 @@ fn parse_w64_layout<R: Read + Seek>(
         }
         let chunk_size = read_u64_le(reader)?;
         if chunk_size < 24 {
-            return Err(Error::InvalidWav("Wave64 chunk is smaller than its header"));
+            return Err(Error::InvalidPcmContainer(
+                "Wave64 chunk is smaller than its header",
+            ));
         }
         let payload_size = chunk_size - 24;
         let chunk_start = reader.stream_position()?;
 
         if chunk_guid == w64_chunk_guid(*b"fmt ") {
-            let format_chunk_size = u32::try_from(payload_size)
-                .map_err(|_| Error::UnsupportedWav("Wave64 fmt chunk is too large".into()))?;
+            let format_chunk_size = u32::try_from(payload_size).map_err(|_| {
+                Error::UnsupportedPcmContainer("Wave64 fmt chunk is too large".into())
+            })?;
             format = Some(read_format_chunk(reader, format_chunk_size)?);
         } else if chunk_guid == w64_chunk_guid(*b"data") {
             data_offset = Some(chunk_start);
             data_size = Some(payload_size);
             seek_forward(reader, chunk_start, payload_size)?;
         } else if capture_metadata && w64_metadata_chunk_id(chunk_guid).is_some() {
-            let chunk_size = u32::try_from(payload_size)
-                .map_err(|_| Error::UnsupportedWav("Wave64 metadata chunk is too large".into()))?;
+            let chunk_size = u32::try_from(payload_size).map_err(|_| {
+                Error::UnsupportedPcmContainer("Wave64 metadata chunk is too large".into())
+            })?;
             let payload = read_chunk_payload(reader, chunk_size)?;
             metadata_draft.ingest_chunk(
                 w64_metadata_chunk_id(chunk_guid).expect("checked above"),
@@ -639,24 +647,26 @@ fn parse_w64_layout<R: Read + Seek>(
         }
     }
 
-    let format = format.ok_or(Error::InvalidWav("missing fmt chunk"))?;
-    let data_offset = data_offset.ok_or(Error::InvalidWav("missing data chunk"))?;
-    let data_size = data_size.ok_or(Error::InvalidWav("missing data size"))?;
+    let format = format.ok_or(Error::InvalidPcmContainer("missing fmt chunk"))?;
+    let data_offset = data_offset.ok_or(Error::InvalidPcmContainer("missing data chunk"))?;
+    let data_size = data_size.ok_or(Error::InvalidPcmContainer("missing data size"))?;
     let envelope = validate_format(format)?;
 
     let expected_block_align = envelope.channels * (envelope.container_bits_per_sample / 8);
     if format.block_align != expected_block_align {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "fmt block alignment does not match channels * bytes/sample",
         ));
     }
 
     let block_align = u64::from(format.block_align);
     if block_align == 0 {
-        return Err(Error::InvalidWav("fmt block alignment must be non-zero"));
+        return Err(Error::InvalidPcmContainer(
+            "fmt block alignment must be non-zero",
+        ));
     }
     if data_size % block_align != 0 {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "data chunk is not aligned to the sample frame size",
         ));
     }
@@ -678,7 +688,7 @@ fn parse_w64_layout<R: Read + Seek>(
 
 fn read_format_chunk<R: Read>(reader: &mut R, chunk_size: u32) -> Result<FormatChunk> {
     if chunk_size < 16 {
-        return Err(Error::InvalidWav("fmt chunk is too short"));
+        return Err(Error::InvalidPcmContainer("fmt chunk is too short"));
     }
 
     let format_tag = read_u16_le(reader)?;
@@ -690,14 +700,14 @@ fn read_format_chunk<R: Read>(reader: &mut R, chunk_size: u32) -> Result<FormatC
 
     if format_tag == 0xFFFE {
         if chunk_size < EXTENSIBLE_FMT_CHUNK_SIZE {
-            return Err(Error::InvalidWav(
+            return Err(Error::InvalidPcmContainer(
                 "WAVEFORMATEXTENSIBLE fmt chunk is too short",
             ));
         }
 
         let cb_size = read_u16_le(reader)?;
         if cb_size < 22 {
-            return Err(Error::InvalidWav(
+            return Err(Error::InvalidPcmContainer(
                 "WAVEFORMATEXTENSIBLE extension is too short",
             ));
         }
@@ -706,7 +716,7 @@ fn read_format_chunk<R: Read>(reader: &mut R, chunk_size: u32) -> Result<FormatC
         let mut subformat = [0u8; 16];
         reader.read_exact(&mut subformat)?;
         if subformat != PCM_SUBFORMAT_GUID {
-            return Err(Error::UnsupportedWav(
+            return Err(Error::UnsupportedPcmContainer(
                 "only WAVEFORMATEXTENSIBLE PCM subformat is supported".into(),
             ));
         }
@@ -746,25 +756,27 @@ fn read_format_chunk<R: Read>(reader: &mut R, chunk_size: u32) -> Result<FormatC
 
 fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
     if format.sample_rate == 0 {
-        return Err(Error::UnsupportedWav("sample rate 0 is not allowed".into()));
+        return Err(Error::UnsupportedPcmContainer(
+            "sample rate 0 is not allowed".into(),
+        ));
     }
 
     let container_bits_per_sample = format.container_bits_per_sample;
     if !matches!(container_bits_per_sample, 8 | 16 | 24 | 32) {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only byte-aligned PCM containers are supported, found {container_bits_per_sample} bits/sample"
         )));
     }
 
     let envelope = if format.format_tag == 1 {
         if !(1..=2).contains(&format.channels) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "canonical PCM tag 1 only supports exact mono/stereo (1..2 channel) cases, found {} channels",
                 format.channels
             )));
         }
         if format.valid_bits_per_sample != container_bits_per_sample {
-            return Err(Error::UnsupportedWav(
+            return Err(Error::UnsupportedPcmContainer(
                 "canonical PCM requires valid bits to match container bits".into(),
             ));
         }
@@ -774,7 +786,7 @@ fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
             valid_bits_per_sample: format.valid_bits_per_sample,
             container_bits_per_sample,
             channel_mask: ordinary_channel_mask(format.channels).ok_or_else(|| {
-                Error::UnsupportedWav(format!(
+                Error::UnsupportedPcmContainer(format!(
                     "no ordinary mask exists for {} channels",
                     format.channels
                 ))
@@ -782,26 +794,26 @@ fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
         }
     } else if format.format_tag == 0xFFFE {
         if !(1..=8).contains(&format.channels) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "WAVEFORMATEXTENSIBLE input only supports 1..8 channel layouts, found {} channels",
                 format.channels
             )));
         }
         if format.valid_bits_per_sample < 4 || format.valid_bits_per_sample > 32 {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "valid bits must be in the FLAC-native 4..32 range, found {}",
                 format.valid_bits_per_sample
             )));
         }
         if format.valid_bits_per_sample > container_bits_per_sample {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "valid bits cannot exceed container bits ({} > {})",
                 format.valid_bits_per_sample, container_bits_per_sample
             )));
         }
 
         if !is_supported_channel_mask(format.channels, format.channel_mask) {
-            return Err(Error::UnsupportedWav(format!(
+            return Err(Error::UnsupportedPcmContainer(format!(
                 "channel mask {:#010x} is not supported for {} channels",
                 format.channel_mask, format.channels
             )));
@@ -814,7 +826,7 @@ fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
             channel_mask: format.channel_mask,
         }
     } else {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "only PCM format tag 1 and WAVEFORMATEXTENSIBLE PCM are supported, found {}",
             format.format_tag
         )));
@@ -823,7 +835,7 @@ fn validate_format(format: FormatChunk) -> Result<PcmEnvelope> {
     let expected_byte_rate =
         format.sample_rate * u32::from(format.channels) * u32::from(container_bits_per_sample / 8);
     if format.byte_rate != expected_byte_rate {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "fmt byte rate does not match the PCM payload shape",
         ));
     }
@@ -843,7 +855,7 @@ fn decode_samples_into(data: &[u8], envelope: PcmEnvelope, output: &mut Vec<i32>
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
-        .ok_or(Error::InvalidWav(
+        .ok_or(Error::InvalidPcmContainer(
             "valid bits cannot exceed container bits for decoding",
         ))? as u32;
 
@@ -887,7 +899,7 @@ fn decode_samples_into(data: &[u8], envelope: PcmEnvelope, output: &mut Vec<i32>
             }
             Ok(())
         }
-        _ => Err(Error::UnsupportedWav(format!(
+        _ => Err(Error::UnsupportedPcmContainer(format!(
             "unsupported container bits/sample for decoder: {}",
             envelope.container_bits_per_sample
         ))),
@@ -902,7 +914,7 @@ fn read_chunk_payload<R: Read>(reader: &mut R, chunk_size: u32) -> Result<Vec<u8
 
 fn read_ds64_chunk<R: Read>(reader: &mut R, chunk_size: u32) -> Result<Ds64Chunk> {
     if chunk_size < 28 {
-        return Err(Error::InvalidWav("RF64 ds64 chunk is too short"));
+        return Err(Error::InvalidPcmContainer("RF64 ds64 chunk is too short"));
     }
     let chunk = Ds64Chunk {
         riff_size: read_u64_le(reader)?,
@@ -916,7 +928,7 @@ fn read_ds64_chunk<R: Read>(reader: &mut R, chunk_size: u32) -> Result<Ds64Chunk
         reader.read_exact(&mut discard)?;
     }
     if table_length != 0 {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "RF64 ds64 table entries are not supported yet".into(),
         ));
     }
@@ -944,7 +956,9 @@ fn read_u64_le<R: Read>(reader: &mut R) -> Result<u64> {
 fn seek_forward<R: Seek>(reader: &mut R, chunk_start: u64, chunk_size: u64) -> Result<()> {
     let target = chunk_start
         .checked_add(chunk_size)
-        .ok_or(Error::InvalidWav("chunk length overflows the file cursor"))?;
+        .ok_or(Error::InvalidPcmContainer(
+            "chunk length overflows the file cursor",
+        ))?;
     reader.seek(SeekFrom::Start(target))?;
     Ok(())
 }
@@ -989,8 +1003,8 @@ mod tests {
         let reader = read_pcm_reader_with_options(
             Cursor::new(wav),
             PcmReaderOptions {
-                capture_fxmd: config.capture_fxmd,
-                strict_fxmd_validation: config.strict_fxmd_validation,
+                capture_fxmd: config.capture_fxmd(),
+                strict_fxmd_validation: config.strict_fxmd_validation(),
             },
         )
         .unwrap();

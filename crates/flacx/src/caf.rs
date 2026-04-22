@@ -135,7 +135,7 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for CafPcmStream<R> {
 
 fn validate_direct_descriptor(descriptor: RawPcmDescriptor) -> Result<()> {
     if matches!(descriptor.channel_mask, Some(0)) {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "CAF channel layout mappings must use a supported non-zero channel bitmap".into(),
         ));
     }
@@ -152,24 +152,24 @@ fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCa
     let mut header = [0u8; 8];
     reader.read_exact(&mut header)?;
     if header[..4] != CAF_MAGIC {
-        return Err(Error::InvalidWav("expected CAF header"));
+        return Err(Error::InvalidPcmContainer("expected CAF header"));
     }
     let version = u16::from_be_bytes(header[4..6].try_into().expect("fixed version"));
     if version != CAF_VERSION {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "CAF version {version} is not supported"
         )));
     }
     let flags = u16::from_be_bytes(header[6..8].try_into().expect("fixed flags"));
     if flags != 0 {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "CAF header flags {flags:#06x} are not supported"
         )));
     }
 
     let desc_header = read_chunk_header(reader)?;
     if desc_header.chunk_id != DESC_CHUNK_ID {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "CAF Audio Description chunk must follow the file header",
         ));
     }
@@ -194,13 +194,13 @@ fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCa
         };
         let chunk_start = reader.stream_position()?;
         let chunk_size = u64::try_from(chunk_header.size).map_err(|_| {
-            Error::UnsupportedWav("negative CAF chunk sizes are not supported".into())
+            Error::UnsupportedPcmContainer("negative CAF chunk sizes are not supported".into())
         })?;
 
         match chunk_header.chunk_id {
             DATA_CHUNK_ID => {
                 if chunk_header.size < 4 {
-                    return Err(Error::InvalidWav("CAF data chunk is too short"));
+                    return Err(Error::InvalidPcmContainer("CAF data chunk is too short"));
                 }
                 let _edit_count = read_u32_be(reader)?;
                 let audio_size = chunk_size - 4;
@@ -209,7 +209,9 @@ fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCa
                 data_offset = Some(payload_offset);
                 if read_data {
                     let data_len = usize::try_from(audio_size).map_err(|_| {
-                        Error::UnsupportedWav("PCM payload exceeds memory-addressable size".into())
+                        Error::UnsupportedPcmContainer(
+                            "PCM payload exceeds memory-addressable size".into(),
+                        )
                     })?;
                     let mut payload = vec![0u8; data_len];
                     reader.read_exact(&mut payload)?;
@@ -223,7 +225,7 @@ fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCa
                 seek_forward(reader, chunk_start, chunk_size)?;
             }
             PAKT_CHUNK_ID => {
-                return Err(Error::UnsupportedWav(
+                return Err(Error::UnsupportedPcmContainer(
                     "CAF packet table chunks are not supported in Stage 3".into(),
                 ));
             }
@@ -239,8 +241,8 @@ fn parse_caf<R: Read + Seek>(reader: &mut R, read_data: bool) -> Result<ParsedCa
 
     Ok(ParsedCaf {
         descriptor,
-        data_offset: data_offset.ok_or(Error::InvalidWav("missing CAF data chunk"))?,
-        data_size: data_size.ok_or(Error::InvalidWav("missing CAF data chunk"))?,
+        data_offset: data_offset.ok_or(Error::InvalidPcmContainer("missing CAF data chunk"))?,
+        data_size: data_size.ok_or(Error::InvalidPcmContainer("missing CAF data chunk"))?,
         data,
     })
 }
@@ -265,23 +267,24 @@ fn read_audio_description_chunk<R: Read>(
     chunk_size: i64,
 ) -> Result<RawPcmDescriptor> {
     if chunk_size < 32 {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "CAF Audio Description chunk is too short",
         ));
     }
     let sample_rate = read_f64_be(reader)?;
     if !sample_rate.is_finite() || sample_rate <= 0.0 || sample_rate.fract() != 0.0 {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "CAF sample rates must be positive whole numbers".into(),
         ));
     }
-    let sample_rate = u32::try_from(sample_rate as u64)
-        .map_err(|_| Error::UnsupportedWav("CAF sample rate exceeds supported range".into()))?;
+    let sample_rate = u32::try_from(sample_rate as u64).map_err(|_| {
+        Error::UnsupportedPcmContainer("CAF sample rate exceeds supported range".into())
+    })?;
 
     let mut format_id = [0u8; 4];
     reader.read_exact(&mut format_id)?;
     if format_id != LPCM_FORMAT_ID {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "CAF format '{}' is not supported in Stage 3",
             String::from_utf8_lossy(&format_id)
         )));
@@ -289,10 +292,12 @@ fn read_audio_description_chunk<R: Read>(
 
     let format_flags = read_u32_be(reader)?;
     if format_flags & CAF_FLAG_IS_FLOAT != 0 {
-        return Err(Error::UnsupportedWav("float CAF is not supported".into()));
+        return Err(Error::UnsupportedPcmContainer(
+            "float CAF is not supported".into(),
+        ));
     }
     if format_flags & !(CAF_FLAG_IS_FLOAT | CAF_FLAG_IS_LITTLE_ENDIAN) != 0 {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "CAF format flags {format_flags:#010x} are not supported"
         )));
     }
@@ -303,27 +308,29 @@ fn read_audio_description_chunk<R: Read>(
     let bits_per_channel = read_u32_be(reader)?;
 
     if frames_per_packet != 1 {
-        return Err(Error::UnsupportedWav(format!(
+        return Err(Error::UnsupportedPcmContainer(format!(
             "CAF frames/packet must be 1 for Stage 3 linear PCM, found {frames_per_packet}"
         )));
     }
     if channels == 0 {
-        return Err(Error::InvalidWav("CAF channel count must be non-zero"));
+        return Err(Error::InvalidPcmContainer(
+            "CAF channel count must be non-zero",
+        ));
     }
     if bytes_per_packet == 0 {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "CAF bytes/packet must be non-zero for Stage 3 linear PCM".into(),
         ));
     }
     if bytes_per_packet % channels != 0 {
-        return Err(Error::InvalidWav(
+        return Err(Error::InvalidPcmContainer(
             "CAF bytes/packet does not align to the channel count",
         ));
     }
     let bytes_per_sample = bytes_per_packet / channels;
     let container_bits_per_sample = bytes_per_sample
         .checked_mul(8)
-        .ok_or_else(|| Error::UnsupportedWav("CAF container width overflows".into()))?;
+        .ok_or_else(|| Error::UnsupportedPcmContainer("CAF container width overflows".into()))?;
 
     let byte_order = if format_flags & CAF_FLAG_IS_LITTLE_ENDIAN != 0 {
         RawPcmByteOrder::LittleEndian
@@ -334,13 +341,13 @@ fn read_audio_description_chunk<R: Read>(
     Ok(RawPcmDescriptor {
         sample_rate,
         channels: u8::try_from(channels).map_err(|_| {
-            Error::UnsupportedWav("CAF channel count exceeds supported range".into())
+            Error::UnsupportedPcmContainer("CAF channel count exceeds supported range".into())
         })?,
         valid_bits_per_sample: u8::try_from(bits_per_channel).map_err(|_| {
-            Error::UnsupportedWav("CAF bits/channel exceeds supported range".into())
+            Error::UnsupportedPcmContainer("CAF bits/channel exceeds supported range".into())
         })?,
         container_bits_per_sample: u8::try_from(container_bits_per_sample).map_err(|_| {
-            Error::UnsupportedWav("CAF container width exceeds supported range".into())
+            Error::UnsupportedPcmContainer("CAF container width exceeds supported range".into())
         })?,
         byte_order,
         channel_mask: None,
@@ -349,7 +356,9 @@ fn read_audio_description_chunk<R: Read>(
 
 fn read_channel_layout_chunk<R: Read>(reader: &mut R, chunk_size: u64) -> Result<CafChannelLayout> {
     if chunk_size < 12 {
-        return Err(Error::InvalidWav("CAF channel layout chunk is too short"));
+        return Err(Error::InvalidPcmContainer(
+            "CAF channel layout chunk is too short",
+        ));
     }
     Ok(CafChannelLayout {
         layout_tag: read_u32_be(reader)?,
@@ -366,7 +375,7 @@ fn resolve_channel_mask(
         return if channels <= 2 {
             Ok(None)
         } else {
-            Err(Error::UnsupportedWav(
+            Err(Error::UnsupportedPcmContainer(
                 "CAF 3..8 channel inputs require a supported channel layout mapping".into(),
             ))
         };
@@ -377,7 +386,7 @@ fn resolve_channel_mask(
         return if channels <= 2 {
             Ok(None)
         } else {
-            Err(Error::UnsupportedWav(
+            Err(Error::UnsupportedPcmContainer(
                 "CAF channel layout mappings must use a supported channel bitmap in Stage 3".into(),
             ))
         };
@@ -385,7 +394,7 @@ fn resolve_channel_mask(
     if channel_layout.channel_bitmap.count_ones() != u32::from(channels)
         || !is_supported_channel_mask(u16::from(channels), channel_layout.channel_bitmap)
     {
-        return Err(Error::UnsupportedWav(
+        return Err(Error::UnsupportedPcmContainer(
             "CAF channel bitmap does not map to a supported channel layout".into(),
         ));
     }
@@ -407,7 +416,9 @@ fn read_f64_be<R: Read>(reader: &mut R) -> Result<f64> {
 fn seek_forward<R: Seek>(reader: &mut R, chunk_start: u64, chunk_size: u64) -> Result<()> {
     let target = chunk_start
         .checked_add(chunk_size)
-        .ok_or(Error::InvalidWav("chunk length overflows the file cursor"))?;
+        .ok_or(Error::InvalidPcmContainer(
+            "chunk length overflows the file cursor",
+        ))?;
     reader.seek(SeekFrom::Start(target))?;
     Ok(())
 }

@@ -44,7 +44,7 @@ where
 {
     #[cfg(not(feature = "progress"))]
     let _ = progress;
-    ensure_output_container_enabled(config.output_container)?;
+    ensure_output_container_enabled(config.output_container())?;
     let spec = stream.spec();
     let source_info = stream.stream_info();
     if should_materialize_decode(spec.total_samples)
@@ -56,8 +56,8 @@ where
             &samples,
             &metadata,
             WavMetadataWriteOptions {
-                emit_fxmd: config.emit_fxmd,
-                container: config.output_container,
+                emit_fxmd: config.emit_fxmd(),
+                container: config.output_container(),
             },
         )?;
         #[cfg(feature = "progress")]
@@ -85,8 +85,8 @@ where
         spec,
         &metadata,
         WavMetadataWriteOptions {
-            emit_fxmd: config.emit_fxmd,
-            container: config.output_container,
+            emit_fxmd: config.emit_fxmd(),
+            container: config.output_container(),
         },
     )?;
 

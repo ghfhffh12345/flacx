@@ -110,8 +110,8 @@ impl TestDecoder {
         let reader = read_flac_reader_with_options(
             Cursor::new(input),
             FlacReaderOptions {
-                strict_seektable_validation: self.config.strict_seektable_validation,
-                strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
+                strict_seektable_validation: self.config.strict_seektable_validation(),
+                strict_channel_mask_provenance: self.config.strict_channel_mask_provenance(),
             },
         )?;
         let mut decoder = self.config.into_decoder(Cursor::new(Vec::new()));
@@ -140,7 +140,7 @@ impl TestDecoder {
                     "unsupported decode output extension '.{ext}'"
                 )));
             }
-            None => self.config.output_container,
+            None => self.config.output_container(),
         };
         let temp_path = output_path.with_extension(format!(
             "{}.tmp",
@@ -153,8 +153,8 @@ impl TestDecoder {
             let reader = read_flac_reader_with_options(
                 fs::File::open(input_path)?,
                 FlacReaderOptions {
-                    strict_seektable_validation: self.config.strict_seektable_validation,
-                    strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
+                    strict_seektable_validation: self.config.strict_seektable_validation(),
+                    strict_channel_mask_provenance: self.config.strict_channel_mask_provenance(),
                 },
             )?;
             let mut decoder = self
@@ -183,8 +183,8 @@ impl TestDecoder {
         let reader = read_flac_reader_with_options(
             input,
             FlacReaderOptions {
-                strict_seektable_validation: self.config.strict_seektable_validation,
-                strict_channel_mask_provenance: self.config.strict_channel_mask_provenance,
+                strict_seektable_validation: self.config.strict_seektable_validation(),
+                strict_channel_mask_provenance: self.config.strict_channel_mask_provenance(),
             },
         )?;
         let mut decoder = self.config.into_decoder(output);
