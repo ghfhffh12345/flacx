@@ -1,5 +1,6 @@
 use std::{
     io::{Read, Seek},
+    sync::{Arc, Condvar, Mutex, mpsc},
 };
 
 use crate::{
@@ -61,10 +62,302 @@ struct FrameChunkResult {
     decoded_samples: Vec<i32>,
 }
 
+type SharedProducerProgress = Arc<(Mutex<ProducerProgressState>, Condvar)>;
+
+#[derive(Debug, Default)]
+struct ProducerProgressState {
+    discovered_input_frames: usize,
+    discovered_sample_number: u64,
+    completed_input_frames: usize,
+    producer_finished: bool,
+    cancelled: bool,
+    #[cfg(feature = "progress")]
+    discovered_input_byte_totals: Vec<u64>,
+}
+
+struct DecodeSlabProducer<R> {
+    reader: R,
+    stream_info: StreamInfo,
+    total_samples: u64,
+    pending_bytes: Vec<u8>,
+    pending_start: usize,
+    producer: ProducerState,
+    eof: bool,
+    progress: SharedProducerProgress,
+    discovered_input_frames: usize,
+    discovered_sample_number: u64,
+    #[cfg(feature = "progress")]
+    discovered_input_bytes: u64,
+}
+
+impl<R> DecodeSlabProducer<R> {
+    fn inflight_slabs(&self) -> usize {
+        self.producer.inflight_slabs()
+    }
+
+    fn into_background(
+        self,
+        reader: ChunkBackedReader,
+    ) -> (R, DecodeSlabProducer<ChunkBackedReader>) {
+        (
+            self.reader,
+            DecodeSlabProducer {
+                reader,
+                stream_info: self.stream_info,
+                total_samples: self.total_samples,
+                pending_bytes: self.pending_bytes,
+                pending_start: self.pending_start,
+                producer: self.producer,
+                eof: self.eof,
+                progress: self.progress,
+                discovered_input_frames: self.discovered_input_frames,
+                discovered_sample_number: self.discovered_sample_number,
+                #[cfg(feature = "progress")]
+                discovered_input_bytes: self.discovered_input_bytes,
+            },
+        )
+    }
+}
+
+impl<R: Read> DecodeSlabProducer<R> {
+    fn new(
+        reader: R,
+        stream_info: StreamInfo,
+        total_samples: u64,
+        producer: ProducerState,
+        progress: SharedProducerProgress,
+        #[cfg(feature = "progress")] frame_offset: u64,
+    ) -> Self {
+        Self {
+            reader,
+            stream_info,
+            total_samples,
+            pending_bytes: Vec::new(),
+            pending_start: 0,
+            producer,
+            eof: false,
+            progress,
+            discovered_input_frames: 0,
+            discovered_sample_number: 0,
+            #[cfg(feature = "progress")]
+            discovered_input_bytes: frame_offset,
+        }
+    }
+
+    fn run(mut self, session_producer: session::SessionProducer) -> Result<()> {
+        loop {
+            if !self.refresh_completed_input_progress() {
+                break;
+            }
+
+            if let Some(plan) = self.read_next_slab_plan()? {
+                if !session_producer.submit_tracked(&mut self.producer, plan)? {
+                    break;
+                }
+                continue;
+            }
+
+            if self.eof || self.discovered_sample_number >= self.total_samples {
+                break;
+            }
+
+            if !self.wait_for_completed_input_progress() {
+                break;
+            }
+        }
+
+        let (lock, condvar) = &*self.progress;
+        let mut state = lock.lock().unwrap();
+        state.producer_finished = true;
+        condvar.notify_all();
+
+        Ok(())
+    }
+
+    fn refresh_completed_input_progress(&mut self) -> bool {
+        let (lock, _) = &*self.progress;
+        let state = lock.lock().unwrap();
+        let completed_input_frames = state.completed_input_frames;
+        let cancelled = state.cancelled;
+        drop(state);
+        self.producer
+            .retire_completed_input_frames(completed_input_frames);
+        !cancelled
+    }
+
+    fn wait_for_completed_input_progress(&mut self) -> bool {
+        let (lock, condvar) = &*self.progress;
+        let mut state = lock.lock().unwrap();
+        let completed_input_frames = state.completed_input_frames;
+        while !state.cancelled && state.completed_input_frames == completed_input_frames {
+            state = condvar.wait(state).unwrap();
+        }
+        let completed_input_frames = state.completed_input_frames;
+        let cancelled = state.cancelled;
+        drop(state);
+        self.producer
+            .retire_completed_input_frames(completed_input_frames);
+        !cancelled
+    }
+
+    fn read_next_frame(&mut self) -> Result<Option<ParsedFrame>> {
+        loop {
+            match frame::scan_frame(
+                &self.pending_bytes[self.pending_start..],
+                self.stream_info,
+                self.discovered_input_frames as u64,
+                self.discovered_sample_number,
+            ) {
+                Ok(parsed) => return Ok(Some(parsed)),
+                Err(Error::InvalidFlac("unexpected EOF while reading frames")) if !self.eof => {}
+                Err(Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof && !self.eof => {}
+                Err(error) => return Err(error),
+            }
+
+            let mut chunk = [0u8; FLAC_READ_CHUNK_SIZE];
+            let read = self.reader.read(&mut chunk)?;
+            if read == 0 {
+                self.eof = true;
+                if self.pending_bytes.is_empty() {
+                    return Ok(None);
+                }
+                continue;
+            }
+            self.pending_bytes.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    fn normalize_pending_bytes(&mut self) {
+        if self.pending_start == self.pending_bytes.len() {
+            self.pending_bytes.clear();
+            self.pending_start = 0;
+            return;
+        }
+
+        if self.pending_start != 0 {
+            self.pending_bytes.drain(..self.pending_start);
+            self.pending_start = 0;
+        }
+    }
+
+    fn take_staged_slab_bytes(&mut self) -> Vec<u8> {
+        let slab_end = self.pending_start;
+        let remaining = self.pending_bytes.split_off(slab_end);
+        let slab_bytes = std::mem::replace(&mut self.pending_bytes, remaining);
+        self.pending_start = 0;
+        slab_bytes
+    }
+
+    fn seal_staged_decode_slab_plan(&mut self, plan: DecodeSlabPlan) -> DecodeSlabPlan {
+        plan.seal_bytes(self.take_staged_slab_bytes())
+    }
+
+    fn read_next_slab_plan(&mut self) -> Result<Option<DecodeSlabPlan>> {
+        self.normalize_pending_bytes();
+        while self.producer.has_capacity() && self.discovered_sample_number < self.total_samples {
+            let Some(parsed) = self.read_next_frame()? else {
+                break;
+            };
+            let frame_start = self.pending_start;
+            let frame_end = frame_start + parsed.bytes_consumed;
+            match self.producer.push_frame(parsed, frame_start)? {
+                PushFrameOutcome::Pending => {
+                    self.accept_indexed_frame(parsed, frame_end);
+                }
+                PushFrameOutcome::AcceptedAndSealed(plan) => {
+                    self.accept_indexed_frame(parsed, frame_end);
+                    return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
+                }
+                PushFrameOutcome::SealedBeforeAdd(plan) => {
+                    return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
+                }
+            }
+        }
+
+        if self.discovered_sample_number >= self.total_samples || self.eof {
+            if let Some(plan) = self.producer.finish() {
+                return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn accept_indexed_frame(&mut self, parsed: ParsedFrame, frame_end: usize) {
+        self.discovered_input_frames += 1;
+        self.discovered_sample_number += u64::from(parsed.block_size);
+        #[cfg(feature = "progress")]
+        {
+            self.discovered_input_bytes = self
+                .discovered_input_bytes
+                .saturating_add(parsed.bytes_consumed as u64);
+        }
+        self.pending_start = frame_end;
+
+        let (lock, condvar) = &*self.progress;
+        let mut state = lock.lock().unwrap();
+        state.discovered_input_frames = self.discovered_input_frames;
+        state.discovered_sample_number = self.discovered_sample_number;
+        #[cfg(feature = "progress")]
+        state
+            .discovered_input_byte_totals
+            .push(self.discovered_input_bytes);
+        condvar.notify_all();
+    }
+}
+
+struct ChunkBackedReader {
+    receiver: mpsc::Receiver<std::io::Result<Option<Vec<u8>>>>,
+    chunk: Vec<u8>,
+    chunk_start: usize,
+    eof: bool,
+}
+
+impl ChunkBackedReader {
+    fn new(receiver: mpsc::Receiver<std::io::Result<Option<Vec<u8>>>>) -> Self {
+        Self {
+            receiver,
+            chunk: Vec::new(),
+            chunk_start: 0,
+            eof: false,
+        }
+    }
+}
+
+impl Read for ChunkBackedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.eof {
+            return Ok(0);
+        }
+        while self.chunk_start == self.chunk.len() {
+            match self.receiver.recv() {
+                Ok(Ok(Some(chunk))) => {
+                    self.chunk = chunk;
+                    self.chunk_start = 0;
+                }
+                Ok(Ok(None)) | Err(_) => {
+                    self.eof = true;
+                    return Ok(0);
+                }
+                Ok(Err(error)) => return Err(error),
+            }
+        }
+
+        let read = buf.len().min(self.chunk.len() - self.chunk_start);
+        buf[..read].copy_from_slice(&self.chunk[self.chunk_start..self.chunk_start + read]);
+        self.chunk_start += read;
+        if self.chunk_start == self.chunk.len() {
+            self.chunk.clear();
+            self.chunk_start = 0;
+        }
+        Ok(read)
+    }
+}
+
 impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlacPcmStream")
-            .field("reader", &self.reader)
             .field("stream_info", &self.stream_info)
             .field("spec", &self.spec)
             .field("discovered_input_frames", &self.discovered_input_frames)
@@ -72,8 +365,20 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
             .field("drained_input_frames", &self.completed_input_frames)
             .field("drained_pcm_frames", &self.drained_pcm_frames)
             .field("threads", &self.threads)
-            .field("pending_bytes_len", &self.pending_bytes.len())
-            .field("pending_start", &self.pending_start)
+            .field(
+                "pending_bytes_len",
+                &self
+                    .slab_producer
+                    .as_ref()
+                    .map_or(0, |producer| producer.pending_bytes.len()),
+            )
+            .field(
+                "pending_start",
+                &self
+                    .slab_producer
+                    .as_ref()
+                    .map_or(0, |producer| producer.pending_start),
+            )
             .field(
                 "ready_slab_count",
                 &self
@@ -88,7 +393,13 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
                     session::StreamingDecodeSession::next_ready_slab_start_frame,
                 ),
             )
-            .field("inflight_slabs", &self.producer.inflight_slabs())
+            .field(
+                "inflight_slabs",
+                &self
+                    .slab_producer
+                    .as_ref()
+                    .map_or(0, DecodeSlabProducer::inflight_slabs),
+            )
             .field(
                 "has_draining_slab",
                 &self
@@ -97,7 +408,13 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
                     .is_some_and(session::StreamingDecodeSession::has_draining_slab),
             )
             .field("has_streaming_session", &self.session.is_some())
-            .field("eof", &self.eof)
+            .field(
+                "eof",
+                &self
+                    .slab_producer
+                    .as_ref()
+                    .is_none_or(|producer| producer.eof),
+            )
             .finish()
     }
 }
@@ -269,23 +586,21 @@ impl<R: Read + Seek> FlacReader<R> {
 }
 
 pub struct FlacPcmStream<R> {
-    reader: R,
     stream_info: StreamInfo,
     spec: PcmSpec,
     #[cfg(feature = "progress")]
     frame_offset: u64,
     discovered_input_frames: usize,
     discovered_sample_number: u64,
-    #[cfg(feature = "progress")]
-    discovered_input_byte_totals: Vec<u64>,
     completed_input_frames: usize,
     #[cfg(feature = "progress")]
     input_bytes_processed: u64,
     drained_pcm_frames: u64,
     threads: usize,
-    pending_bytes: Vec<u8>,
-    pending_start: usize,
-    producer: ProducerState,
+    reader: Option<R>,
+    slab_producer: Option<DecodeSlabProducer<R>>,
+    producer_progress: SharedProducerProgress,
+    input_sender: Option<mpsc::Sender<std::io::Result<Option<Vec<u8>>>>>,
     session: Option<session::StreamingDecodeSession>,
     eof: bool,
 }
@@ -296,41 +611,54 @@ impl<R> FlacPcmStream<R> {
     pub fn builder(reader: R) -> FlacPcmStreamBuilder<R> {
         FlacPcmStreamBuilder::new(reader)
     }
+}
 
+impl<R: Read + Seek> FlacPcmStream<R> {
     fn from_parts(reader: R, stream_info: StreamInfo, spec: PcmSpec, frame_offset: u64) -> Self {
         #[cfg(not(feature = "progress"))]
         let _ = frame_offset;
+        let producer_progress =
+            Arc::new((Mutex::new(ProducerProgressState::default()), Condvar::new()));
+        let producer = ProducerState::new(
+            stream_info,
+            ProducerConfig {
+                target_pcm_frames_per_slab: DECODE_SLAB_TARGET_PCM_FRAMES,
+                max_frames_per_slab: DECODE_SLAB_MAX_INPUT_FRAMES,
+                max_bytes_per_slab: decode_slab_max_input_bytes(stream_info),
+                max_slabs_ahead: 1,
+            },
+        );
         Self {
-            reader,
             stream_info,
             spec,
             #[cfg(feature = "progress")]
             frame_offset,
             discovered_input_frames: 0,
             discovered_sample_number: 0,
-            #[cfg(feature = "progress")]
-            discovered_input_byte_totals: Vec::new(),
             completed_input_frames: 0,
             #[cfg(feature = "progress")]
             input_bytes_processed: 0,
             drained_pcm_frames: 0,
             threads: 1,
-            pending_bytes: Vec::new(),
-            pending_start: 0,
-            producer: ProducerState::new(
+            reader: None,
+            slab_producer: Some(DecodeSlabProducer::new(
+                reader,
                 stream_info,
-                ProducerConfig {
-                    target_pcm_frames_per_slab: DECODE_SLAB_TARGET_PCM_FRAMES,
-                    max_frames_per_slab: DECODE_SLAB_MAX_INPUT_FRAMES,
-                    max_bytes_per_slab: decode_slab_max_input_bytes(stream_info),
-                    max_slabs_ahead: 1,
-                },
-            ),
+                spec.total_samples,
+                producer,
+                Arc::clone(&producer_progress),
+                #[cfg(feature = "progress")]
+                frame_offset,
+            )),
+            producer_progress,
+            input_sender: None,
             session: None,
             eof: false,
         }
     }
+}
 
+impl<R> FlacPcmStream<R> {
     #[must_use]
     pub fn spec(&self) -> PcmSpec {
         self.spec
@@ -344,8 +672,10 @@ impl<R> FlacPcmStream<R> {
 
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads.max(1);
-        self.producer
-            .set_max_slabs_ahead(self.active_decode_window_limit());
+        let window_limit = self.active_decode_window_limit();
+        if let Some(producer) = self.slab_producer.as_mut() {
+            producer.producer.set_max_slabs_ahead(window_limit);
+        }
     }
 }
 
@@ -422,206 +752,209 @@ impl<R> FlacPcmStream<R> {
     }
 }
 
-impl<R: Read + Seek> FlacPcmStream<R> {
-    #[cfg(feature = "progress")]
-    fn record_discovered_input_bytes(&mut self, frame_bytes: usize) {
-        let completed = self
-            .discovered_input_byte_totals
-            .last()
-            .copied()
-            .unwrap_or(self.frame_offset);
-        self.discovered_input_byte_totals
-            .push(completed.saturating_add(frame_bytes as u64));
+impl<R> Drop for FlacPcmStream<R> {
+    fn drop(&mut self) {
+        self.input_sender.take();
+        let (lock, condvar) = &*self.producer_progress;
+        let mut state = lock.lock().unwrap();
+        state.cancelled = true;
+        condvar.notify_all();
     }
+}
 
+impl<R: Read + Seek> FlacPcmStream<R> {
     #[cfg(feature = "progress")]
     fn sync_completed_input_progress(&mut self, completed_input_frames: usize) {
         self.completed_input_frames = completed_input_frames;
+        let (lock, condvar) = &*self.producer_progress;
+        let mut state = lock.lock().unwrap();
+        state.completed_input_frames = completed_input_frames;
+        self.discovered_input_frames = state.discovered_input_frames;
+        self.discovered_sample_number = state.discovered_sample_number;
         self.input_bytes_processed = completed_input_frames
             .checked_sub(1)
-            .and_then(|index| self.discovered_input_byte_totals.get(index).copied())
+            .and_then(|index| state.discovered_input_byte_totals.get(index).copied())
             .unwrap_or(0);
-        self.producer
-            .retire_completed_input_frames(completed_input_frames);
+        condvar.notify_all();
+        drop(state);
+        if self.threads <= 1 {
+            if let Some(producer) = self.slab_producer.as_mut() {
+                producer
+                    .producer
+                    .retire_completed_input_frames(completed_input_frames);
+            }
+        }
     }
 
     #[cfg(not(feature = "progress"))]
     fn sync_completed_input_progress(&mut self, completed_input_frames: usize) {
         self.completed_input_frames = completed_input_frames;
-        self.producer
-            .retire_completed_input_frames(completed_input_frames);
-    }
-
-    fn read_next_frame(&mut self) -> Result<Option<ParsedFrame>> {
-        loop {
-            match frame::scan_frame(
-                &self.pending_bytes[self.pending_start..],
-                self.stream_info,
-                self.discovered_input_frames as u64,
-                self.discovered_sample_number,
-            ) {
-                Ok(parsed) => return Ok(Some(parsed)),
-                Err(Error::InvalidFlac("unexpected EOF while reading frames")) if !self.eof => {}
-                Err(Error::Io(error))
-                    if error.kind() == std::io::ErrorKind::UnexpectedEof && !self.eof => {}
-                Err(error) => return Err(error),
+        let (lock, condvar) = &*self.producer_progress;
+        let mut state = lock.lock().unwrap();
+        state.completed_input_frames = completed_input_frames;
+        self.discovered_input_frames = state.discovered_input_frames;
+        self.discovered_sample_number = state.discovered_sample_number;
+        condvar.notify_all();
+        drop(state);
+        if self.threads <= 1 {
+            if let Some(producer) = self.slab_producer.as_mut() {
+                producer
+                    .producer
+                    .retire_completed_input_frames(completed_input_frames);
             }
-
-            let mut chunk = [0u8; FLAC_READ_CHUNK_SIZE];
-            let read = self.reader.read(&mut chunk)?;
-            if read == 0 {
-                self.eof = true;
-                if self.pending_bytes.is_empty() {
-                    return Ok(None);
-                }
-                continue;
-            }
-            self.pending_bytes.extend_from_slice(&chunk[..read]);
         }
-    }
-
-    fn normalize_pending_bytes(&mut self) {
-        if self.pending_start == self.pending_bytes.len() {
-            self.pending_bytes.clear();
-            self.pending_start = 0;
-            return;
-        }
-
-        if self.pending_start != 0 {
-            self.pending_bytes.drain(..self.pending_start);
-            self.pending_start = 0;
-        }
-    }
-
-    fn take_staged_slab_bytes(&mut self) -> Vec<u8> {
-        let slab_end = self.pending_start;
-        let remaining = self.pending_bytes.split_off(slab_end);
-        let slab_bytes = std::mem::replace(&mut self.pending_bytes, remaining);
-        self.pending_start = 0;
-        slab_bytes
-    }
-
-    fn seal_staged_decode_slab_plan(&mut self, plan: DecodeSlabPlan) -> DecodeSlabPlan {
-        plan.seal_bytes(self.take_staged_slab_bytes())
     }
 
     fn ensure_streaming_session(&mut self) {
         if self.session.is_some() {
             return;
         }
-        self.session = Some(if self.threads <= 1 {
-            session::StreamingDecodeSession::new_local()
-        } else {
-            session::StreamingDecodeSession::spawn(
-                self.threads.max(1),
-                self.active_decode_window_limit(),
-            )
-        });
+        if self.threads <= 1 {
+            self.session = Some(session::StreamingDecodeSession::new_local());
+            return;
+        }
+        let slab_producer = self
+            .slab_producer
+            .take()
+            .expect("stream owns a slab producer until the background session starts");
+        let (input_sender, input_receiver) = mpsc::channel();
+        let (reader, slab_producer) =
+            slab_producer.into_background(ChunkBackedReader::new(input_receiver));
+        self.reader = Some(reader);
+        self.input_sender = Some(input_sender);
+        self.session = Some(session::StreamingDecodeSession::spawn_with_producer(
+            self.threads.max(1),
+            self.active_decode_window_limit(),
+            move |session_producer| slab_producer.run(session_producer),
+        ));
     }
 
     fn active_slab_count(&self) -> usize {
         self.session
             .as_ref()
             .map_or(0, session::StreamingDecodeSession::active_slab_count)
-            .saturating_add(self.producer.inflight_slabs())
-    }
-
-    fn submit_decode_plan(&mut self, plan: DecodeSlabPlan) -> Result<()> {
-        self.ensure_streaming_session();
-        if self.threads <= 1 {
-            self.producer.record_ready_submission(&plan);
-            let slab = frame::decode_work_slab(plan.into())?;
-            self.session
-                .as_mut()
-                .expect("local streaming decode session initialized")
-                .accept_ready_slab(slab.into(), 1);
-            return Ok(());
-        }
-        let (end_frame_index, pcm_frames) = ProducerState::submitted_slab(&plan);
-        self.session
-            .as_ref()
-            .expect("streaming decode session initialized")
-            .submit(plan)?;
-        self.producer
-            .record_inflight_submission_parts(end_frame_index, pcm_frames);
-        profile::observe_inflight_packets_for_current_thread(self.active_slab_count());
-        Ok(())
+            .saturating_add(
+                self.slab_producer
+                    .as_ref()
+                    .map_or(0, DecodeSlabProducer::inflight_slabs),
+            )
     }
 
     fn read_next_slab_plan(&mut self) -> Result<Option<DecodeSlabPlan>> {
-        self.normalize_pending_bytes();
-        while self.producer.has_capacity()
-            && self.discovered_sample_number < self.spec.total_samples
-        {
-            let Some(parsed) = self.read_next_frame()? else {
-                break;
-            };
-            let frame_start = self.pending_start;
-            let frame_end = frame_start + parsed.bytes_consumed;
-            match self.producer.push_frame(parsed, frame_start)? {
-                PushFrameOutcome::Pending => {
-                    self.accept_indexed_frame(parsed, frame_end);
-                }
-                PushFrameOutcome::AcceptedAndSealed(plan) => {
-                    self.accept_indexed_frame(parsed, frame_end);
-                    return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
-                }
-                PushFrameOutcome::SealedBeforeAdd(plan) => {
-                    return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
-                }
-            }
-        }
-
-        if self.discovered_sample_number >= self.spec.total_samples || self.eof {
-            if let Some(plan) = self.producer.finish() {
-                return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
-            }
-        }
-
-        Ok(None)
+        self.slab_producer
+            .as_mut()
+            .expect("slab producer is available before the background session starts")
+            .read_next_slab_plan()
     }
 
-    fn accept_indexed_frame(&mut self, parsed: ParsedFrame, frame_end: usize) {
-        self.discovered_input_frames += 1;
-        self.discovered_sample_number += u64::from(parsed.block_size);
-        #[cfg(feature = "progress")]
-        self.record_discovered_input_bytes(parsed.bytes_consumed);
-        self.pending_start = frame_end;
+    fn seal_staged_decode_slab_plan(&mut self, plan: DecodeSlabPlan) -> DecodeSlabPlan {
+        self.slab_producer
+            .as_mut()
+            .expect("slab producer is available before the background session starts")
+            .seal_staged_decode_slab_plan(plan)
     }
 
-    fn fill_decode_window(&mut self) -> Result<bool> {
+    fn submit_local_decode_plan(&mut self, plan: DecodeSlabPlan) -> Result<()> {
+        let slab_producer = self
+            .slab_producer
+            .as_mut()
+            .expect("single-threaded decode keeps the slab producer local");
+        slab_producer.producer.record_ready_submission(&plan);
+        let slab = frame::decode_work_slab(plan.into())?;
+        self.session
+            .as_mut()
+            .expect("local streaming decode session initialized")
+            .accept_ready_slab(slab.into(), 1);
+        Ok(())
+    }
+
+    fn fill_local_decode_window(&mut self) -> Result<bool> {
         let mut staged_any = false;
         while self.active_slab_count() < self.active_decode_window_limit() {
             let Some(plan) = self.read_next_slab_plan()? else {
                 break;
             };
-            self.submit_decode_plan(plan)?;
+            self.submit_local_decode_plan(plan)?;
             staged_any = true;
         }
         Ok(staged_any)
+    }
+
+    fn pump_input_chunk(&mut self) -> Result<bool> {
+        if self.eof {
+            return Ok(false);
+        }
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(false);
+        };
+        let Some(sender) = self.input_sender.as_ref() else {
+            return Ok(false);
+        };
+
+        let mut chunk = vec![0u8; FLAC_READ_CHUNK_SIZE];
+        match reader.read(&mut chunk) {
+            Ok(0) => {
+                self.eof = true;
+                if let Some(sender) = self.input_sender.take() {
+                    sender.send(Ok(None)).map_err(|_| {
+                        Error::Thread("decode producer input channel closed unexpectedly".into())
+                    })?;
+                }
+                Ok(false)
+            }
+            Ok(read) => {
+                chunk.truncate(read);
+                sender.send(Ok(Some(chunk))).map_err(|_| {
+                    Error::Thread("decode producer input channel closed unexpectedly".into())
+                })?;
+                Ok(true)
+            }
+            Err(error) => {
+                if let Some(sender) = self.input_sender.take() {
+                    let forwarded = std::io::Error::new(error.kind(), error.to_string());
+                    let _ = sender.send(Err(forwarded));
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    fn producer_finished(&self) -> bool {
+        self.producer_progress.0.lock().unwrap().producer_finished
+    }
+
+    fn wait_for_producer_progress(&self) {
+        let (lock, condvar) = &*self.producer_progress;
+        let mut state = lock.lock().unwrap();
+        let discovered_input_frames = state.discovered_input_frames;
+        while !state.cancelled
+            && !state.producer_finished
+            && state.discovered_input_frames == discovered_input_frames
+        {
+            state = condvar.wait(state).unwrap();
+        }
     }
 
     fn collect_ready_slabs(&mut self) -> Result<()> {
         let Some(session) = self.session.as_mut() else {
             return Ok(());
         };
-        let collected = session.collect_ready_slabs()?;
+        session.collect_ready_slabs()?;
         let completed_input_frames = session.completed_input_frames();
-        self.producer.finish_inflight_slabs(collected);
         self.sync_completed_input_progress(completed_input_frames);
         Ok(())
     }
 
-    fn wait_for_ready_slab(&mut self) -> Result<()> {
+    fn wait_for_ready_slab(&mut self) -> Result<bool> {
         let Some(session) = self.session.as_mut() else {
-            return Ok(());
+            return Ok(false);
         };
-        if session.wait_for_ready_slab()? {
-            let completed_input_frames = session.completed_input_frames();
-            self.producer.finish_inflight_slabs(1);
-            self.sync_completed_input_progress(completed_input_frames);
+        if !session.wait_for_ready_slab()? {
+            return Ok(false);
         }
-        Ok(())
+        let completed_input_frames = session.completed_input_frames();
+        self.sync_completed_input_progress(completed_input_frames);
+        Ok(true)
     }
 
     fn drain_ready_output(&mut self, max_frames: usize, output: &mut Vec<i32>) -> usize {
@@ -632,11 +965,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         let (drained_frames, _) = session.drain_into(max_frames, channels, output);
         let completed_input_frames = session.completed_input_frames();
         self.drained_pcm_frames += drained_frames as u64;
-        let completed_slab_pcm_frames =
-            self.producer
-                .release_completed_slab_pcm_frames(completed_input_frames);
         self.sync_completed_input_progress(completed_input_frames);
-        profile::hand_out_pcm_frames_for_current_thread(completed_slab_pcm_frames);
         drained_frames
     }
 }
@@ -652,14 +981,63 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             self.active_decode_window_limit(),
             DECODE_SLAB_TARGET_PCM_FRAMES,
         );
-        if max_frames == 0
-            || (self.drained_pcm_frames >= self.spec.total_samples
+        if max_frames == 0 {
+            return Ok(0);
+        }
+        self.ensure_streaming_session();
+        if self.threads <= 1 {
+            if self.drained_pcm_frames >= self.spec.total_samples
                 && self
                     .session
                     .as_ref()
                     .is_some_and(session::StreamingDecodeSession::is_idle)
-                && self.producer.inflight_slabs() == 0
-                && self.eof)
+                && self
+                    .slab_producer
+                    .as_ref()
+                    .is_some_and(|producer| producer.eof)
+            {
+                return Ok(0);
+            }
+
+            let mut total_pcm_frames = 0usize;
+            while total_pcm_frames < max_frames {
+                total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
+                if total_pcm_frames == max_frames {
+                    break;
+                }
+
+                self.collect_ready_slabs()?;
+                total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
+                if total_pcm_frames == max_frames {
+                    break;
+                }
+
+                if self
+                    .slab_producer
+                    .as_ref()
+                    .is_some_and(|producer| producer.eof)
+                    && self
+                        .session
+                        .as_ref()
+                        .is_none_or(session::StreamingDecodeSession::is_idle)
+                {
+                    break;
+                }
+
+                if !self.fill_local_decode_window()? {
+                    break;
+                }
+            }
+
+            return Ok(total_pcm_frames);
+        }
+        if self.eof
+            && self.producer_finished()
+            && self.drained_pcm_frames >= self.spec.total_samples
+            && self
+                .session
+                .as_ref()
+                .is_some_and(session::StreamingDecodeSession::is_idle)
         {
             return Ok(0);
         }
@@ -676,36 +1054,28 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             if total_pcm_frames == max_frames {
                 break;
             }
-
             if self.eof
-                && self.producer.inflight_slabs() == 0
+                && self.producer_finished()
                 && self
                     .session
                     .as_ref()
-                    .is_none_or(session::StreamingDecodeSession::is_idle)
+                    .is_some_and(session::StreamingDecodeSession::is_idle)
             {
                 break;
             }
 
-            let staged_any = self.fill_decode_window()?;
-            self.collect_ready_slabs()?;
-            total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
-            if total_pcm_frames == max_frames {
-                break;
-            }
-
-            if self.producer.inflight_slabs() > 0
-                && self.session.as_ref().is_none_or(|session| {
-                    session.ready_slab_count() == 0 && !session.has_draining_slab()
-                })
-                && total_pcm_frames < max_frames
-            {
-                self.wait_for_ready_slab()?;
-                continue;
-            }
-
-            if !staged_any {
-                break;
+            if self.session.as_ref().is_none_or(|session| {
+                session.ready_slab_count() == 0 && !session.has_draining_slab()
+            }) {
+                if self.pump_input_chunk()? {
+                    continue;
+                }
+                if !self.wait_for_ready_slab()? {
+                    if self.eof && self.producer_finished() {
+                        break;
+                    }
+                    self.wait_for_producer_progress();
+                }
             }
         }
 
@@ -783,8 +1153,8 @@ pub fn read_flac_reader_with_options<R: Read + Seek>(
 mod frame;
 mod index;
 mod metadata;
-mod profile;
 mod producer;
+mod profile;
 mod session;
 mod slab;
 
@@ -794,6 +1164,10 @@ pub(crate) fn set_decode_profile_path_for_current_thread(path: Option<std::path:
 
 pub(crate) fn clear_decode_profile_session_for_current_thread() {
     profile::clear_decode_profile_session_for_current_thread();
+}
+
+pub(crate) fn hand_out_decode_output_pcm_frames_for_current_thread(pcm_frames: usize) {
+    profile::hand_out_pcm_frames_for_current_thread(pcm_frames);
 }
 
 pub(crate) fn release_ordered_decode_output_for_current_thread() {
@@ -1009,7 +1383,7 @@ mod tests {
             .stream_info(stream_info)
             .build()
             .unwrap();
-        stream.producer = ProducerState::new(
+        stream.slab_producer.as_mut().unwrap().producer = ProducerState::new(
             stream_info,
             ProducerConfig {
                 target_pcm_frames_per_slab: super::DECODE_SLAB_TARGET_PCM_FRAMES,
@@ -1018,9 +1392,24 @@ mod tests {
                 max_slabs_ahead: 1,
             },
         );
-        stream.producer.record_inflight_submission_parts(0, 0);
-        stream.producer.record_inflight_submission_parts(0, 0);
-        stream.producer.record_inflight_submission_parts(0, 0);
+        stream
+            .slab_producer
+            .as_mut()
+            .unwrap()
+            .producer
+            .record_inflight_submission_parts(0, 0);
+        stream
+            .slab_producer
+            .as_mut()
+            .unwrap()
+            .producer
+            .record_inflight_submission_parts(0, 0);
+        stream
+            .slab_producer
+            .as_mut()
+            .unwrap()
+            .producer
+            .record_inflight_submission_parts(0, 0);
         stream.session = Some(super::session::StreamingDecodeSession::new_local());
 
         assert_eq!(stream.active_slab_count(), 3);
@@ -1055,8 +1444,9 @@ mod tests {
             bits_per_sample: 16,
             assignment: crate::model::ChannelAssignment::Independent(0),
         }];
-        stream.pending_bytes = vec![1, 2, 3, 4, 5];
-        stream.pending_start = 3;
+        let producer = stream.slab_producer.as_mut().unwrap();
+        producer.pending_bytes = vec![1, 2, 3, 4, 5];
+        producer.pending_start = 3;
 
         let plan = stream.seal_staged_decode_slab_plan(super::slab::DecodeSlabPlan::new(
             3,
@@ -1069,8 +1459,9 @@ mod tests {
         assert_eq!(plan.frame_block_sizes, vec![2]);
         assert_eq!(plan.bytes.as_ref(), &[1, 2, 3]);
         assert_eq!(plan.frames.as_ref(), frames.as_slice());
-        assert_eq!(stream.pending_bytes, vec![4, 5]);
-        assert_eq!(stream.pending_start, 0);
+        let producer = stream.slab_producer.as_ref().unwrap();
+        assert_eq!(producer.pending_bytes, vec![4, 5]);
+        assert_eq!(producer.pending_start, 0);
     }
 
     fn wav_bytes_from_i16_samples(samples: &[i16]) -> Vec<u8> {
@@ -1112,7 +1503,7 @@ mod tests {
         let mut stream = super::read_flac_reader(Cursor::new(flac))
             .expect("parse encoded flac")
             .into_pcm_stream();
-        stream.producer = ProducerState::new(
+        stream.slab_producer.as_mut().unwrap().producer = ProducerState::new(
             stream.stream_info,
             ProducerConfig {
                 target_pcm_frames_per_slab: 24,

@@ -63,6 +63,7 @@ where
         if frames == 0 {
             break;
         }
+        crate::read::hand_out_decode_output_pcm_frames_for_current_thread(frames);
         writer.write_samples_and_update_md5(&chunk, &mut streaminfo_md5)?;
         crate::read::release_ordered_decode_output_for_current_thread();
         #[cfg(feature = "progress")]
