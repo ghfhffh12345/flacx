@@ -25,6 +25,7 @@ pub(crate) struct DecodeProfileSummary {
     pub(crate) target_pcm_frames: usize,
     pub(crate) peak_active_window_slabs: usize,
     pub(crate) peak_resident_pcm_frames: usize,
+    pub(crate) peak_staged_input_bytes: usize,
 }
 
 impl DecodeProfileSummary {
@@ -113,6 +114,17 @@ pub(crate) fn accept_ready_pcm_frames_for_current_thread(
     });
 }
 
+pub(crate) fn observe_staged_input_bytes_for_current_thread(staged_input_bytes: usize) {
+    CURRENT_PROFILE_SESSION.with(|session| {
+        if let Some(session) = session.borrow_mut().as_mut() {
+            session.summary.peak_staged_input_bytes = session
+                .summary
+                .peak_staged_input_bytes
+                .max(staged_input_bytes);
+        }
+    });
+}
+
 pub(crate) fn hand_out_pcm_frames_for_current_thread(pcm_frames: usize) {
     CURRENT_PROFILE_SESSION.with(|session| {
         if let Some(session) = session.borrow_mut().as_mut() {
@@ -154,13 +166,14 @@ pub(crate) fn append_decode_session_summary(
     };
     let _ = writeln!(
         file,
-        "event=decode_session_summary\tworker_count={}\tqueue_limit={}\tpeak_active_window_slabs={}\tpeak_inflight_packets={}\tpeak_resident_pcm_frames={}\tpeak_inflight_pcm_frames={}\ttarget_pcm_frames={}",
+        "event=decode_session_summary\tworker_count={}\tqueue_limit={}\tpeak_active_window_slabs={}\tpeak_inflight_packets={}\tpeak_resident_pcm_frames={}\tpeak_inflight_pcm_frames={}\tpeak_staged_input_bytes={}\ttarget_pcm_frames={}",
         profile.worker_count,
         profile.queue_limit,
         profile.peak_active_window_slabs,
         profile.peak_active_window_slabs,
         profile.peak_resident_pcm_frames,
         profile.peak_resident_pcm_frames,
+        profile.peak_staged_input_bytes,
         profile.target_pcm_frames,
     );
 }

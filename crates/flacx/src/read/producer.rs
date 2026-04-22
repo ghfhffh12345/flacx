@@ -3,9 +3,9 @@ use std::collections::VecDeque;
 use crate::{error::Result, stream_info::StreamInfo};
 
 use super::{
-    ParsedFrame,
     index::{PushFrameOutcome, RollingIndexConfig, RollingIndexWindow},
     slab::DecodeSlabPlan,
+    ParsedFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub(super) struct ProducerConfig {
 struct SubmittedDecodeSlab {
     end_frame_index: usize,
     pcm_frames: usize,
+    input_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -27,6 +28,7 @@ pub(super) struct ProducerState {
     index_window: RollingIndexWindow,
     inflight_slabs: usize,
     submitted_slabs: VecDeque<SubmittedDecodeSlab>,
+    staged_input_bytes: usize,
 }
 
 impl ProducerState {
@@ -43,6 +45,7 @@ impl ProducerState {
             ),
             inflight_slabs: 0,
             submitted_slabs: VecDeque::new(),
+            staged_input_bytes: 0,
         }
     }
 
@@ -75,15 +78,23 @@ impl ProducerState {
         self.inflight_slabs
     }
 
+    pub(super) fn staged_input_bytes(&self) -> usize {
+        self.staged_input_bytes
+    }
+
     pub(super) fn record_ready_submission(&mut self, plan: &DecodeSlabPlan) {
-        let (end_frame_index, pcm_frames) = Self::submitted_slab(plan);
-        self.record_submitted_slab(end_frame_index, pcm_frames);
+        let (end_frame_index, pcm_frames, input_bytes) = Self::submitted_slab_residency(plan);
+        self.record_submitted_slab(end_frame_index, pcm_frames, input_bytes);
     }
 
     #[cfg(test)]
     pub(super) fn record_inflight_submission(&mut self, plan: &DecodeSlabPlan) -> usize {
-        let (end_frame_index, pcm_frames) = Self::submitted_slab(plan);
-        self.record_inflight_submission_parts(end_frame_index, pcm_frames)
+        let (end_frame_index, pcm_frames, input_bytes) = Self::submitted_slab_residency(plan);
+        self.record_inflight_submission_parts_with_input_bytes(
+            end_frame_index,
+            pcm_frames,
+            input_bytes,
+        )
     }
 
     pub(super) fn record_inflight_submission_parts(
@@ -91,7 +102,16 @@ impl ProducerState {
         end_frame_index: usize,
         pcm_frames: usize,
     ) -> usize {
-        self.record_submitted_slab(end_frame_index, pcm_frames);
+        self.record_inflight_submission_parts_with_input_bytes(end_frame_index, pcm_frames, 0)
+    }
+
+    pub(super) fn record_inflight_submission_parts_with_input_bytes(
+        &mut self,
+        end_frame_index: usize,
+        pcm_frames: usize,
+        input_bytes: usize,
+    ) -> usize {
+        self.record_submitted_slab(end_frame_index, pcm_frames, input_bytes);
         self.inflight_slabs += 1;
         self.inflight_slabs
     }
@@ -115,25 +135,39 @@ impl ProducerState {
                 .pop_front()
                 .expect("front slab exists while releasing completed slabs");
             released_pcm_frames = released_pcm_frames.saturating_add(slab.pcm_frames);
+            self.staged_input_bytes = self.staged_input_bytes.saturating_sub(slab.input_bytes);
         }
         released_pcm_frames
     }
 
     pub(super) fn submitted_slab(plan: &DecodeSlabPlan) -> (usize, usize) {
+        let (end_frame_index, pcm_frames, _) = Self::submitted_slab_residency(plan);
+        (end_frame_index, pcm_frames)
+    }
+
+    pub(super) fn submitted_slab_residency(plan: &DecodeSlabPlan) -> (usize, usize, usize) {
         (
             plan.start_frame_index + plan.frame_block_sizes.len(),
             plan.frame_block_sizes
                 .iter()
                 .map(|&block_size| usize::from(block_size))
                 .sum(),
+            plan.bytes.len(),
         )
     }
 
-    fn record_submitted_slab(&mut self, end_frame_index: usize, pcm_frames: usize) {
+    fn record_submitted_slab(
+        &mut self,
+        end_frame_index: usize,
+        pcm_frames: usize,
+        input_bytes: usize,
+    ) {
         self.submitted_slabs.push_back(SubmittedDecodeSlab {
             end_frame_index,
             pcm_frames,
+            input_bytes,
         });
+        self.staged_input_bytes = self.staged_input_bytes.saturating_add(input_bytes);
     }
 
     #[cfg(test)]
@@ -142,7 +176,8 @@ impl ProducerState {
         block_size: u16,
         bytes_consumed: usize,
     ) -> Result<Vec<DecodeSlabPlan>> {
-        self.index_window.push_mock_frame(block_size, bytes_consumed)
+        self.index_window
+            .push_mock_frame(block_size, bytes_consumed)
     }
 }
 
@@ -215,17 +250,32 @@ mod tests {
     fn producer_state_tracks_submitted_slabs_and_releases_pcm_frames_in_order() {
         let mut state = ProducerState::new(stream_info(), single_frame_config(4));
 
-        let first = state.push_mock_frame(16, 32).unwrap().into_iter().next().unwrap();
-        let second = state.push_mock_frame(16, 32).unwrap().into_iter().next().unwrap();
+        let first = state
+            .push_mock_frame(16, 32)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .seal_bytes(vec![0; 32]);
+        let second = state
+            .push_mock_frame(16, 32)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .seal_bytes(vec![0; 32]);
 
         assert_eq!(state.record_inflight_submission(&first), 1);
         assert_eq!(state.record_inflight_submission(&second), 2);
         assert_eq!(state.inflight_slabs(), 2);
+        assert_eq!(state.staged_input_bytes(), 64);
 
         state.finish_inflight_slabs(1);
         assert_eq!(state.inflight_slabs(), 1);
         assert_eq!(state.release_completed_slab_pcm_frames(1), 16);
+        assert_eq!(state.staged_input_bytes(), 32);
         assert_eq!(state.release_completed_slab_pcm_frames(2), 16);
+        assert_eq!(state.staged_input_bytes(), 0);
         assert_eq!(state.release_completed_slab_pcm_frames(2), 0);
     }
 }

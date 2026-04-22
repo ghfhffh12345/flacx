@@ -1,11 +1,15 @@
 use std::{
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        mpsc::{self, Receiver, SyncSender},
+        Arc, Condvar, Mutex,
+    },
     thread,
 };
 
 use super::{
-    DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER, Error, Result, frame, profile,
+    frame, profile,
     slab::{DecodeSlabPlan, DecodedSlab, OrderedSlabDrain},
+    Error, Result, DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -27,38 +31,65 @@ impl DecodeSessionResult {
     }
 }
 
+#[derive(Debug, Default)]
+struct ProducerWakeState {
+    notified: bool,
+    cancelled: bool,
+}
+
 #[derive(Debug)]
 pub(super) struct StreamingDecodeSession {
     job_sender: Option<SyncSender<frame::DecodeWorkSlab>>,
     result_receiver: Receiver<Result<DecodeSessionResult>>,
     ordered_drain: OrderedSlabDrain,
     coordinator_handle: Option<thread::JoinHandle<()>>,
+    producer_handle: Option<thread::JoinHandle<()>>,
+    producer_wakeup: Arc<(Mutex<ProducerWakeState>, Condvar)>,
+    producer_finished: bool,
     coordinator_finished: bool,
+    window_depth_limit: usize,
 }
 
 impl StreamingDecodeSession {
     pub(super) fn new_local() -> Self {
         let (_sender, result_receiver) = mpsc::sync_channel(1);
-        Self::from_result_receiver(result_receiver)
+        Self::from_result_receiver_with_window_depth(result_receiver, 1)
     }
 
     pub(super) fn from_result_receiver(
         result_receiver: Receiver<Result<DecodeSessionResult>>,
+    ) -> Self {
+        Self::from_result_receiver_with_window_depth(result_receiver, 1)
+    }
+
+    fn from_result_receiver_with_window_depth(
+        result_receiver: Receiver<Result<DecodeSessionResult>>,
+        window_depth_limit: usize,
     ) -> Self {
         Self {
             job_sender: None,
             result_receiver,
             ordered_drain: OrderedSlabDrain::new(),
             coordinator_handle: None,
+            producer_handle: None,
+            producer_wakeup: Arc::new((Mutex::new(ProducerWakeState::default()), Condvar::new())),
+            producer_finished: true,
             coordinator_finished: false,
+            window_depth_limit: window_depth_limit.max(1),
         }
     }
 
     pub(super) fn spawn(worker_count: usize, queue_depth: usize) -> Self {
-        let (job_sender, job_receiver) = mpsc::sync_channel(queue_depth.max(1));
-        let (result_sender, result_receiver) = mpsc::sync_channel(queue_depth.max(1));
+        let window_depth_limit = queue_depth.max(1);
+        let (job_sender, job_receiver) = mpsc::sync_channel(window_depth_limit);
+        let (result_sender, result_receiver) = mpsc::sync_channel(window_depth_limit);
+        let coordinator_result_sender = result_sender.clone();
         let coordinator_handle = thread::spawn(move || {
-            let _ = run_decode_coordinator(job_receiver, result_sender, worker_count, queue_depth);
+            if let Err(error) =
+                run_decode_coordinator(job_receiver, result_sender, worker_count, queue_depth)
+            {
+                let _ = coordinator_result_sender.send(Err(error));
+            }
         });
 
         Self {
@@ -66,7 +97,11 @@ impl StreamingDecodeSession {
             result_receiver,
             ordered_drain: OrderedSlabDrain::new(),
             coordinator_handle: Some(coordinator_handle),
+            producer_handle: None,
+            producer_wakeup: Arc::new((Mutex::new(ProducerWakeState::default()), Condvar::new())),
+            producer_finished: true,
             coordinator_finished: false,
+            window_depth_limit,
         }
     }
 
@@ -122,7 +157,12 @@ impl StreamingDecodeSession {
         channels: usize,
         output: &mut Vec<i32>,
     ) -> (usize, usize) {
-        self.ordered_drain.drain_into(max_frames, channels, output)
+        let active_before = self.active_slab_count();
+        let drained = self.ordered_drain.drain_into(max_frames, channels, output);
+        if self.active_slab_count() < active_before {
+            self.notify_producer();
+        }
+        drained
     }
 
     pub(super) fn completed_input_frames(&self) -> usize {
@@ -162,7 +202,11 @@ impl StreamingDecodeSession {
     }
 
     pub(super) fn is_idle(&self) -> bool {
-        self.coordinator_finished && self.ordered_drain.is_idle()
+        self.producer_finished && self.coordinator_finished && self.ordered_drain.is_idle()
+    }
+
+    pub(super) fn producer_has_capacity(&self) -> bool {
+        self.active_slab_count() < self.window_depth_limit()
     }
 
     #[allow(dead_code)]
@@ -175,7 +219,10 @@ impl StreamingDecodeSession {
         packet: frame::DecodedWorkPacket,
         producer_window_slabs: usize,
     ) {
-        self.accept_result(DecodeSessionResult::from_packet(packet, producer_window_slabs));
+        self.accept_result(DecodeSessionResult::from_packet(
+            packet,
+            producer_window_slabs,
+        ));
     }
 
     fn accept_result(&mut self, result: DecodeSessionResult) {
@@ -186,12 +233,36 @@ impl StreamingDecodeSession {
             self.active_slab_count().max(result.producer_window_slabs),
         );
     }
+
+    fn window_depth_limit(&self) -> usize {
+        self.window_depth_limit
+    }
+
+    fn notify_producer(&self) {
+        let (lock, condvar) = &*self.producer_wakeup;
+        let mut state = lock.lock().unwrap();
+        state.notified = true;
+        condvar.notify_one();
+    }
+
+    fn cancel_producer(&self) {
+        let (lock, condvar) = &*self.producer_wakeup;
+        let mut state = lock.lock().unwrap();
+        state.cancelled = true;
+        state.notified = true;
+        condvar.notify_all();
+    }
 }
 
 impl Drop for StreamingDecodeSession {
     fn drop(&mut self) {
+        self.cancel_producer();
         self.job_sender.take();
+        self.producer_finished = true;
         self.coordinator_finished = true;
+        if let Some(handle) = self.producer_handle.take() {
+            let _ = handle.join();
+        }
         if let Some(handle) = self.coordinator_handle.take() {
             let _ = handle.join();
         }
@@ -268,11 +339,7 @@ fn run_decode_coordinator(
 
             if producer_window_slabs > 0 {
                 producer_window_slabs = producer_window_slabs.saturating_sub(1);
-                if !send_ready_slab(
-                    &result_sender,
-                    pool.recv()?.into(),
-                    producer_window_slabs,
-                )? {
+                if !send_ready_slab(&result_sender, pool.recv()?.into(), producer_window_slabs)? {
                     return Ok(());
                 }
                 continue;
@@ -316,10 +383,16 @@ fn send_ready_slab(
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::{Arc, mpsc}, time::Duration};
+    use std::{
+        sync::{mpsc, Arc},
+        time::Duration,
+    };
 
     use super::{DecodeSessionResult, StreamingDecodeSession};
-    use crate::read::{FrameIndex, slab::{DecodeSlabPlan, DecodedSlab}};
+    use crate::read::{
+        slab::{DecodeSlabPlan, DecodedSlab},
+        FrameIndex,
+    };
 
     fn slab(start_frame_index: usize, block_sizes: &[u16], samples: &[i32]) -> DecodedSlab {
         DecodedSlab {
@@ -390,6 +463,53 @@ mod tests {
         assert_eq!(session.active_slab_count(), 2);
         assert_eq!(session.drain_into(8, 1, &mut output), (6, 3));
         assert_eq!(output, vec![10, 11, 20, 21, 30, 31]);
+    }
+
+    #[test]
+    fn producer_window_reopens_when_ordered_completion_retires_a_slab() {
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let mut session = StreamingDecodeSession::from_result_receiver(receiver);
+
+        sender
+            .send(Ok(DecodeSessionResult {
+                slab: slab(0, &[2], &[10, 11]),
+                producer_window_slabs: 1,
+            }))
+            .unwrap();
+
+        assert_eq!(session.collect_ready_slabs().unwrap(), 1);
+        assert!(!session.producer_has_capacity());
+        assert_eq!(session.completed_input_frames(), 0);
+
+        let mut output = Vec::new();
+        assert_eq!(session.drain_into(8, 1, &mut output), (2, 1));
+        assert_eq!(output, vec![10, 11]);
+        assert_eq!(session.completed_input_frames(), 1);
+        assert!(session.producer_has_capacity());
+    }
+
+    #[test]
+    fn dropping_session_cancels_waiting_background_producer() {
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let finished_sender = mpsc::channel();
+        let mut session = StreamingDecodeSession::from_result_receiver(receiver);
+        let wakeup = Arc::clone(&session.producer_wakeup);
+        session.producer_finished = false;
+        session.producer_handle = Some(std::thread::spawn(move || {
+            let (lock, condvar) = &*wakeup;
+            let mut state = lock.lock().unwrap();
+            while !state.cancelled {
+                state = condvar.wait(state).unwrap();
+            }
+            finished_sender.0.send(()).unwrap();
+        }));
+
+        drop(session);
+
+        finished_sender
+            .1
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drop should wake and cancel the producer thread");
     }
 
     #[test]
