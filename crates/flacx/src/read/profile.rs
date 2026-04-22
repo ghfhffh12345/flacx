@@ -4,11 +4,12 @@ use std::{
     fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 std::thread_local! {
     static TEST_PROFILE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-    static CURRENT_PROFILE_SESSION: RefCell<Option<DecodeProfileSession>> = const { RefCell::new(None) };
+    static CURRENT_PROFILE_SESSION: RefCell<Option<DecodeProfileSessionHandle>> = const { RefCell::new(None) };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +18,9 @@ struct DecodeProfileSession {
     resident_pcm_frames: usize,
     handed_out_pcm_frames: usize,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct DecodeProfileSessionHandle(Arc<Mutex<DecodeProfileSession>>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct DecodeProfileSummary {
@@ -72,11 +76,17 @@ pub(crate) fn begin_decode_profile_session_for_current_thread(
     CURRENT_PROFILE_SESSION.with(|session| {
         let mut session = session.borrow_mut();
         if session.is_none() {
-            *session = Some(DecodeProfileSession {
-                summary: DecodeProfileSummary::new(worker_count, queue_limit, target_pcm_frames),
-                resident_pcm_frames: 0,
-                handed_out_pcm_frames: 0,
-            });
+            *session = Some(DecodeProfileSessionHandle(Arc::new(Mutex::new(
+                DecodeProfileSession {
+                    summary: DecodeProfileSummary::new(
+                        worker_count,
+                        queue_limit,
+                        target_pcm_frames,
+                    ),
+                    resident_pcm_frames: 0,
+                    handed_out_pcm_frames: 0,
+                },
+            ))));
         }
     });
 }
@@ -87,9 +97,23 @@ pub(crate) fn clear_decode_profile_session_for_current_thread() {
     });
 }
 
+pub(crate) fn clone_decode_profile_session_for_current_thread() -> Option<DecodeProfileSessionHandle>
+{
+    CURRENT_PROFILE_SESSION.with(|session| session.borrow().clone())
+}
+
+pub(crate) fn attach_decode_profile_session_to_current_thread(
+    session_handle: Option<DecodeProfileSessionHandle>,
+) {
+    CURRENT_PROFILE_SESSION.with(|session| {
+        *session.borrow_mut() = session_handle;
+    });
+}
+
 pub(crate) fn observe_inflight_packets_for_current_thread(inflight_packets: usize) {
     CURRENT_PROFILE_SESSION.with(|session| {
-        if let Some(session) = session.borrow_mut().as_mut() {
+        if let Some(session) = session.borrow().as_ref() {
+            let mut session = session.0.lock().unwrap();
             session
                 .summary
                 .observe_active_window_slabs(inflight_packets);
@@ -102,21 +126,24 @@ pub(crate) fn accept_ready_pcm_frames_for_current_thread(
     inflight_packets: usize,
 ) {
     CURRENT_PROFILE_SESSION.with(|session| {
-        if let Some(session) = session.borrow_mut().as_mut() {
+        if let Some(session) = session.borrow().as_ref() {
+            let mut session = session.0.lock().unwrap();
             session
                 .summary
                 .observe_active_window_slabs(inflight_packets);
             session.resident_pcm_frames = session.resident_pcm_frames.saturating_add(pcm_frames);
+            let resident_pcm_frames = session.resident_pcm_frames;
             session
                 .summary
-                .observe_resident_pcm_frames(session.resident_pcm_frames);
+                .observe_resident_pcm_frames(resident_pcm_frames);
         }
     });
 }
 
 pub(crate) fn observe_staged_input_bytes_for_current_thread(staged_input_bytes: usize) {
     CURRENT_PROFILE_SESSION.with(|session| {
-        if let Some(session) = session.borrow_mut().as_mut() {
+        if let Some(session) = session.borrow().as_ref() {
+            let mut session = session.0.lock().unwrap();
             session.summary.peak_staged_input_bytes = session
                 .summary
                 .peak_staged_input_bytes
@@ -127,7 +154,8 @@ pub(crate) fn observe_staged_input_bytes_for_current_thread(staged_input_bytes: 
 
 pub(crate) fn hand_out_pcm_frames_for_current_thread(pcm_frames: usize) {
     CURRENT_PROFILE_SESSION.with(|session| {
-        if let Some(session) = session.borrow_mut().as_mut() {
+        if let Some(session) = session.borrow().as_ref() {
+            let mut session = session.0.lock().unwrap();
             session.handed_out_pcm_frames =
                 session.handed_out_pcm_frames.saturating_add(pcm_frames);
         }
@@ -136,7 +164,8 @@ pub(crate) fn hand_out_pcm_frames_for_current_thread(pcm_frames: usize) {
 
 pub(crate) fn release_decode_output_buffer_for_current_thread() {
     CURRENT_PROFILE_SESSION.with(|session| {
-        if let Some(session) = session.borrow_mut().as_mut() {
+        if let Some(session) = session.borrow().as_ref() {
+            let mut session = session.0.lock().unwrap();
             session.resident_pcm_frames = session
                 .resident_pcm_frames
                 .saturating_sub(session.handed_out_pcm_frames);
@@ -151,6 +180,7 @@ pub(crate) fn finish_successful_decode_profile_for_current_thread() {
     let Some(session) = session else {
         return;
     };
+    let session = *session.0.lock().unwrap();
     if session.resident_pcm_frames != 0 || session.handed_out_pcm_frames != 0 {
         return;
     }

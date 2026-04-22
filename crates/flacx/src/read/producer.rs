@@ -4,6 +4,7 @@ use crate::{error::Result, stream_info::StreamInfo};
 
 use super::{
     index::{PushFrameOutcome, RollingIndexConfig, RollingIndexWindow},
+    profile,
     slab::DecodeSlabPlan,
     ParsedFrame,
 };
@@ -137,6 +138,7 @@ impl ProducerState {
             released_pcm_frames = released_pcm_frames.saturating_add(slab.pcm_frames);
             self.staged_input_bytes = self.staged_input_bytes.saturating_sub(slab.input_bytes);
         }
+        profile::observe_staged_input_bytes_for_current_thread(self.staged_input_bytes);
         released_pcm_frames
     }
 
@@ -168,6 +170,7 @@ impl ProducerState {
             input_bytes,
         });
         self.staged_input_bytes = self.staged_input_bytes.saturating_add(input_bytes);
+        profile::observe_staged_input_bytes_for_current_thread(self.staged_input_bytes);
     }
 
     #[cfg(test)]

@@ -7,7 +7,9 @@ use std::{
 };
 
 use super::{
-    frame, profile,
+    frame,
+    producer::ProducerState,
+    profile,
     slab::{DecodeSlabPlan, DecodedSlab, OrderedSlabDrain},
     Error, Result, DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER,
 };
@@ -33,8 +35,50 @@ impl DecodeSessionResult {
 
 #[derive(Debug, Default)]
 struct ProducerWakeState {
-    notified: bool,
+    active_window_slabs: usize,
     cancelled: bool,
+}
+
+pub(super) struct SessionProducer {
+    job_sender: SyncSender<frame::DecodeWorkSlab>,
+    producer_wakeup: Arc<(Mutex<ProducerWakeState>, Condvar)>,
+    window_depth_limit: usize,
+}
+
+impl SessionProducer {
+    pub(super) fn submit(&self, plan: DecodeSlabPlan) -> Result<bool> {
+        let (lock, condvar) = &*self.producer_wakeup;
+        let mut state = lock.lock().unwrap();
+        while state.active_window_slabs >= self.window_depth_limit && !state.cancelled {
+            state = condvar.wait(state).unwrap();
+        }
+        if state.cancelled {
+            return Ok(false);
+        }
+        state.active_window_slabs += 1;
+        drop(state);
+
+        match self.job_sender.send(plan.into()) {
+            Ok(()) => Ok(true),
+            Err(_) => {
+                let mut state = lock.lock().unwrap();
+                state.active_window_slabs = state.active_window_slabs.saturating_sub(1);
+                condvar.notify_one();
+                Err(Error::Thread(
+                    "decode session job channel closed unexpectedly".into(),
+                ))
+            }
+        }
+    }
+
+    pub(super) fn submit_tracked(
+        &self,
+        producer_state: &mut ProducerState,
+        plan: DecodeSlabPlan,
+    ) -> Result<bool> {
+        producer_state.record_ready_submission(&plan);
+        self.submit(plan)
+    }
 }
 
 #[derive(Debug)]
@@ -79,30 +123,81 @@ impl StreamingDecodeSession {
         }
     }
 
-    pub(super) fn spawn(worker_count: usize, queue_depth: usize) -> Self {
+    fn spawn_runtime(
+        worker_count: usize,
+        queue_depth: usize,
+    ) -> (Self, SyncSender<Result<DecodeSessionResult>>) {
         let window_depth_limit = queue_depth.max(1);
         let (job_sender, job_receiver) = mpsc::sync_channel(window_depth_limit);
         let (result_sender, result_receiver) = mpsc::sync_channel(window_depth_limit);
+        let coordinator_sender = result_sender.clone();
         let coordinator_result_sender = result_sender.clone();
         let coordinator_handle = thread::spawn(move || {
             if let Err(error) =
-                run_decode_coordinator(job_receiver, result_sender, worker_count, queue_depth)
+                run_decode_coordinator(job_receiver, coordinator_sender, worker_count, queue_depth)
             {
                 let _ = coordinator_result_sender.send(Err(error));
             }
         });
 
-        Self {
-            job_sender: Some(job_sender),
-            result_receiver,
-            ordered_drain: OrderedSlabDrain::new(),
-            coordinator_handle: Some(coordinator_handle),
-            producer_handle: None,
-            producer_wakeup: Arc::new((Mutex::new(ProducerWakeState::default()), Condvar::new())),
-            producer_finished: true,
-            coordinator_finished: false,
-            window_depth_limit,
-        }
+        (
+            Self {
+                job_sender: Some(job_sender),
+                result_receiver,
+                ordered_drain: OrderedSlabDrain::new(),
+                coordinator_handle: Some(coordinator_handle),
+                producer_handle: None,
+                producer_wakeup: Arc::new((
+                    Mutex::new(ProducerWakeState::default()),
+                    Condvar::new(),
+                )),
+                producer_finished: true,
+                coordinator_finished: false,
+                window_depth_limit,
+            },
+            result_sender,
+        )
+    }
+
+    pub(super) fn spawn(worker_count: usize, queue_depth: usize) -> Self {
+        Self::spawn_runtime(worker_count, queue_depth).0
+    }
+
+    pub(super) fn spawn_with_producer<P>(
+        worker_count: usize,
+        queue_depth: usize,
+        run_producer: P,
+    ) -> Self
+    where
+        P: FnOnce(SessionProducer) -> Result<()> + Send + 'static,
+    {
+        let window_depth_limit = queue_depth.max(1);
+        let (mut session, result_sender) = Self::spawn_runtime(worker_count, queue_depth);
+        let job_sender = session
+            .job_sender
+            .as_ref()
+            .expect("spawned session owns a job sender")
+            .clone();
+        let producer_wakeup = Arc::clone(&session.producer_wakeup);
+        let profile_session = profile::clone_decode_profile_session_for_current_thread();
+        session.producer_finished = false;
+        session.producer_handle = Some(thread::spawn(move || {
+            profile::attach_decode_profile_session_to_current_thread(profile_session);
+            let result = run_producer(SessionProducer {
+                job_sender,
+                producer_wakeup: Arc::clone(&producer_wakeup),
+                window_depth_limit,
+            });
+            let (lock, _) = &*producer_wakeup;
+            let cancelled = lock.lock().unwrap().cancelled;
+            if let Err(error) = result {
+                if !cancelled {
+                    let _ = result_sender.send(Err(error));
+                }
+            }
+            profile::attach_decode_profile_session_to_current_thread(None);
+        }));
+        session
     }
 
     pub(super) fn submit(&self, plan: DecodeSlabPlan) -> Result<()> {
@@ -114,6 +209,7 @@ impl StreamingDecodeSession {
     }
 
     pub(super) fn collect_ready_slabs(&mut self) -> Result<usize> {
+        self.refresh_producer_finished();
         let mut collected = 0usize;
         loop {
             match self.result_receiver.try_recv() {
@@ -135,6 +231,7 @@ impl StreamingDecodeSession {
     }
 
     pub(super) fn wait_for_ready_slab(&mut self) -> Result<bool> {
+        self.refresh_producer_finished();
         match self.result_receiver.recv() {
             Ok(result) => {
                 self.accept_result(result?);
@@ -157,10 +254,12 @@ impl StreamingDecodeSession {
         channels: usize,
         output: &mut Vec<i32>,
     ) -> (usize, usize) {
+        self.refresh_producer_finished();
         let active_before = self.active_slab_count();
         let drained = self.ordered_drain.drain_into(max_frames, channels, output);
-        if self.active_slab_count() < active_before {
-            self.notify_producer();
+        let active_after = self.active_slab_count();
+        if active_after < active_before {
+            self.release_producer_capacity(active_before - active_after);
         }
         drained
     }
@@ -202,7 +301,13 @@ impl StreamingDecodeSession {
     }
 
     pub(super) fn is_idle(&self) -> bool {
-        self.producer_finished && self.coordinator_finished && self.ordered_drain.is_idle()
+        (self.producer_finished
+            || self
+                .producer_handle
+                .as_ref()
+                .is_none_or(thread::JoinHandle::is_finished))
+            && self.coordinator_finished
+            && self.ordered_drain.is_idle()
     }
 
     pub(super) fn producer_has_capacity(&self) -> bool {
@@ -238,19 +343,29 @@ impl StreamingDecodeSession {
         self.window_depth_limit
     }
 
-    fn notify_producer(&self) {
+    fn release_producer_capacity(&self, completed_slabs: usize) {
         let (lock, condvar) = &*self.producer_wakeup;
         let mut state = lock.lock().unwrap();
-        state.notified = true;
-        condvar.notify_one();
+        state.active_window_slabs = state.active_window_slabs.saturating_sub(completed_slabs);
+        condvar.notify_all();
     }
 
     fn cancel_producer(&self) {
         let (lock, condvar) = &*self.producer_wakeup;
         let mut state = lock.lock().unwrap();
         state.cancelled = true;
-        state.notified = true;
         condvar.notify_all();
+    }
+
+    fn refresh_producer_finished(&mut self) {
+        if !self.producer_finished
+            && self
+                .producer_handle
+                .as_ref()
+                .is_some_and(thread::JoinHandle::is_finished)
+        {
+            self.producer_finished = true;
+        }
     }
 }
 
@@ -390,8 +505,10 @@ mod tests {
 
     use super::{DecodeSessionResult, StreamingDecodeSession};
     use crate::read::{
+        producer::{ProducerConfig, ProducerState},
+        profile,
         slab::{DecodeSlabPlan, DecodedSlab},
-        FrameIndex,
+        FrameIndex, StreamInfo,
     };
 
     fn slab(start_frame_index: usize, block_sizes: &[u16], samples: &[i32]) -> DecodedSlab {
@@ -399,6 +516,29 @@ mod tests {
             start_frame_index,
             frame_block_sizes: block_sizes.to_vec(),
             decoded_samples: samples.to_vec(),
+        }
+    }
+
+    fn stream_info() -> StreamInfo {
+        StreamInfo {
+            min_block_size: 16,
+            max_block_size: 16,
+            min_frame_size: 32,
+            max_frame_size: 32,
+            sample_rate: 44_100,
+            channels: 1,
+            bits_per_sample: 16,
+            total_samples: 16 * 12,
+            md5: [0; 16],
+        }
+    }
+
+    fn producer_config(max_slabs_ahead: usize) -> ProducerConfig {
+        ProducerConfig {
+            target_pcm_frames_per_slab: 16,
+            max_frames_per_slab: 1,
+            max_bytes_per_slab: 256,
+            max_slabs_ahead,
         }
     }
 
@@ -490,26 +630,55 @@ mod tests {
 
     #[test]
     fn dropping_session_cancels_waiting_background_producer() {
-        let (_sender, receiver) = mpsc::sync_channel(1);
         let finished_sender = mpsc::channel();
-        let mut session = StreamingDecodeSession::from_result_receiver(receiver);
-        let wakeup = Arc::clone(&session.producer_wakeup);
-        session.producer_finished = false;
-        session.producer_handle = Some(std::thread::spawn(move || {
-            let (lock, condvar) = &*wakeup;
-            let mut state = lock.lock().unwrap();
-            while !state.cancelled {
-                state = condvar.wait(state).unwrap();
-            }
+        let session = StreamingDecodeSession::spawn_with_producer(1, 1, move |producer| {
+            assert!(producer.submit(test_plan(0)).unwrap());
             finished_sender.0.send(()).unwrap();
-        }));
-
-        drop(session);
+            assert!(!producer.submit(test_plan(1)).unwrap());
+            Ok(())
+        });
 
         finished_sender
             .1
             .recv_timeout(Duration::from_secs(1))
-            .expect("drop should wake and cancel the producer thread");
+            .expect("producer should submit the first slab before cancellation");
+
+        drop(session);
+    }
+
+    #[test]
+    fn spawned_producer_tracks_staged_input_residency_in_decode_profile() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "flacx-session-profile-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        profile::set_decode_profile_path_for_current_thread(Some(profile_path.clone()));
+        profile::begin_decode_profile_session_for_current_thread(1, 1, 16);
+
+        let mut session = StreamingDecodeSession::spawn_with_producer(1, 1, move |producer| {
+            let mut state = ProducerState::new(stream_info(), producer_config(1));
+            let mut plan = test_plan(0);
+            plan.bytes = Arc::from(vec![0; 32]);
+            plan.frame_block_sizes.clear();
+            assert!(producer.submit_tracked(&mut state, plan).unwrap());
+            Ok(())
+        });
+
+        assert!(session.wait_for_ready_slab().unwrap());
+        profile::finish_successful_decode_profile_for_current_thread();
+
+        let summary = std::fs::read_to_string(&profile_path).unwrap();
+        assert!(
+            summary.contains("peak_staged_input_bytes=32"),
+            "expected staged-input residency in summary: {summary}"
+        );
+
+        let _ = std::fs::remove_file(profile_path);
+        profile::set_decode_profile_path_for_current_thread(None);
     }
 
     #[test]
