@@ -23,7 +23,7 @@ use flacx::{
     DecodeConfig, EncoderConfig, Error, FlacReaderOptions, PcmReader, ProgressSnapshot,
     RawPcmDescriptor, RawPcmReader, RecompressConfig, RecompressMode, RecompressPhase,
     RecompressProgress, Result, WavReader, WavReaderOptions, inspect_flac_total_samples,
-    inspect_raw_pcm_total_samples, inspect_wav_total_samples, read_flac_reader_with_options,
+    inspect_pcm_total_samples, inspect_raw_pcm_total_samples, read_flac_reader_with_options,
 };
 use terminal_size::{Width, terminal_size};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -1200,7 +1200,7 @@ fn plan_recompress_directory_worklist(command: &RecompressCommand) -> Result<Pla
 }
 
 fn inspect_pcm_file_total_samples(path: &Path) -> Result<u64> {
-    inspect_wav_total_samples(open_buffered_reader(path)?)
+    inspect_pcm_total_samples(open_buffered_reader(path)?)
 }
 
 fn inspect_flac_file_total_samples(path: &Path) -> Result<u64> {
