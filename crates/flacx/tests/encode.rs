@@ -82,7 +82,7 @@ fn patches_streaminfo_after_encoding() {
     let max_block = u16::from_be_bytes([flac[10], flac[11]]);
     let min_frame = u32::from_be_bytes([0, flac[12], flac[13], flac[14]]);
     let max_frame = u32::from_be_bytes([0, flac[15], flac[16], flac[17]]);
-    let expected_block_size = encoder.config().block_size;
+    let expected_block_size = encoder.config().block_size();
 
     assert_eq!(min_block, expected_block_size);
     assert_eq!(max_block, expected_block_size);

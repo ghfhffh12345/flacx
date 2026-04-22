@@ -37,7 +37,7 @@ use support::{
 use support::{is_aifc_bytes, is_aiff_bytes};
 
 fn decode_thread_variants() -> [usize; 2] {
-    [1, DecodeConfig::default().threads.max(2)]
+    [1, DecodeConfig::default().threads().max(2)]
 }
 
 #[cfg(feature = "progress")]
@@ -219,12 +219,12 @@ impl DecodePcmStream for StreamingOnlyDecodeStream {
 #[test]
 fn decode_config_default_threads_matches_available_parallelism() {
     let expected = available_parallelism().map(usize::from).unwrap_or(1);
-    assert_eq!(DecodeConfig::default().threads, expected);
+    assert_eq!(DecodeConfig::default().threads(), expected);
 }
 
 #[test]
 fn decode_config_with_threads_clamps_to_one() {
-    assert_eq!(DecodeConfig::default().with_threads(0).threads, 1);
+    assert_eq!(DecodeConfig::default().with_threads(0).threads(), 1);
 }
 
 #[test]
