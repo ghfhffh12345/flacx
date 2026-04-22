@@ -124,29 +124,28 @@ fn encode_multiframe_streaming_path(c: &mut Criterion) {
 }
 
 fn decode_large_streaming_path(c: &mut Criterion) {
-    let threads = shared_thread_count();
-    let input = large_streaming_decode_flac_bytes(threads);
-    let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(threads));
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(input.len() as u64));
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(10);
-    group.bench_function("decode_large_streaming_path", |b| {
-        b.iter(|| {
-            decoder
-                .decode_bytes(&input)
-                .expect("decode large streaming path")
-        })
-    });
+    for threads in decode_thread_variants() {
+        let input = large_streaming_decode_flac_bytes(threads);
+        let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(threads));
+        group.throughput(Throughput::Bytes(input.len() as u64));
+        group.bench_function(format!("decode_large_streaming_path_threads_{threads}"), |b| {
+            b.iter(|| {
+                decoder
+                    .decode_bytes(&input)
+                    .expect("decode large streaming path")
+            })
+        });
+    }
     group.finish();
 }
 
 fn matched_large_streaming_encode_decode(c: &mut Criterion) {
     let threads = shared_thread_count();
     let wav_input = large_streaming_decode_wav_bytes();
-    let flac_input = large_streaming_decode_flac_bytes(threads);
     let encoder_config = EncoderConfig::default().with_threads(threads);
-    let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(threads));
     let mut group = c.benchmark_group("flacx matched throughput");
     group.throughput(Throughput::Bytes(wav_input.len() as u64));
     group.measurement_time(Duration::from_secs(5));
@@ -154,10 +153,15 @@ fn matched_large_streaming_encode_decode(c: &mut Criterion) {
     group.bench_function("matched_large_streaming_encode", |b| {
         b.iter(|| encode_fixture_bytes(&encoder_config, &wav_input).expect("matched encode"))
     });
-    group.throughput(Throughput::Bytes(wav_input.len() as u64));
-    group.bench_function("matched_large_streaming_decode", |b| {
-        b.iter(|| decoder.decode_bytes(&flac_input).expect("matched decode"))
-    });
+    for decode_threads in decode_thread_variants() {
+        let flac_input = large_streaming_decode_flac_bytes(decode_threads);
+        let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(decode_threads));
+        group.throughput(Throughput::Bytes(flac_input.len() as u64));
+        group.bench_function(
+            format!("matched_large_streaming_decode_threads_{decode_threads}"),
+            |b| b.iter(|| decoder.decode_bytes(&flac_input).expect("matched decode")),
+        );
+    }
     group.finish();
 }
 
@@ -577,4 +581,8 @@ fn shared_thread_count() -> usize {
         "default encode/recompress thread counts diverged"
     );
     encode_threads
+}
+
+fn decode_thread_variants() -> [usize; 4] {
+    [1, 2, 4, 8]
 }

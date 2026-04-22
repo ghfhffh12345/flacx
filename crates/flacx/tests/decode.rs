@@ -38,8 +38,8 @@ use support::{
 #[cfg(feature = "aiff")]
 use support::{is_aifc_bytes, is_aiff_bytes};
 
-fn decode_thread_variants() -> [usize; 2] {
-    [1, DecodeConfig::default().threads().max(2)]
+fn decode_thread_variants() -> [usize; 4] {
+    [1, 2, 4, 8]
 }
 
 #[cfg(feature = "progress")]
@@ -274,6 +274,11 @@ fn decode_config_default_threads_matches_available_parallelism() {
 #[test]
 fn decode_config_with_threads_clamps_to_one() {
     assert_eq!(DecodeConfig::default().with_threads(0).threads(), 1);
+}
+
+#[test]
+fn decode_thread_variants_cover_throughput_comparison_set() {
+    assert_eq!(decode_thread_variants(), [1, 2, 4, 8]);
 }
 
 #[test]
