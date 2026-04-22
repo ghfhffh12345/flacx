@@ -4,9 +4,7 @@ use std::{
     thread,
 };
 
-use super::{
-    DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER, Error, Result, frame, profile,
-};
+use super::{DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER, Error, Result, frame, profile};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct DecodedPacket {
@@ -339,7 +337,10 @@ impl StreamingDecodeSession {
         packet: frame::DecodedWorkPacket,
         producer_active_packets: usize,
     ) {
-        self.accept_result(DecodeSessionResult::from_packet(packet, producer_active_packets));
+        self.accept_result(DecodeSessionResult::from_packet(
+            packet,
+            producer_active_packets,
+        ));
     }
 
     fn accept_result(&mut self, result: DecodeSessionResult) {
@@ -347,7 +348,8 @@ impl StreamingDecodeSession {
         self.ordered_drain.push_ready(result.packet);
         profile::accept_ready_pcm_frames_for_current_thread(
             pcm_frames,
-            self.active_packet_count().max(result.producer_active_packets),
+            self.active_packet_count()
+                .max(result.producer_active_packets),
         );
     }
 }
@@ -367,8 +369,9 @@ fn run_decode_coordinator(
     result_sender: SyncSender<Result<DecodeSessionResult>>,
     worker_count: usize,
 ) -> Result<()> {
-    let mut decoder_pool =
-        (worker_count > 1).then(|| frame::FrameDecodeWorkerPool::new(worker_count, DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER));
+    let mut decoder_pool = (worker_count > 1).then(|| {
+        frame::FrameDecodeWorkerPool::new(worker_count, DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER)
+    });
     let mut inflight_packets = 0usize;
 
     loop {
@@ -385,34 +388,31 @@ fn run_decode_coordinator(
             }
 
             match job_receiver.try_recv() {
-                Ok(job) => {
-                    match pool.try_submit(job) {
-                        Ok(()) => {
-                            inflight_packets += 1;
-                            continue;
-                        }
-                        Err(mpsc::TrySendError::Full(job)) => {
-                            if inflight_packets > 0 {
-                                inflight_packets = inflight_packets.saturating_sub(1);
-                                if !send_ready_packet(&result_sender, pool.recv()?, inflight_packets)?
-                                {
-                                    return Ok(());
-                                }
-                                pool.submit(job)?;
-                                inflight_packets += 1;
-                                continue;
+                Ok(job) => match pool.try_submit(job) {
+                    Ok(()) => {
+                        inflight_packets += 1;
+                        continue;
+                    }
+                    Err(mpsc::TrySendError::Full(job)) => {
+                        if inflight_packets > 0 {
+                            inflight_packets = inflight_packets.saturating_sub(1);
+                            if !send_ready_packet(&result_sender, pool.recv()?, inflight_packets)? {
+                                return Ok(());
                             }
                             pool.submit(job)?;
                             inflight_packets += 1;
                             continue;
                         }
-                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                            return Err(Error::Thread(
-                                "decode worker channel closed unexpectedly".into(),
-                            ));
-                        }
+                        pool.submit(job)?;
+                        inflight_packets += 1;
+                        continue;
                     }
-                }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        return Err(Error::Thread(
+                            "decode worker channel closed unexpectedly".into(),
+                        ));
+                    }
+                },
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if inflight_packets == 0 {
@@ -469,9 +469,7 @@ fn send_ready_packet(
 mod tests {
     use std::sync::mpsc;
 
-    use super::{
-        DecodeSessionResult, DecodedPacket, OrderedDrainState, StreamingDecodeSession,
-    };
+    use super::{DecodeSessionResult, DecodedPacket, OrderedDrainState, StreamingDecodeSession};
 
     fn packet(start_frame_index: usize, block_sizes: &[u16], samples: &[i32]) -> DecodedPacket {
         DecodedPacket {

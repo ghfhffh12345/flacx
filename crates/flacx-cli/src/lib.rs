@@ -269,10 +269,11 @@ impl CurrentFileProgress {
                 output_bytes_written: progress.overall_output_bytes_written,
             }
         } else {
-            self.current_progress.map_or(ByteProgress::default(), |progress| ByteProgress {
-                input_bytes_read: progress.input_bytes_read,
-                output_bytes_written: progress.output_bytes_written,
-            })
+            self.current_progress
+                .map_or(ByteProgress::default(), |progress| ByteProgress {
+                    input_bytes_read: progress.input_bytes_read,
+                    output_bytes_written: progress.output_bytes_written,
+                })
         }
     }
 }
@@ -2913,18 +2914,18 @@ mod tests {
                 },
                 file: None,
                 phase_label: None,
-                },
-                &ProgressEstimate {
-                    eta: Some(Duration::from_secs(0)),
-                    input_bytes_per_second: Some(333.0),
-                    output_bytes_per_second: Some(666.0),
-                    total_bytes_per_second: Some(999.0),
-                },
-                None,
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                Some(120),
-            );
+            },
+            &ProgressEstimate {
+                eta: Some(Duration::from_secs(0)),
+                input_bytes_per_second: Some(333.0),
+                output_bytes_per_second: Some(666.0),
+                total_bytes_per_second: Some(999.0),
+            },
+            None,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Some(120),
+        );
 
         assert_eq!(frame.lines.len(), 1);
         assert!(display_width(&frame.lines[0]) <= 120);
@@ -3034,19 +3035,14 @@ mod tests {
     fn batch_renderer_clears_stale_characters_on_both_lines_when_frame_shrinks() {
         let mut renderer = ProgressRenderer::new(Vec::new(), true);
         let line_budget = renderer.line_budget();
-        let long_batch_line =
-            "Batch overall progress | [=====>----]  55.0% | Elapsed 00:15 | ETA 00:12 | In 12.1 KiB/s | Out 24.1 KiB/s | Total 36.2 KiB/s";
-        let long_file_line =
-            "disc-one-with-a-very-long-name.wav | File | [=====>----]  55.0% | Elapsed 00:09 | ETA 00:07 | In 6.0 KiB/s | Out 12.0 KiB/s | Total 18.0 KiB/s";
+        let long_batch_line = "Batch overall progress | [=====>----]  55.0% | Elapsed 00:15 | ETA 00:12 | In 12.1 KiB/s | Out 24.1 KiB/s | Total 36.2 KiB/s";
+        let long_file_line = "disc-one-with-a-very-long-name.wav | File | [=====>----]  55.0% | Elapsed 00:09 | ETA 00:07 | In 6.0 KiB/s | Out 12.0 KiB/s | Total 18.0 KiB/s";
         let expected_rows_up = rendered_row_count(display_width(long_batch_line), line_budget)
             + rendered_row_count(display_width(long_file_line), line_budget)
             - 1;
         renderer
             .observe_frame(ProgressFrame {
-                lines: vec![
-                    long_batch_line.into(),
-                    long_file_line.into(),
-                ],
+                lines: vec![long_batch_line.into(), long_file_line.into()],
             })
             .unwrap();
         renderer
