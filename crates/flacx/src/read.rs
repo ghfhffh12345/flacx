@@ -10,7 +10,7 @@ use crate::{
 };
 
 use self::{
-    index::{RollingIndexConfig, RollingIndexWindow},
+    index::{PushFrameOutcome, RollingIndexConfig, RollingIndexWindow},
     slab::DecodeSlabPlan,
 };
 
@@ -554,14 +554,17 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             };
             let frame_start = self.pending_start;
             let frame_end = frame_start + parsed.bytes_consumed;
-            self.discovered_input_frames += 1;
-            self.discovered_sample_number += u64::from(parsed.block_size);
-            #[cfg(feature = "progress")]
-            self.record_discovered_input_bytes(parsed.bytes_consumed);
-            self.pending_start = frame_end;
-
-            if let Some(plan) = self.index_window.push_frame(parsed, frame_start)? {
-                return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
+            match self.index_window.push_frame(parsed, frame_start)? {
+                PushFrameOutcome::Pending => {
+                    self.accept_indexed_frame(parsed, frame_end);
+                }
+                PushFrameOutcome::AcceptedAndSealed(plan) => {
+                    self.accept_indexed_frame(parsed, frame_end);
+                    return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
+                }
+                PushFrameOutcome::SealedBeforeAdd(plan) => {
+                    return Ok(Some(self.seal_staged_decode_slab_plan(plan)));
+                }
             }
         }
 
@@ -572,6 +575,14 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         }
 
         Ok(None)
+    }
+
+    fn accept_indexed_frame(&mut self, parsed: ParsedFrame, frame_end: usize) {
+        self.discovered_input_frames += 1;
+        self.discovered_sample_number += u64::from(parsed.block_size);
+        #[cfg(feature = "progress")]
+        self.record_discovered_input_bytes(parsed.bytes_consumed);
+        self.pending_start = frame_end;
     }
 
     fn fill_decode_window(&mut self) -> Result<bool> {
@@ -887,8 +898,12 @@ mod tests {
         channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment,
     };
     use super::metadata::requires_channel_layout_provenance;
-    use super::{FlacPcmStream, StreamInfo};
+    use super::{
+        FlacPcmStream, StreamInfo,
+        index::{RollingIndexConfig, RollingIndexWindow},
+    };
     use crate::model::ChannelAssignment;
+    use crate::{EncoderConfig, convenience::encode_bytes_with_config};
     use std::io::Cursor;
 
     #[test]
@@ -1037,5 +1052,81 @@ mod tests {
         assert_eq!(plan.frames.as_ref(), frames.as_slice());
         assert_eq!(stream.pending_bytes, vec![4, 5]);
         assert_eq!(stream.pending_start, 0);
+    }
+
+    fn wav_bytes_from_i16_samples(samples: &[i16]) -> Vec<u8> {
+        let channels = 1u16;
+        let sample_rate = 44_100u32;
+        let bits_per_sample = 16u16;
+        let block_align = channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate * u32::from(block_align);
+        let data_bytes = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        let chunk_size = 36 + data_bytes.len() as u32;
+
+        let mut wav = Vec::with_capacity(44 + data_bytes.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&chunk_size.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_bytes.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data_bytes);
+        wav
+    }
+
+    #[test]
+    fn read_next_slab_plan_preserves_frame_bytes_across_pre_add_seal_boundaries() {
+        let samples = (0i16..48).collect::<Vec<_>>();
+        let wav = wav_bytes_from_i16_samples(&samples);
+        let flac = encode_bytes_with_config(&EncoderConfig::default().with_block_size(16), &wav)
+            .expect("encode test flac");
+        let mut stream = super::read_flac_reader(Cursor::new(flac))
+            .expect("parse encoded flac")
+            .into_pcm_stream();
+        stream.index_window = RollingIndexWindow::new(
+            stream.stream_info,
+            RollingIndexConfig {
+                target_pcm_frames_per_slab: 24,
+                max_frames_per_slab: 4,
+                max_bytes_per_slab: usize::MAX,
+                max_slabs_ahead: 4,
+            },
+        );
+
+        let first = stream
+            .read_next_slab_plan()
+            .expect("first slab plan result")
+            .expect("first slab plan");
+        assert_eq!(first.start_frame_index, 0);
+        assert_eq!(first.frame_block_sizes, vec![16]);
+        let first_packet =
+            super::frame::decode_work_packet(first.into()).expect("decode first slab plan");
+        assert_eq!(
+            first_packet.decoded_samples,
+            (0..16).map(i32::from).collect::<Vec<_>>()
+        );
+
+        let second = stream
+            .read_next_slab_plan()
+            .expect("second slab plan result")
+            .expect("second slab plan");
+        assert_eq!(second.start_frame_index, 1);
+        assert_eq!(second.frame_block_sizes, vec![16]);
+        let second_packet =
+            super::frame::decode_work_packet(second.into()).expect("decode second slab plan");
+        assert_eq!(
+            second_packet.decoded_samples,
+            (16..32).map(i32::from).collect::<Vec<_>>()
+        );
     }
 }

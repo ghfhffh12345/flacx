@@ -17,6 +17,13 @@ pub(super) struct FrameDescriptor {
     pub(super) frame: FrameIndex,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PushFrameOutcome {
+    Pending,
+    AcceptedAndSealed(DecodeSlabPlan),
+    SealedBeforeAdd(DecodeSlabPlan),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SealedSlab {
     sequence: usize,
@@ -91,15 +98,16 @@ impl RollingIndexWindow {
         &mut self,
         frame: ParsedFrame,
         offset: usize,
-    ) -> Result<Option<DecodeSlabPlan>> {
+    ) -> Result<PushFrameOutcome> {
         if self.should_seal_before_adding(&frame) {
-            let sealed = self.seal_pending_slab();
-            self.append_frame(frame, offset);
-            return Ok(Some(sealed));
+            return Ok(PushFrameOutcome::SealedBeforeAdd(self.seal_pending_slab()));
         }
 
         self.append_frame(frame, offset);
-        Ok(self.should_seal_slab().then(|| self.seal_pending_slab()))
+        Ok(self
+            .should_seal_slab()
+            .then(|| PushFrameOutcome::AcceptedAndSealed(self.seal_pending_slab()))
+            .unwrap_or(PushFrameOutcome::Pending))
     }
 
     pub(super) fn finish(&mut self) -> Option<DecodeSlabPlan> {
@@ -172,18 +180,30 @@ impl RollingIndexWindow {
         block_size: u16,
         bytes_consumed: usize,
     ) -> Result<Vec<DecodeSlabPlan>> {
-        let parsed = ParsedFrame {
-            header_number: super::FrameHeaderNumber {
-                kind: super::FrameHeaderNumberKind::FrameNumber,
-                value: self.next_frame_index as u64,
-            },
-            block_size,
-            bits_per_sample: self.stream_info.bits_per_sample,
-            assignment: crate::model::ChannelAssignment::Independent(0),
-            header_bytes_consumed: 4,
-            bytes_consumed,
-        };
-        Ok(self.push_frame(parsed, 0)?.into_iter().collect())
+        let mut sealed_plans = Vec::new();
+        loop {
+            let parsed = ParsedFrame {
+                header_number: super::FrameHeaderNumber {
+                    kind: super::FrameHeaderNumberKind::FrameNumber,
+                    value: self.next_frame_index as u64,
+                },
+                block_size,
+                bits_per_sample: self.stream_info.bits_per_sample,
+                assignment: crate::model::ChannelAssignment::Independent(0),
+                header_bytes_consumed: 4,
+                bytes_consumed,
+            };
+            match self.push_frame(parsed, 0)? {
+                PushFrameOutcome::Pending => return Ok(sealed_plans),
+                PushFrameOutcome::AcceptedAndSealed(plan) => {
+                    sealed_plans.push(plan);
+                    return Ok(sealed_plans);
+                }
+                PushFrameOutcome::SealedBeforeAdd(plan) => {
+                    sealed_plans.push(plan);
+                }
+            }
+        }
     }
 }
 
