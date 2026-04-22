@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For finer control, use the explicit pipeline:
+For finer control, use the reset API:
 `PcmReader` for PCM-container inputs, `read_flac_reader` for FLAC inputs,
 `EncoderConfig` / `DecodeConfig` / `RecompressConfig` for session policy, and
 `inspect_pcm_total_samples` when you need a preflight sample count without a

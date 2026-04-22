@@ -21,8 +21,8 @@ use support::{
 const DEFAULT_FIXTURE_FRAMES: usize = 2_048;
 
 fn benchmark_thread_count() -> usize {
-    let encode_threads = EncoderConfig::default().threads.max(1);
-    let decode_threads = DecodeConfig::default().threads.max(1);
+    let encode_threads = EncoderConfig::default().threads().max(1);
+    let decode_threads = DecodeConfig::default().threads().max(1);
     assert_eq!(
         encode_threads, decode_threads,
         "default encode/decode thread counts diverged"
