@@ -194,7 +194,7 @@ mod write;
 /// Compression level presets and tuning profiles used by the encoder.
 pub mod level;
 
-/// Built-in one-shot orchestration helpers layered on top of the explicit core.
+/// Built-in one-shot orchestration helpers layered on top of the reset API.
 pub mod builtin {
     pub use crate::convenience::{
         decode_bytes, decode_file, encode_bytes, encode_file, inspect_flac_total_samples,
@@ -262,7 +262,7 @@ pub fn write_pcm_stream<W: std::io::Write>(
     Ok(())
 }
 
-/// Explicit core surface for callers that want the typed/configured pipeline
+/// Reset API surface for callers that want the typed/configured pipeline
 /// without the one-shot convenience wrappers.
 pub mod core {
     #[cfg(feature = "aiff")]
