@@ -83,6 +83,7 @@ impl SessionProducer {
 
 #[derive(Debug)]
 pub(super) struct StreamingDecodeSession {
+    submit_sender: Option<SyncSender<DecodeSlabPlan>>,
     job_sender: Option<SyncSender<frame::DecodeWorkSlab>>,
     result_receiver: Receiver<Result<DecodeSessionResult>>,
     ordered_drain: OrderedSlabDrain,
@@ -111,6 +112,7 @@ impl StreamingDecodeSession {
         window_depth_limit: usize,
     ) -> Self {
         Self {
+            submit_sender: None,
             job_sender: None,
             result_receiver,
             ordered_drain: OrderedSlabDrain::new(),
@@ -142,6 +144,7 @@ impl StreamingDecodeSession {
 
         (
             Self {
+                submit_sender: None,
                 job_sender: Some(job_sender),
                 result_receiver,
                 ordered_drain: OrderedSlabDrain::new(),
@@ -160,7 +163,17 @@ impl StreamingDecodeSession {
     }
 
     pub(super) fn spawn(worker_count: usize, queue_depth: usize) -> Self {
-        Self::spawn_runtime(worker_count, queue_depth).0
+        let (submit_sender, submit_receiver) = mpsc::sync_channel(0);
+        let mut session = Self::spawn_with_producer(worker_count, queue_depth, move |producer| {
+            while let Ok(plan) = submit_receiver.recv() {
+                if !producer.submit(plan)? {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        session.submit_sender = Some(submit_sender);
+        session
     }
 
     pub(super) fn spawn_with_producer<P>(
@@ -201,6 +214,12 @@ impl StreamingDecodeSession {
     }
 
     pub(super) fn submit(&self, plan: DecodeSlabPlan) -> Result<()> {
+        if let Some(submit_sender) = self.submit_sender.as_ref() {
+            return submit_sender.send(plan).map_err(|_| {
+                Error::Thread("decode session job channel closed unexpectedly".into())
+            });
+        }
+
         self.job_sender
             .as_ref()
             .expect("streaming decode session always owns a job sender while active")
@@ -371,6 +390,7 @@ impl StreamingDecodeSession {
 
 impl Drop for StreamingDecodeSession {
     fn drop(&mut self) {
+        self.submit_sender.take();
         self.cancel_producer();
         self.job_sender.take();
         self.producer_finished = true;
@@ -606,26 +626,64 @@ mod tests {
     }
 
     #[test]
-    fn producer_window_reopens_when_ordered_completion_retires_a_slab() {
-        let (sender, receiver) = mpsc::sync_channel(4);
-        let mut session = StreamingDecodeSession::from_result_receiver(receiver);
+    fn spawned_producer_reopens_when_ordered_completion_retires_a_slab() {
+        let (plans, channels) = fixture_plans(3);
+        let mut session = StreamingDecodeSession::spawn(2, 1);
+        let submit_sender = session
+            .submit_sender
+            .as_ref()
+            .expect("spawned session owns a producer submission channel")
+            .clone();
+        let submitted = mpsc::channel();
+        let submitter = std::thread::spawn(move || {
+            for (index, plan) in plans.into_iter().enumerate() {
+                submit_sender.send(plan).unwrap();
+                submitted.0.send(index).unwrap();
+            }
+        });
 
-        sender
-            .send(Ok(DecodeSessionResult {
-                slab: slab(0, &[2], &[10, 11]),
-                producer_window_slabs: 1,
-            }))
-            .unwrap();
+        assert_eq!(
+            submitted
+                .1
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first submission should pass through immediately"),
+            0
+        );
+        assert_eq!(
+            submitted
+                .1
+                .recv_timeout(Duration::from_secs(1))
+                .expect("second submission should be received before the producer blocks"),
+            1
+        );
+        assert!(
+            submitted
+                .1
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "third submission should stay blocked until ordered drain retires capacity"
+        );
 
-        assert_eq!(session.collect_ready_slabs().unwrap(), 1);
+        assert!(session.wait_for_ready_slab().unwrap());
+        assert_eq!(session.active_slab_count(), 1);
         assert!(!session.producer_has_capacity());
-        assert_eq!(session.completed_input_frames(), 0);
 
         let mut output = Vec::new();
-        assert_eq!(session.drain_into(8, 1, &mut output), (2, 1));
-        assert_eq!(output, vec![10, 11]);
+        let (drained_frames, completed_input_frames) =
+            session.drain_into(usize::MAX, channels, &mut output);
+        assert!(drained_frames > 0);
+        assert_eq!(completed_input_frames, 1);
         assert_eq!(session.completed_input_frames(), 1);
         assert!(session.producer_has_capacity());
+        assert_eq!(
+            submitted
+                .1
+                .recv_timeout(Duration::from_secs(1))
+                .expect("producer should wake after ordered drain retires capacity"),
+            2
+        );
+
+        submitter.join().unwrap();
     }
 
     #[test]
@@ -682,6 +740,14 @@ mod tests {
     }
 
     #[test]
+    fn spawn_owns_a_background_producer_thread() {
+        let session = StreamingDecodeSession::spawn(2, 1);
+
+        assert!(session.producer_handle.is_some());
+        assert!(!session.producer_finished);
+    }
+
+    #[test]
     fn coordinator_reports_a_bounded_active_window_for_ready_slabs() {
         let session = StreamingDecodeSession::spawn(2, 2);
         let submitter = std::thread::spawn({
@@ -729,5 +795,25 @@ mod tests {
             bytes: Arc::from(Vec::<u8>::new()),
             frames: Arc::<[FrameIndex]>::from(Vec::new()),
         }
+    }
+
+    fn fixture_plans(count: usize) -> (Vec<DecodeSlabPlan>, usize) {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-flacs/case1/test01.flac");
+        let bytes = std::fs::read(fixture_path).unwrap();
+        let (stream_info, _, frame_offset) =
+            crate::read::metadata::parse_metadata(&bytes, false).unwrap();
+        let plans = crate::read::frame::index_frames(&bytes, frame_offset, stream_info)
+            .unwrap()
+            .into_iter()
+            .take(count)
+            .enumerate()
+            .map(|(sequence, frame)| {
+                let frame_bytes = bytes[frame.offset..frame.offset + frame.bytes_consumed].to_vec();
+                let frame = FrameIndex { offset: 0, ..frame };
+                DecodeSlabPlan::new(sequence, sequence, vec![frame]).seal_bytes(frame_bytes)
+            })
+            .collect();
+        (plans, usize::from(stream_info.channels))
     }
 }
