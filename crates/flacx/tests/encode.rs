@@ -512,7 +512,7 @@ fn round_trips_constant_16bit_mono_with_ffmpeg_oracle() {
 }
 
 #[test]
-fn public_api_requires_seekable_io_but_accepts_cursor_inputs() {
+fn public_surface_requires_seekable_io_but_accepts_cursor_inputs() {
     let samples = sample_fixture(1, 2_048);
     let wav = pcm_wav_bytes(16, 1, 32_000, &samples);
     let mut output = Cursor::new(Vec::new());

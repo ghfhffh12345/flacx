@@ -148,7 +148,7 @@ fn builtin_recompress_bytes_matches_explicit_reader_session_flow() {
 }
 
 #[test]
-fn recompress_api_accepts_reader_first_sources_and_preserves_audio() {
+fn recompress_surface_accepts_reader_first_sources_and_preserves_audio() {
     let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 4_096));
     let flac = Encoder::new(flacx::EncoderConfig::default().with_block_size(576))
         .encode_bytes(&wav)
