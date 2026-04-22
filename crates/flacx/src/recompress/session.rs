@@ -1,73 +1,157 @@
 use std::io::{Seek, Write};
+#[cfg(feature = "progress")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
+#[cfg(feature = "progress")]
+use crate::input::EncodePcmStream;
+#[cfg(not(feature = "progress"))]
+use crate::input::counted_encode_pcm_stream;
+#[cfg(feature = "progress")]
+use crate::progress::{ProgressSink, ProgressSnapshot};
 use crate::{
     encoder::{EncodeSummary, Encoder},
     error::Result,
-    input::{EncodePcmStream, EncodeSource, PcmSpec, PcmStream, counted_encode_pcm_stream},
+    input::EncodeSource,
     level::Level,
     progress::NoProgress,
 };
 
+#[cfg(not(feature = "progress"))]
+use super::progress::EncodePhaseProgress;
 use super::{
     config::{RecompressConfig, RecompressMode},
-    progress::{EncodePhaseProgress, RecompressProgressSink, emit_recompress_progress},
+    progress::{RecompressProgressSink, emit_recompress_progress},
     source::FlacRecompressSource,
 };
 
 #[cfg(feature = "progress")]
-use super::progress::RecompressProgress;
+use super::progress::{RecompressPhase, RecompressProgress};
 
-const EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD: u64 = 8 * 1024 * 1024;
-
-struct BufferedRecompressPcmStream {
-    spec: PcmSpec,
-    samples: Vec<i32>,
-    cursor: usize,
-    expected_md5: [u8; 16],
+#[cfg(feature = "progress")]
+struct RecompressEncodePcmStream<S> {
+    inner: S,
+    phase_input_bytes_read: u64,
+    decode_input_bytes_read: Arc<AtomicU64>,
 }
 
-impl BufferedRecompressPcmStream {
-    fn new(pcm_stream: PcmStream, expected_md5: [u8; 16]) -> Self {
-        Self {
-            spec: pcm_stream.spec,
-            samples: pcm_stream.samples,
-            cursor: 0,
-            expected_md5,
-        }
+#[cfg(feature = "progress")]
+impl<S> RecompressEncodePcmStream<S>
+where
+    S: EncodePcmStream,
+{
+    fn new(inner: S) -> (Self, Arc<AtomicU64>) {
+        let decode_input_bytes_read = Arc::new(AtomicU64::new(
+            EncodePcmStream::input_bytes_processed(&inner),
+        ));
+        (
+            Self {
+                inner,
+                phase_input_bytes_read: 0,
+                decode_input_bytes_read: Arc::clone(&decode_input_bytes_read),
+            },
+            decode_input_bytes_read,
+        )
     }
 }
 
-impl EncodePcmStream for BufferedRecompressPcmStream {
-    fn spec(&self) -> PcmSpec {
-        self.spec
+#[cfg(feature = "progress")]
+impl<S> EncodePcmStream for RecompressEncodePcmStream<S>
+where
+    S: EncodePcmStream,
+{
+    fn spec(&self) -> crate::PcmSpec {
+        self.inner.spec()
     }
 
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize> {
-        if max_frames == 0 {
-            return Ok(0);
-        }
-
-        let channels = usize::from(self.spec.channels);
-        let remaining_frames = (self.samples.len().saturating_sub(self.cursor)) / channels;
-        let frames = remaining_frames.min(max_frames);
-        let sample_count = frames.saturating_mul(channels);
-        let next = self.cursor.saturating_add(sample_count);
-        output.extend_from_slice(&self.samples[self.cursor..next]);
-        self.cursor = next;
+        let frames = self.inner.read_chunk(max_frames, output)?;
+        self.phase_input_bytes_read = self
+            .phase_input_bytes_read
+            .saturating_add(pcm_bytes_for_frames(self.inner.spec(), frames));
+        self.decode_input_bytes_read.store(
+            EncodePcmStream::input_bytes_processed(&self.inner),
+            Ordering::Relaxed,
+        );
         Ok(frames)
+    }
+
+    fn input_bytes_processed(&self) -> u64 {
+        self.phase_input_bytes_read
     }
 
     fn update_streaminfo_md5(
         &mut self,
-        _md5: &mut crate::md5::StreaminfoMd5,
-        _samples: &[i32],
+        md5: &mut crate::md5::StreaminfoMd5,
+        samples: &[i32],
     ) -> Result<()> {
-        Ok(())
+        self.inner.update_streaminfo_md5(md5, samples)
     }
 
-    fn finish_streaminfo_md5(&mut self, _md5: crate::md5::StreaminfoMd5) -> Result<[u8; 16]> {
-        Ok(self.expected_md5)
+    fn finish_streaminfo_md5(&mut self, md5: crate::md5::StreaminfoMd5) -> Result<[u8; 16]> {
+        self.inner.finish_streaminfo_md5(md5)
     }
+
+    fn preferred_encode_chunk_max_frames(&self) -> Option<usize> {
+        self.inner.preferred_encode_chunk_max_frames()
+    }
+
+    fn preferred_encode_chunk_target_pcm_frames(&self) -> Option<usize> {
+        self.inner.preferred_encode_chunk_target_pcm_frames()
+    }
+}
+
+#[cfg(feature = "progress")]
+struct StreamingEncodePhaseProgress<'a, P> {
+    sink: &'a mut P,
+    total_samples: u64,
+    decode_input_bytes_read: Arc<AtomicU64>,
+}
+
+#[cfg(feature = "progress")]
+impl<'a, P> StreamingEncodePhaseProgress<'a, P> {
+    fn new(sink: &'a mut P, total_samples: u64, decode_input_bytes_read: Arc<AtomicU64>) -> Self {
+        Self {
+            sink,
+            total_samples,
+            decode_input_bytes_read,
+        }
+    }
+}
+
+#[cfg(feature = "progress")]
+impl<P> ProgressSink for StreamingEncodePhaseProgress<'_, P>
+where
+    P: RecompressProgressSink,
+{
+    fn on_frame(&mut self, progress: ProgressSnapshot) -> Result<()> {
+        let decode_input_bytes_read = self.decode_input_bytes_read.load(Ordering::Relaxed);
+        self.sink.on_progress(RecompressProgress {
+            phase: RecompressPhase::Encode,
+            phase_processed_samples: progress.processed_samples,
+            phase_total_samples: progress.total_samples,
+            overall_processed_samples: self
+                .total_samples
+                .saturating_add(progress.processed_samples),
+            overall_total_samples: super::progress::overall_total_samples(self.total_samples),
+            completed_frames: progress.completed_frames,
+            total_frames: progress.total_frames,
+            phase_input_bytes_read: progress.input_bytes_read,
+            phase_output_bytes_written: progress.output_bytes_written,
+            overall_input_bytes_read: decode_input_bytes_read
+                .saturating_add(progress.input_bytes_read),
+            overall_output_bytes_written: progress.output_bytes_written,
+        })
+    }
+}
+
+#[cfg(feature = "progress")]
+fn pcm_bytes_for_frames(spec: crate::PcmSpec, frames: usize) -> u64 {
+    (frames as u64)
+        .saturating_mul(u64::from(spec.channels))
+        .saturating_mul(u64::from(spec.bytes_per_sample))
 }
 
 /// Summary of the FLAC stream produced by a recompress operation.
@@ -237,66 +321,36 @@ where
             }
         )?;
 
-        if total_samples <= EAGER_RECOMPRESS_TOTAL_SAMPLES_THRESHOLD {
-            #[cfg(feature = "progress")]
-            let (metadata, pcm_stream, streaminfo_md5, decode_input_bytes_read) =
-                source.into_verified_pcm_stream()?;
-            #[cfg(not(feature = "progress"))]
-            let (metadata, pcm_stream, streaminfo_md5) = source.into_verified_pcm_stream()?;
-            #[cfg(not(feature = "progress"))]
-            let decode_input_bytes_read = 0;
-            let encode_config = self.config.encode_config();
-            #[cfg(feature = "progress")]
-            let encode_plan = crate::plan::EncodePlan::new(pcm_stream.spec, encode_config.clone())?;
-            emit_recompress_progress!(
-                progress,
-                super::progress::encode_phase_transition_progress(
-                    total_samples,
-                    encode_plan.total_frames,
-                    decode_input_bytes_read,
-                )
-            )?;
-
-            let mut encode_progress =
-                EncodePhaseProgress::new(progress, total_samples, decode_input_bytes_read);
-            let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
-            let summary = encoder.encode_source_with_sink(
-                EncodeSource::new(
-                    metadata,
-                    counted_encode_pcm_stream(BufferedRecompressPcmStream::new(
-                        pcm_stream,
-                        streaminfo_md5,
-                    )),
-                ),
-                &mut encode_progress,
-            )?;
-            return Ok(summary.into());
-        }
-
-        // The previous buffered handoff was `source.into_verified_pcm_stream()?`;
-        // keep verification incremental and stream the verified PCM into encode instead.
         let (metadata, mut stream) = source.into_encode_parts();
         let encode_config = self.config.encode_config();
-        #[cfg(feature = "progress")]
-        let decode_input_bytes_read = stream.input_bytes_processed();
-        #[cfg(not(feature = "progress"))]
-        let decode_input_bytes_read = 0;
         #[cfg(feature = "progress")]
         let encode_plan = crate::plan::EncodePlan::new(stream.spec(), encode_config.clone())?;
         if total_samples == 0 {
             stream.finish_verification()?;
         }
+        #[cfg(feature = "progress")]
+        let (stream, decode_input_bytes_read) = RecompressEncodePcmStream::new(stream);
+        #[cfg(feature = "progress")]
+        let decode_input_bytes_read_for_transition =
+            decode_input_bytes_read.load(Ordering::Relaxed);
+        #[cfg(not(feature = "progress"))]
+        let decode_input_bytes_read = 0;
         emit_recompress_progress!(
             progress,
             super::progress::encode_phase_transition_progress(
                 total_samples,
                 encode_plan.total_frames,
-                decode_input_bytes_read,
+                decode_input_bytes_read_for_transition,
             )
         )?;
 
+        #[cfg(feature = "progress")]
+        let mut encode_progress =
+            StreamingEncodePhaseProgress::new(progress, total_samples, decode_input_bytes_read);
+        #[cfg(not(feature = "progress"))]
         let mut encode_progress =
             EncodePhaseProgress::new(progress, total_samples, decode_input_bytes_read);
+        #[cfg(not(feature = "progress"))]
         let stream = counted_encode_pcm_stream(stream);
         let mut encoder: Encoder<&mut W> = encode_config.into_encoder(&mut self.writer);
         let summary = encoder

@@ -1,6 +1,6 @@
 use crate::{
     error::Result,
-    input::{EncodePcmStream, PcmSpec, PcmStream},
+    input::{EncodePcmStream, PcmSpec},
     md5::{StreaminfoMd5, verify_streaminfo_digest},
     read::DecodePcmStream,
 };
@@ -48,41 +48,6 @@ where
         )?;
         self.verified = true;
         Ok(())
-    }
-
-    #[cfg(feature = "progress")]
-    pub(super) fn into_verified_pcm_stream(mut self) -> Result<(PcmStream, [u8; 16], u64)> {
-        let spec = self.spec();
-        let (samples, _frame_count) = self
-            .inner
-            .take_decoded_samples()?
-            .expect("small-input recompress path requires materialized samples");
-        self.md5
-            .as_mut()
-            .expect("md5 state present")
-            .update_samples(&samples)?;
-        self.finish_verification()?;
-        let input_bytes_read = DecodePcmStream::input_bytes_processed(&self.inner);
-        Ok((
-            PcmStream { spec, samples },
-            self.expected_md5,
-            input_bytes_read,
-        ))
-    }
-
-    #[cfg(not(feature = "progress"))]
-    pub(super) fn into_verified_pcm_stream(mut self) -> Result<(PcmStream, [u8; 16])> {
-        let spec = self.spec();
-        let (samples, _frame_count) = self
-            .inner
-            .take_decoded_samples()?
-            .expect("small-input recompress path requires materialized samples");
-        self.md5
-            .as_mut()
-            .expect("md5 state present")
-            .update_samples(&samples)?;
-        self.finish_verification()?;
-        Ok((PcmStream { spec, samples }, self.expected_md5))
     }
 }
 

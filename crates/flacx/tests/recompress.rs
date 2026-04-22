@@ -79,12 +79,7 @@ impl StreamingOnlyRecompressStream {
     }
 
     #[cfg(not(feature = "progress"))]
-    fn new(
-        spec: PcmSpec,
-        stream_info: StreamInfo,
-        samples: Vec<i32>,
-        chunk_frames: usize,
-    ) -> Self {
+    fn new(spec: PcmSpec, stream_info: StreamInfo, samples: Vec<i32>, chunk_frames: usize) -> Self {
         Self {
             spec,
             stream_info,
