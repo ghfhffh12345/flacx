@@ -363,11 +363,6 @@ impl StreamingDecodeSession {
     pub(super) fn worker_count_for_tests(&self) -> usize {
         self.worker_count
     }
-
-    #[cfg(test)]
-    pub(super) fn uses_coordinator_thread_for_tests(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -611,16 +606,28 @@ mod tests {
 
         assert!(session.has_background_runtime());
         assert_eq!(session.worker_count_for_tests(), 2);
-        assert!(!session.uses_coordinator_thread_for_tests());
     }
 
     #[test]
-    fn streaming_session_submits_directly_to_worker_queues_without_coordinator() {
-        let session = StreamingDecodeSession::spawn(4, 8);
+    fn streaming_session_submit_reaches_worker_output_without_coordinator_dispatch() {
+        let (plans, channels) = fixture_plans(1);
+        let mut session = StreamingDecodeSession::spawn(1, 1);
+        let mut output = Vec::new();
 
-        assert!(session.has_background_runtime());
-        assert_eq!(session.worker_count_for_tests(), 4);
-        assert!(!session.uses_coordinator_thread_for_tests());
+        session.submit(plans.into_iter().next().unwrap()).unwrap();
+
+        assert_eq!(session.ready_slab_count(), 0);
+        assert_eq!(session.completed_input_frames(), 0);
+        assert!(session.wait_for_ready_slab().unwrap());
+        assert_eq!(session.ready_slab_count(), 1);
+
+        let (drained_frames, completed_input_frames) =
+            session.drain_into(usize::MAX, channels, &mut output);
+        assert!(drained_frames > 0);
+        assert_eq!(completed_input_frames, 1);
+        assert_eq!(session.completed_input_frames(), 1);
+        assert_eq!(session.ready_slab_count(), 0);
+        assert!(!output.is_empty());
     }
 
     #[test]

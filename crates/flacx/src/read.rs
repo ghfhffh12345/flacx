@@ -1038,22 +1038,69 @@ mod tests {
     }
 
     #[test]
-    fn read_chunk_drives_worker_submission_without_coordinator_backpressure_regression() {
-        let mut stream = direct_test_stream();
+    fn read_chunk_releases_backpressure_and_submits_queued_ready_chunks() {
+        let (stream_info, chunks) = fixture_ready_chunks(2);
+        let expected_frames = usize::try_from(stream_info.total_samples).unwrap();
+        let mut chunks = chunks.into_iter();
+        let mut stream = FlacPcmStream::builder(Cursor::new(Vec::<u8>::new()))
+            .stream_info(stream_info)
+            .build()
+            .unwrap();
+        let output_channels = usize::from(stream.spec.channels);
         let mut output = Vec::new();
 
-        let frames = stream.read_chunk(16, &mut output).unwrap();
+        stream.ensure_streaming_session();
+        stream
+            .session
+            .as_mut()
+            .unwrap()
+            .set_window_depth_limit(1);
 
-        assert!(frames > 0);
-        assert!(stream.completed_input_frames() <= stream.discovered_input_frames);
+        assert!(stream.submit_scanned_chunk(chunks.next().unwrap()).unwrap());
+        assert!(!stream.submit_scanned_chunk(chunks.next().unwrap()).unwrap());
+
+        let queued_before = stream.chunk_scanner.ready_chunk_count();
+        let completed_before = stream.completed_input_frames();
+
+        let frames = stream.read_chunk(expected_frames, &mut output).unwrap();
+
+        assert!(queued_before > 0);
+        assert_eq!(completed_before, 0);
+        assert_eq!(frames, expected_frames);
+        assert_eq!(output.len(), frames * output_channels);
+        assert_eq!(stream.chunk_scanner.ready_chunk_count(), 0);
     }
 
-    fn direct_test_stream() -> FlacPcmStream<Cursor<Vec<u8>>> {
+    fn fixture_ready_chunks(count: usize) -> (StreamInfo, Vec<super::chunk::CompressedDecodeChunk>) {
         let fixture_path = workspace_fixture_dir("test-flacs").join("case1/test01.flac");
         let bytes = std::fs::read(fixture_path).unwrap();
-        super::read_flac_reader(Cursor::new(bytes))
+        let (mut stream_info, _, frame_offset) =
+            super::metadata::parse_metadata(&bytes, false).unwrap();
+        let mut start_sample_number = 0u64;
+        let mut total_samples = 0u64;
+        let chunks = super::frame::index_frames(&bytes, frame_offset, stream_info)
             .unwrap()
-            .into_pcm_stream()
+            .into_iter()
+            .take(count)
+            .enumerate()
+            .map(|(sequence, frame)| {
+                let frame_bytes = bytes[frame.offset..frame.offset + frame.bytes_consumed].to_vec();
+                total_samples = total_samples.saturating_add(u64::from(frame.block_size));
+                let chunk = super::chunk::CompressedDecodeChunk {
+                    sequence,
+                    start_frame_index: sequence,
+                    start_sample_number,
+                    frame_block_sizes: vec![frame.block_size],
+                    frame_byte_lengths: vec![frame.bytes_consumed],
+                    bytes: Arc::from(frame_bytes),
+                };
+                start_sample_number =
+                    start_sample_number.saturating_add(u64::from(frame.block_size));
+                chunk
+            })
+            .collect();
+        stream_info.total_samples = total_samples;
+        (stream_info, chunks)
     }
 
     fn workspace_fixture_dir(name: &str) -> std::path::PathBuf {
