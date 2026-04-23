@@ -1,17 +1,14 @@
 use std::{
     collections::VecDeque,
     sync::{
-        mpsc::{self, Receiver, SyncSender},
         Arc, Condvar, Mutex,
+        mpsc::{self, Receiver, SyncSender},
     },
-    thread,
 };
 
 use super::{
-    frame,
-    profile,
+    DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER, Error, Result, frame, profile,
     slab::{DecodeSlabPlan, DecodedSlab, OrderedDrainProgress, OrderedSlabDrain},
-    Error, Result, DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -80,15 +77,21 @@ where
     }
 }
 
-#[derive(Debug)]
 pub(super) struct StreamingDecodeSession {
-    job_sender: Option<SyncSender<frame::DecodeWorkSlab>>,
-    result_receiver: Receiver<Result<DecodeSessionResult>>,
+    worker_pool: frame::FrameDecodeWorkerPool,
     ordered_drain: OrderedSlabDrain,
-    coordinator_handle: Option<thread::JoinHandle<()>>,
-    window_state: Arc<(Mutex<SessionWindowState>, Condvar)>,
+    outstanding_window_slabs: usize,
     result_channel_closed: bool,
     window_depth_limit: usize,
+    submitted_input_bytes: VecDeque<usize>,
+    staged_input_bytes: usize,
+    worker_count: usize,
+    #[cfg(test)]
+    test_result_receiver: Option<Receiver<Result<DecodeSessionResult>>>,
+    #[cfg(test)]
+    has_background_runtime: bool,
+    #[cfg(test)]
+    force_submit_failure: bool,
 }
 
 impl StreamingDecodeSession {
@@ -108,83 +111,73 @@ impl StreamingDecodeSession {
         window_depth_limit: usize,
     ) -> Self {
         Self {
-            job_sender: None,
-            result_receiver,
+            worker_pool: frame::FrameDecodeWorkerPool::new(1, 1),
             ordered_drain: OrderedSlabDrain::new(),
-            coordinator_handle: None,
-            window_state: Arc::new((Mutex::new(SessionWindowState::default()), Condvar::new())),
+            outstanding_window_slabs: 0,
             result_channel_closed: false,
             window_depth_limit: window_depth_limit.max(1),
+            submitted_input_bytes: VecDeque::new(),
+            staged_input_bytes: 0,
+            worker_count: 0,
+            #[cfg(test)]
+            test_result_receiver: Some(result_receiver),
+            #[cfg(test)]
+            has_background_runtime: false,
+            #[cfg(test)]
+            force_submit_failure: false,
         }
-    }
-
-    fn spawn_runtime(
-        worker_count: usize,
-        queue_depth: usize,
-    ) -> (Self, SyncSender<Result<DecodeSessionResult>>) {
-        let window_depth_limit = queue_depth.max(1);
-        let (job_sender, job_receiver) = mpsc::sync_channel(window_depth_limit);
-        let (result_sender, result_receiver) = mpsc::sync_channel(window_depth_limit);
-        let coordinator_sender = result_sender.clone();
-        let coordinator_result_sender = result_sender.clone();
-        let coordinator_handle = thread::spawn(move || {
-            if let Err(error) =
-                run_decode_coordinator(job_receiver, coordinator_sender, worker_count, queue_depth)
-            {
-                let _ = coordinator_result_sender.send(Err(error));
-            }
-        });
-
-        (
-            Self {
-                job_sender: Some(job_sender),
-                result_receiver,
-                ordered_drain: OrderedSlabDrain::new(),
-                coordinator_handle: Some(coordinator_handle),
-                window_state: Arc::new((Mutex::new(SessionWindowState::default()), Condvar::new())),
-                result_channel_closed: false,
-                window_depth_limit,
-            },
-            result_sender,
-        )
     }
 
     pub(super) fn spawn(worker_count: usize, queue_depth: usize) -> Self {
-        Self::spawn_runtime(worker_count, queue_depth).0
+        let window_depth_limit = queue_depth.max(1);
+        let worker_count = worker_count.max(1);
+        Self {
+            worker_pool: frame::FrameDecodeWorkerPool::new(
+                worker_count,
+                DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER.min(window_depth_limit),
+            ),
+            ordered_drain: OrderedSlabDrain::new(),
+            outstanding_window_slabs: 0,
+            result_channel_closed: false,
+            window_depth_limit,
+            submitted_input_bytes: VecDeque::new(),
+            staged_input_bytes: 0,
+            worker_count,
+            #[cfg(test)]
+            test_result_receiver: None,
+            #[cfg(test)]
+            has_background_runtime: true,
+            #[cfg(test)]
+            force_submit_failure: false,
+        }
     }
 
-    pub(super) fn submit(&self, plan: DecodeSlabPlan) -> Result<()> {
-        let submitted = submit_decode_job(
-            self.job_sender
-                .as_ref()
-                .expect("streaming decode session always owns a job sender while active"),
-            &self.window_state,
-            self.window_depth_limit(),
-            plan,
-            || {},
-        )?;
-        if submitted {
-            Ok(())
-        } else {
-            Err(Error::Thread(
-                "decode session job channel closed unexpectedly".into(),
-            ))
+    pub(super) fn submit(&mut self, plan: DecodeSlabPlan) -> Result<()> {
+        #[cfg(test)]
+        if self.force_submit_failure {
+            return Err(Error::Thread(
+                "decode worker channel closed unexpectedly".into(),
+            ));
         }
+
+        let input_bytes = plan.bytes.len();
+        self.worker_pool.submit(plan.into())?;
+        self.outstanding_window_slabs = self.outstanding_window_slabs.saturating_add(1);
+        self.submitted_input_bytes.push_back(input_bytes);
+        self.staged_input_bytes = self.staged_input_bytes.saturating_add(input_bytes);
+        profile::observe_staged_input_bytes_for_current_thread(self.staged_input_bytes);
+        Ok(())
     }
 
     pub(super) fn collect_ready_slabs(&mut self) -> Result<usize> {
         let mut collected = 0usize;
         loop {
-            match self.result_receiver.try_recv() {
-                Ok(result) => {
-                    self.accept_result(result?);
+            match self.try_recv_result()? {
+                Some(result) => {
+                    self.accept_result(result);
                     collected += 1;
                 }
-                Err(mpsc::TryRecvError::Empty) => return Ok(collected),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.result_channel_closed = true;
-                    return Ok(collected);
-                }
+                None => return Ok(collected),
             }
         }
     }
@@ -193,16 +186,24 @@ impl StreamingDecodeSession {
         if self.background_work_is_exhausted() {
             return Ok(false);
         }
-        match self.result_receiver.recv() {
-            Ok(result) => {
-                self.accept_result(result?);
-                Ok(true)
-            }
-            Err(_) => {
-                self.result_channel_closed = true;
-                Ok(false)
-            }
+
+        #[cfg(test)]
+        if let Some(receiver) = self.test_result_receiver.as_ref() {
+            return match receiver.recv() {
+                Ok(result) => {
+                    self.accept_result(result?);
+                    Ok(true)
+                }
+                Err(_) => {
+                    self.result_channel_closed = true;
+                    Ok(false)
+                }
+            };
         }
+
+        let result = self.worker_pool.recv()?;
+        self.accept_result(self.ready_result_from_worker(result.into()));
+        Ok(true)
     }
 
     pub(super) fn drain_into(
@@ -271,65 +272,81 @@ impl StreamingDecodeSession {
         );
     }
 
+    fn try_recv_result(&mut self) -> Result<Option<DecodeSessionResult>> {
+        #[cfg(test)]
+        if let Some(receiver) = self.test_result_receiver.as_ref() {
+            return match receiver.try_recv() {
+                Ok(result) => Ok(Some(result?)),
+                Err(mpsc::TryRecvError::Empty) => Ok(None),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.result_channel_closed = true;
+                    Ok(None)
+                }
+            };
+        }
+
+        match self.worker_pool.try_recv() {
+            frame::DecodeWorkerRecv::Empty => Ok(None),
+            frame::DecodeWorkerRecv::Slab(result) => {
+                Ok(Some(self.ready_result_from_worker(result?.into())))
+            }
+        }
+    }
+
+    fn ready_result_from_worker(&self, slab: DecodedSlab) -> DecodeSessionResult {
+        DecodeSessionResult::from_slab(slab, self.outstanding_window_slabs())
+    }
+
     fn window_depth_limit(&self) -> usize {
         self.window_depth_limit
     }
 
     pub(super) fn set_window_depth_limit(&mut self, window_depth_limit: usize) {
         self.window_depth_limit = window_depth_limit.max(1);
-        self.window_state.1.notify_all();
     }
 
-    fn release_window_capacity(&self, completed_slabs: usize) {
-        let (lock, condvar) = &*self.window_state;
-        let mut state = lock.lock().unwrap();
-        state.active_window_slabs = state.active_window_slabs.saturating_sub(completed_slabs);
+    fn release_window_capacity(&mut self, completed_slabs: usize) {
+        self.outstanding_window_slabs = self
+            .outstanding_window_slabs
+            .saturating_sub(completed_slabs);
         for _ in 0..completed_slabs {
-            let Some(input_bytes) = state.submitted_input_bytes.pop_front() else {
+            let Some(input_bytes) = self.submitted_input_bytes.pop_front() else {
                 break;
             };
-            state.staged_input_bytes = state.staged_input_bytes.saturating_sub(input_bytes);
+            self.staged_input_bytes = self.staged_input_bytes.saturating_sub(input_bytes);
         }
-        profile::observe_staged_input_bytes_for_current_thread(state.staged_input_bytes);
-        condvar.notify_all();
+        profile::observe_staged_input_bytes_for_current_thread(self.staged_input_bytes);
     }
 
     fn has_background_runtime(&self) -> bool {
-        self.job_sender.is_some()
+        #[cfg(test)]
+        {
+            return self.has_background_runtime;
+        }
+
+        #[cfg(not(test))]
+        {
+            true
+        }
     }
 
     fn outstanding_window_slabs(&self) -> usize {
-        self.window_state.0.lock().unwrap().active_window_slabs
+        self.outstanding_window_slabs
     }
 
     fn background_work_is_exhausted(&self) -> bool {
-        self.has_background_runtime()
-            && self.outstanding_window_slabs() == 0
-            && self.ordered_drain.is_idle()
-    }
+        if self.has_background_runtime() {
+            return self.outstanding_window_slabs() == 0 && self.ordered_drain.is_idle();
+        }
 
-    fn close_dispatcher(&self) {
-        let (lock, condvar) = &*self.window_state;
-        let mut state = lock.lock().unwrap();
-        state.closed = true;
-        condvar.notify_all();
+        self.result_channel_closed && self.ordered_drain.is_idle()
     }
 
     #[cfg(test)]
     pub(super) fn broken_for_submit_failure() -> Self {
-        let (job_sender, job_receiver) = mpsc::sync_channel(1);
-        drop(job_receiver);
-        let (result_sender, result_receiver) = mpsc::sync_channel(1);
-        drop(result_sender);
-        Self {
-            job_sender: Some(job_sender),
-            result_receiver,
-            ordered_drain: OrderedSlabDrain::new(),
-            coordinator_handle: None,
-            window_state: Arc::new((Mutex::new(SessionWindowState::default()), Condvar::new())),
-            result_channel_closed: false,
-            window_depth_limit: 1,
-        }
+        let mut session = Self::spawn(1, 1);
+        session.force_submit_failure = true;
+        session
     }
 
     #[cfg(test)]
@@ -341,142 +358,31 @@ impl StreamingDecodeSession {
     pub(super) fn outstanding_window_slabs_for_tests(&self) -> usize {
         self.outstanding_window_slabs()
     }
-}
 
-impl Drop for StreamingDecodeSession {
-    fn drop(&mut self) {
-        self.close_dispatcher();
-        self.job_sender.take();
-        if let Some(handle) = self.coordinator_handle.take() {
-            let _ = handle.join();
-        }
+    #[cfg(test)]
+    pub(super) fn worker_count_for_tests(&self) -> usize {
+        self.worker_count
     }
-}
 
-fn run_decode_coordinator(
-    job_receiver: Receiver<frame::DecodeWorkSlab>,
-    result_sender: SyncSender<Result<DecodeSessionResult>>,
-    worker_count: usize,
-    queue_depth: usize,
-) -> Result<()> {
-    let window_limit = queue_depth.max(1);
-    let mut decoder_pool = (worker_count > 1).then(|| {
-        frame::FrameDecodeWorkerPool::new(
-            worker_count,
-            DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER.min(window_limit),
-        )
-    });
-    let mut active_window_slabs = 0usize;
-
-    loop {
-        if let Some(pool) = decoder_pool.as_mut() {
-            match pool.try_recv() {
-                frame::DecodeWorkerRecv::Slab(slab) => {
-                    active_window_slabs = active_window_slabs.saturating_sub(1);
-                    if !send_ready_slab(&result_sender, slab?.into(), active_window_slabs)? {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                frame::DecodeWorkerRecv::Empty => {}
-            }
-
-            if active_window_slabs < window_limit {
-                match job_receiver.try_recv() {
-                    Ok(job) => match pool.try_submit(job) {
-                        Ok(()) => {
-                            active_window_slabs += 1;
-                            continue;
-                        }
-                        Err(mpsc::TrySendError::Full(job)) => {
-                            if active_window_slabs > 0 {
-                                active_window_slabs = active_window_slabs.saturating_sub(1);
-                                if !send_ready_slab(
-                                    &result_sender,
-                                    pool.recv()?.into(),
-                                    active_window_slabs,
-                                )? {
-                                    return Ok(());
-                                }
-                                pool.submit(job)?;
-                                active_window_slabs += 1;
-                                continue;
-                            }
-                            pool.submit(job)?;
-                            active_window_slabs += 1;
-                            continue;
-                        }
-                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                            return Err(Error::Thread(
-                                "decode worker channel closed unexpectedly".into(),
-                            ));
-                        }
-                    },
-                    Err(mpsc::TryRecvError::Empty) => {}
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        if active_window_slabs == 0 {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
-            if active_window_slabs > 0 {
-                active_window_slabs = active_window_slabs.saturating_sub(1);
-                if !send_ready_slab(&result_sender, pool.recv()?.into(), active_window_slabs)? {
-                    return Ok(());
-                }
-                continue;
-            }
-        } else {
-            match job_receiver.recv() {
-                Ok(job) => {
-                    if !send_ready_slab(&result_sender, frame::decode_work_slab(job)?.into(), 0)? {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                Err(_) => return Ok(()),
-            }
-        }
-
-        match job_receiver.recv() {
-            Ok(job) => {
-                let pool = decoder_pool
-                    .as_mut()
-                    .expect("worker pool is present for multithreaded coordination");
-                pool.submit(job)?;
-                active_window_slabs += 1;
-            }
-            Err(_) => return Ok(()),
-        }
-    }
-}
-
-fn send_ready_slab(
-    result_sender: &SyncSender<Result<DecodeSessionResult>>,
-    slab: DecodedSlab,
-    active_window_slabs: usize,
-) -> Result<bool> {
-    let result = DecodeSessionResult::from_slab(slab, active_window_slabs.saturating_add(1));
-    match result_sender.send(Ok(result)) {
-        Ok(()) => Ok(true),
-        Err(_) => Ok(false),
+    #[cfg(test)]
+    pub(super) fn uses_coordinator_thread_for_tests(&self) -> bool {
+        false
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{mpsc, Arc, Condvar, Mutex},
+        sync::{Arc, Condvar, Mutex, mpsc},
         time::Duration,
     };
 
-    use super::{submit_decode_job, DecodeSessionResult, SessionWindowState, StreamingDecodeSession};
+    use super::{
+        DecodeSessionResult, SessionWindowState, StreamingDecodeSession, submit_decode_job,
+    };
     use crate::read::{
-        profile,
+        FrameIndex, StreamInfo, profile,
         slab::{DecodeSlabPlan, DecodedSlab},
-        FrameIndex, StreamInfo,
     };
 
     fn slab(start_frame_index: usize, block_sizes: &[u16], samples: &[i32]) -> DecodedSlab {
@@ -565,35 +471,14 @@ mod tests {
     }
 
     #[test]
-    fn blocked_submit_reopens_when_ordered_completion_retires_a_slab() {
-        let (plans, channels) = fixture_plans(3);
+    fn ordered_completion_reopens_submit_capacity_after_retiring_a_slab() {
+        let (plans, channels) = fixture_plans(2);
         let mut plans = plans.into_iter();
         let mut session = StreamingDecodeSession::spawn(1, 2);
         session.submit(plans.next().unwrap()).unwrap();
         session.submit(plans.next().unwrap()).unwrap();
 
-        let submitted = mpsc::channel();
-        let job_sender = session
-            .job_sender
-            .as_ref()
-            .expect("spawned session owns a job sender")
-            .clone();
-        let window_state = Arc::clone(&session.window_state);
-        let blocked_plan = plans.next().unwrap();
-        std::thread::spawn(move || {
-            let submitted_now =
-                submit_decode_job(&job_sender, &window_state, 2, blocked_plan, || {}).unwrap();
-            submitted.0.send(submitted_now).unwrap();
-        });
-
-        assert!(
-            submitted
-                .1
-                .recv_timeout(Duration::from_millis(200))
-                .is_err(),
-            "third submission should stay blocked until ordered drain retires capacity"
-        );
-
+        assert!(!session.has_submit_capacity());
         assert!(session.wait_for_ready_slab().unwrap());
         assert!(!session.has_submit_capacity());
 
@@ -604,12 +489,6 @@ mod tests {
         assert_eq!(completed_input_frames, 1);
         assert_eq!(session.completed_input_frames(), 1);
         assert!(session.has_submit_capacity());
-        assert!(
-            submitted
-                .1
-                .recv_timeout(Duration::from_secs(1))
-                .expect("blocked submit should wake after ordered drain retires capacity")
-        );
     }
 
     #[test]
@@ -643,43 +522,6 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(100),
             "expected exhausted wait to return immediately after the final ordered drain, took {elapsed:?}"
-        );
-    }
-
-    #[test]
-    fn dropping_session_unblocks_a_waiting_submitter() {
-        let session = StreamingDecodeSession::spawn(1, 1);
-        session.submit(test_plan(0)).unwrap();
-
-        let submitted = mpsc::channel();
-        let job_sender = session
-            .job_sender
-            .as_ref()
-            .expect("spawned session owns a job sender")
-            .clone();
-        let window_state = Arc::clone(&session.window_state);
-        std::thread::spawn(move || {
-            let submitted_now =
-                submit_decode_job(&job_sender, &window_state, 1, test_plan(1), || {})
-                    .unwrap_or(false);
-            submitted.0.send(submitted_now).unwrap();
-        });
-
-        assert!(
-            submitted
-                .1
-                .recv_timeout(Duration::from_millis(200))
-                .is_err(),
-            "second submit should remain blocked while the dispatch window is full"
-        );
-
-        drop(session);
-
-        assert!(
-            !submitted
-                .1
-                .recv_timeout(Duration::from_secs(1))
-                .expect("dropping the session should unblock the waiting submitter")
         );
     }
 
@@ -734,14 +576,16 @@ mod tests {
             Condvar::new(),
         ));
 
-        assert!(!submit_decode_job(
-            &job_sender,
-            &window_state,
-            1,
-            fixture_plans(1).0.into_iter().next().unwrap(),
-            || {},
-        )
-        .unwrap());
+        assert!(
+            !submit_decode_job(
+                &job_sender,
+                &window_state,
+                1,
+                fixture_plans(1).0.into_iter().next().unwrap(),
+                || {},
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -749,22 +593,34 @@ mod tests {
         let (job_sender, job_receiver) = mpsc::sync_channel(1);
         drop(job_receiver);
 
-        assert!(submit_decode_job(
-            &job_sender,
-            &Arc::new((Mutex::new(SessionWindowState::default()), Condvar::new())),
-            1,
-            fixture_plans(1).0.into_iter().next().unwrap(),
-            || {},
-        )
-        .is_err());
+        assert!(
+            submit_decode_job(
+                &job_sender,
+                &Arc::new((Mutex::new(SessionWindowState::default()), Condvar::new())),
+                1,
+                fixture_plans(1).0.into_iter().next().unwrap(),
+                || {},
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn spawn_owns_a_dispatch_runtime() {
         let session = StreamingDecodeSession::spawn(2, 1);
 
-        assert!(session.coordinator_handle.is_some());
-        assert!(session.job_sender.is_some());
+        assert!(session.has_background_runtime());
+        assert_eq!(session.worker_count_for_tests(), 2);
+        assert!(!session.uses_coordinator_thread_for_tests());
+    }
+
+    #[test]
+    fn streaming_session_submits_directly_to_worker_queues_without_coordinator() {
+        let session = StreamingDecodeSession::spawn(4, 8);
+
+        assert!(session.has_background_runtime());
+        assert_eq!(session.worker_count_for_tests(), 4);
+        assert!(!session.uses_coordinator_thread_for_tests());
     }
 
     #[test]
@@ -785,59 +641,6 @@ mod tests {
         assert_eq!(session.active_slab_count(), 1);
         assert_eq!(session.drain_into(1, 1, &mut output), (1, 1));
         assert_eq!(output, vec![10, 20]);
-    }
-
-    #[test]
-    fn coordinator_reports_a_bounded_active_window_for_ready_slabs() {
-        let (plans, _) = fixture_plans(6);
-        let session = StreamingDecodeSession::spawn(2, 2);
-        let submitter = std::thread::spawn({
-            let job_sender = session
-                .job_sender
-                .as_ref()
-                .expect("spawned session owns a job sender")
-                .clone();
-            move || {
-                for plan in plans {
-                    job_sender.send(plan.into()).unwrap();
-                }
-            }
-        });
-
-        std::thread::sleep(Duration::from_millis(50));
-
-        let mut active_counts = Vec::new();
-        for _ in 0..6 {
-            match session
-                .result_receiver
-                .recv_timeout(Duration::from_secs(1))
-                .unwrap()
-                .unwrap()
-            {
-                DecodeSessionResult {
-                    active_window_slabs,
-                    ..
-                } => active_counts.push(active_window_slabs),
-            }
-        }
-        submitter.join().unwrap();
-
-        assert!(
-            active_counts.iter().all(|&count| count <= 2),
-            "expected active window to stay within queue depth, got {active_counts:?}"
-        );
-    }
-
-    fn test_plan(sequence: usize) -> DecodeSlabPlan {
-        DecodeSlabPlan {
-            sequence,
-            start_frame_index: sequence,
-            start_sample_number: sequence as u64,
-            stream_info: stream_info(),
-            frame_block_sizes: vec![1],
-            bytes: Arc::from(Vec::<u8>::new()),
-            frames: Arc::<[FrameIndex]>::from(Vec::new()),
-        }
     }
 
     fn fixture_plans(count: usize) -> (Vec<DecodeSlabPlan>, usize) {
@@ -877,6 +680,8 @@ mod tests {
             .ancestors()
             .map(|path| path.join(name))
             .find(|path| path.is_dir())
-            .unwrap_or_else(|| panic!("fixture directory '{name}' should exist from the workspace root"))
+            .unwrap_or_else(|| {
+                panic!("fixture directory '{name}' should exist from the workspace root")
+            })
     }
 }

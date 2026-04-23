@@ -576,7 +576,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             frames: Arc::from(Vec::<FrameIndex>::new()),
         };
         self.session
-            .as_ref()
+            .as_mut()
             .expect("streaming decode session is available before chunk submission")
             .submit(plan)?;
         self.submitted_frame_byte_lengths
@@ -869,7 +869,9 @@ mod tests {
     };
     use super::metadata::requires_channel_layout_provenance;
     use super::{FlacPcmStream, StreamInfo};
+    use crate::input::EncodePcmStream;
     use crate::model::ChannelAssignment;
+    use crate::read::DecodePcmStream;
     use std::io::Cursor;
 
     #[test]
@@ -1035,4 +1037,32 @@ mod tests {
         assert!(stream.submitted_frame_byte_lengths.is_empty());
     }
 
+    #[test]
+    fn read_chunk_drives_worker_submission_without_coordinator_backpressure_regression() {
+        let mut stream = direct_test_stream();
+        let mut output = Vec::new();
+
+        let frames = stream.read_chunk(16, &mut output).unwrap();
+
+        assert!(frames > 0);
+        assert!(stream.completed_input_frames() <= stream.discovered_input_frames);
+    }
+
+    fn direct_test_stream() -> FlacPcmStream<Cursor<Vec<u8>>> {
+        let fixture_path = workspace_fixture_dir("test-flacs").join("case1/test01.flac");
+        let bytes = std::fs::read(fixture_path).unwrap();
+        super::read_flac_reader(Cursor::new(bytes))
+            .unwrap()
+            .into_pcm_stream()
+    }
+
+    fn workspace_fixture_dir(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .map(|path| path.join(name))
+            .find(|path| path.is_dir())
+            .unwrap_or_else(|| {
+                panic!("fixture directory '{name}' should exist from the workspace root")
+            })
+    }
 }
