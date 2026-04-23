@@ -1078,6 +1078,7 @@ pub fn read_flac_reader_with_options<R: Read + Seek>(
     })
 }
 
+mod chunk;
 mod frame;
 mod index;
 mod metadata;
