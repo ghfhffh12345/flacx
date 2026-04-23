@@ -70,7 +70,7 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
             .field("drained_pcm_frames", &self.drained_pcm_frames)
             .field("threads", &self.threads)
             .field("buffered_input_bytes", &self.chunk_scanner.buffered_bytes_len())
-            .field("queued_chunk_count", &self.ready_chunks.len())
+            .field("queued_chunk_count", &self.chunk_scanner.ready_chunk_count())
             .field(
                 "ready_slab_count",
                 &self
@@ -278,7 +278,6 @@ pub struct FlacPcmStream<R> {
     threads: usize,
     reader: R,
     chunk_scanner: chunk::ChunkScanner,
-    ready_chunks: VecDeque<chunk::CompressedDecodeChunk>,
     submitted_frame_byte_lengths: VecDeque<usize>,
     session: Option<session::StreamingDecodeSession>,
     eof: bool,
@@ -315,7 +314,6 @@ impl<R: Read + Seek> FlacPcmStream<R> {
                     max_bytes_per_chunk: decode_slab_max_input_bytes(stream_info),
                 },
             ),
-            ready_chunks: VecDeque::new(),
             submitted_frame_byte_lengths: VecDeque::new(),
             session: None,
             eof: false,
@@ -447,7 +445,15 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         ));
     }
 
-    fn push_scanned_chunk(&mut self, chunk: chunk::CompressedDecodeChunk) {
+    fn submit_scanned_chunk(&mut self, chunk: chunk::CompressedDecodeChunk) -> Result<bool> {
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|session| !session.has_submit_capacity())
+        {
+            self.chunk_scanner.requeue_ready_chunk_front(chunk);
+            return Ok(false);
+        }
         self.discovered_input_frames = self
             .discovered_input_frames
             .saturating_add(chunk.frame_block_sizes.len());
@@ -457,16 +463,26 @@ impl<R: Read + Seek> FlacPcmStream<R> {
                 .map(|&block_size| u64::from(block_size))
                 .sum::<u64>(),
         );
-        self.ready_chunks.push_back(chunk);
+        self.submit_chunk(chunk)?;
+        Ok(true)
     }
 
-    fn buffer_scanner_step(&mut self, step: chunk::ChunkStep) {
+    fn dispatch_scanner_step(&mut self, step: chunk::ChunkStep) -> Result<bool> {
+        let mut dispatched_any = false;
         if let chunk::ChunkStep::Sealed(chunk) = step {
-            self.push_scanned_chunk(chunk);
+            dispatched_any |= self.submit_scanned_chunk(chunk)?;
         }
-        while let Some(chunk) = self.chunk_scanner.take_ready_chunk() {
-            self.push_scanned_chunk(chunk);
+        while self
+            .session
+            .as_ref()
+            .is_some_and(session::StreamingDecodeSession::has_submit_capacity)
+        {
+            let Some(chunk) = self.chunk_scanner.take_ready_chunk() else {
+                break;
+            };
+            dispatched_any |= self.submit_scanned_chunk(chunk)?;
         }
+        Ok(dispatched_any)
     }
 
     fn read_next_input_chunk(&mut self) -> Result<bool> {
@@ -476,8 +492,8 @@ impl<R: Read + Seek> FlacPcmStream<R> {
 
         if self.eof {
             let step = self.chunk_scanner.finish()?;
-            self.buffer_scanner_step(step);
-            return Ok(!self.ready_chunks.is_empty());
+            let dispatched = self.dispatch_scanner_step(step)?;
+            return Ok(dispatched || self.chunk_scanner.ready_chunk_count() > 0);
         }
 
         let mut chunk = vec![0u8; FLAC_READ_CHUNK_SIZE];
@@ -485,13 +501,13 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             Ok(0) => {
                 self.eof = true;
                 let step = self.chunk_scanner.finish()?;
-                self.buffer_scanner_step(step);
-                Ok(!self.ready_chunks.is_empty())
+                let dispatched = self.dispatch_scanner_step(step)?;
+                Ok(dispatched || self.chunk_scanner.ready_chunk_count() > 0)
             }
             Ok(read) => {
                 chunk.truncate(read);
                 let step = self.chunk_scanner.push_bytes(&chunk)?;
-                self.buffer_scanner_step(step);
+                let _ = self.dispatch_scanner_step(step)?;
                 Ok(true)
             }
             Err(error) => Err(error.into()),
@@ -538,20 +554,8 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         drained_frames
     }
 
-    fn submit_ready_chunks(&mut self) -> Result<bool> {
-        let mut submitted_any = false;
-        while self
-            .session
-            .as_ref()
-            .is_some_and(session::StreamingDecodeSession::has_submit_capacity)
-        {
-            let Some(chunk) = self.ready_chunks.pop_front() else {
-                break;
-            };
-            self.submit_chunk(chunk)?;
-            submitted_any = true;
-        }
-        Ok(submitted_any)
+    fn submit_scanner_ready_chunks(&mut self) -> Result<bool> {
+        self.dispatch_scanner_step(chunk::ChunkStep::Pending)
     }
 
     fn submit_chunk(&mut self, chunk: chunk::CompressedDecodeChunk) -> Result<()> {
@@ -575,7 +579,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
 
     fn decode_is_exhausted(&self) -> bool {
         self.discovered_sample_number >= self.spec.total_samples
-            && self.ready_chunks.is_empty()
+            && self.chunk_scanner.ready_chunk_count() == 0
             && self.drained_pcm_frames >= self.spec.total_samples
             && self
                 .session
@@ -586,7 +590,7 @@ impl<R: Read + Seek> FlacPcmStream<R> {
     fn decode_is_stalled_at_eof(&self) -> bool {
         self.eof
             && self.chunk_scanner.is_finished()
-            && self.ready_chunks.is_empty()
+            && self.chunk_scanner.ready_chunk_count() == 0
             && self
                 .session
                 .as_ref()
@@ -604,6 +608,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             self.threads.max(1),
             self.active_decode_window_limit(),
             DECODE_SLAB_TARGET_PCM_FRAMES,
+            decode_slab_max_input_bytes(self.stream_info),
         );
         if max_frames == 0 {
             return Ok(0);
@@ -626,7 +631,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
                 break;
             }
 
-            if self.submit_ready_chunks()? {
+            if self.submit_scanner_ready_chunks()? {
                 continue;
             }
 

@@ -27,17 +27,24 @@ pub(crate) struct DecodeProfileSummary {
     pub(crate) worker_count: usize,
     pub(crate) queue_limit: usize,
     pub(crate) target_pcm_frames: usize,
+    pub(crate) max_input_bytes_per_chunk: usize,
     pub(crate) peak_active_window_slabs: usize,
     pub(crate) peak_resident_pcm_frames: usize,
     pub(crate) peak_staged_input_bytes: usize,
 }
 
 impl DecodeProfileSummary {
-    pub(crate) fn new(worker_count: usize, queue_limit: usize, target_pcm_frames: usize) -> Self {
+    pub(crate) fn new(
+        worker_count: usize,
+        queue_limit: usize,
+        target_pcm_frames: usize,
+        max_input_bytes_per_chunk: usize,
+    ) -> Self {
         Self {
             worker_count,
             queue_limit,
             target_pcm_frames,
+            max_input_bytes_per_chunk,
             ..Self::default()
         }
     }
@@ -67,6 +74,7 @@ pub(crate) fn begin_decode_profile_session_for_current_thread(
     worker_count: usize,
     queue_limit: usize,
     target_pcm_frames: usize,
+    max_input_bytes_per_chunk: usize,
 ) {
     if active_decode_profile_path().is_none() {
         clear_decode_profile_session_for_current_thread();
@@ -82,6 +90,7 @@ pub(crate) fn begin_decode_profile_session_for_current_thread(
                         worker_count,
                         queue_limit,
                         target_pcm_frames,
+                        max_input_bytes_per_chunk,
                     ),
                     resident_pcm_frames: 0,
                     handed_out_pcm_frames: 0,
@@ -172,7 +181,7 @@ pub(crate) fn append_decode_session_summary(
     };
     let _ = writeln!(
         file,
-        "event=decode_session_summary\tworker_count={}\tqueue_limit={}\tpeak_active_window_slabs={}\tpeak_inflight_packets={}\tpeak_resident_pcm_frames={}\tpeak_inflight_pcm_frames={}\tpeak_staged_input_bytes={}\ttarget_pcm_frames={}",
+        "event=decode_session_summary\tworker_count={}\tqueue_limit={}\tpeak_active_window_slabs={}\tpeak_inflight_packets={}\tpeak_resident_pcm_frames={}\tpeak_inflight_pcm_frames={}\tpeak_staged_input_bytes={}\ttarget_pcm_frames={}\tmax_input_bytes_per_chunk={}",
         profile.worker_count,
         profile.queue_limit,
         profile.peak_active_window_slabs,
@@ -181,6 +190,7 @@ pub(crate) fn append_decode_session_summary(
         profile.peak_resident_pcm_frames,
         profile.peak_staged_input_bytes,
         profile.target_pcm_frames,
+        profile.max_input_bytes_per_chunk,
     );
 }
 

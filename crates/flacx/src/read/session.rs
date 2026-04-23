@@ -689,7 +689,7 @@ mod tests {
                 .as_nanos()
         ));
         profile::set_decode_profile_path_for_current_thread(Some(profile_path.clone()));
-        profile::begin_decode_profile_session_for_current_thread(1, 1, 16);
+        profile::begin_decode_profile_session_for_current_thread(1, 1, 16, plan.bytes.len());
 
         let mut session = StreamingDecodeSession::spawn(1, 1);
         session.submit(plan).unwrap();

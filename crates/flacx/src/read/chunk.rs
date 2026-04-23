@@ -97,6 +97,14 @@ impl ChunkScanner {
         self.ready_chunks.pop_front()
     }
 
+    pub(super) fn requeue_ready_chunk_front(&mut self, chunk: CompressedDecodeChunk) {
+        self.ready_chunks.push_front(chunk);
+    }
+
+    pub(super) fn ready_chunk_count(&self) -> usize {
+        self.ready_chunks.len()
+    }
+
     pub(super) fn buffered_bytes_len(&self) -> usize {
         self.buffered_bytes.len()
     }

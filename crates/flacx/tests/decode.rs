@@ -783,7 +783,7 @@ fn streaming_decode_session_reports_bounded_slab_residency_for_small_writer_chun
 fn real_reader_decode_uses_dispatcher_backed_session_across_thread_counts() {
     let flac = large_streaming_decode_flac_bytes(4);
     let expected_wav = large_streaming_decode_wav_bytes();
-    for threads in [1, 4] {
+    for threads in [1, 4, 8] {
         let profile = DecodeProfileGuard::new();
         let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
         let mut output = Cursor::new(Vec::new());
@@ -838,14 +838,10 @@ fn dispatcher_backed_decode_stops_after_declared_samples_before_physical_eof() {
 #[cfg(feature = "progress")]
 #[test]
 fn real_reader_dispatcher_overlaps_and_stays_window_bounded() {
-    const DECODE_SLAB_MAX_INPUT_FRAMES: usize = 256;
-    const DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK: usize = 64 * 1024 * 4;
-
     let profile = DecodeProfileGuard::new();
     let flac = large_streaming_decode_flac_bytes(4);
     let expected_wav = large_streaming_decode_wav_bytes();
     let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
-    let stream_info = reader.stream_info();
     let mut output = Cursor::new(Vec::new());
     let mut progress = Vec::new();
     let mut decoder = DecodeConfig::default()
@@ -861,17 +857,12 @@ fn real_reader_dispatcher_overlaps_and_stays_window_bounded() {
     let profile_summary = profile.summary();
     let queue_limit = *profile_summary.get("queue_limit").unwrap();
     let peak_active_window_slabs = *profile_summary.get("peak_active_window_slabs").unwrap();
+    let peak_resident_pcm_frames = *profile_summary.get("peak_resident_pcm_frames").unwrap();
     let peak_staged_input_bytes = *profile_summary.get("peak_staged_input_bytes").unwrap();
-    let advertised_max_frame_size =
-        usize::try_from(stream_info.max_frame_size).unwrap_or(usize::MAX);
-    let max_bytes_per_slab = if advertised_max_frame_size == 0 {
-        DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK
-    } else {
-        advertised_max_frame_size
-            .saturating_mul(DECODE_SLAB_MAX_INPUT_FRAMES)
-            .max(DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK)
-    };
-    let staged_input_bound = queue_limit.saturating_mul(max_bytes_per_slab);
+    let target_pcm_frames = *profile_summary.get("target_pcm_frames").unwrap();
+    let max_input_bytes_per_chunk = *profile_summary.get("max_input_bytes_per_chunk").unwrap();
+    let staged_input_bound = queue_limit.saturating_mul(max_input_bytes_per_chunk);
+    let resident_pcm_bound = queue_limit.saturating_mul(target_pcm_frames);
 
     assert_eq!(
         summary.total_samples,
@@ -891,8 +882,16 @@ fn real_reader_dispatcher_overlaps_and_stays_window_bounded() {
         "real-reader decode should stage dispatcher-submitted input bytes while ordered output is still draining"
     );
     assert!(
+        peak_resident_pcm_frames > 0,
+        "real-reader decode should keep resident pcm output while ordered output is draining"
+    );
+    assert!(
+        peak_resident_pcm_frames <= resident_pcm_bound,
+        "real-reader decode should keep resident pcm frames bounded by the decode window: peak_resident_pcm_frames={peak_resident_pcm_frames}, queue_limit={queue_limit}, target_pcm_frames={target_pcm_frames}, resident_pcm_bound={resident_pcm_bound}"
+    );
+    assert!(
         peak_staged_input_bytes <= staged_input_bound,
-        "real-reader decode should keep dispatcher-submitted input bounded by the decode window: peak_staged_input_bytes={peak_staged_input_bytes}, queue_limit={queue_limit}, max_bytes_per_slab={max_bytes_per_slab}, staged_input_bound={staged_input_bound}"
+        "real-reader decode should keep dispatcher-submitted input bounded by the decode window: peak_staged_input_bytes={peak_staged_input_bytes}, queue_limit={queue_limit}, max_input_bytes_per_chunk={max_input_bytes_per_chunk}, staged_input_bound={staged_input_bound}"
     );
 }
 
