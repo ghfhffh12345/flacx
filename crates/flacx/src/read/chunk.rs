@@ -1,7 +1,6 @@
 use std::{
     collections::VecDeque,
     io::{Cursor, Read},
-    ops::Range,
 };
 
 use bitstream_io::{BigEndian, BitRead, BitReader};
@@ -25,15 +24,240 @@ pub(super) struct ChunkScannerConfig {
 pub(super) struct CompressedDecodeChunk {
     pub(super) sequence: usize,
     pub(super) start_frame_index: usize,
+    pub(super) start_sample_number: u64,
     pub(super) frame_block_sizes: Vec<u16>,
-    pub(super) byte_range: Range<usize>,
+    pub(super) bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ChunkStep {
-    NeedMoreInput,
-    Chunk(CompressedDecodeChunk),
-    Finished,
+    Pending,
+    Sealed(CompressedDecodeChunk),
+}
+
+#[derive(Debug)]
+pub(super) struct ChunkScanner {
+    stream_info: StreamInfo,
+    config: ChunkScannerConfig,
+    buffered_bytes: Vec<u8>,
+    current_frame: Option<ScannedFrame>,
+    pending_chunk: PendingChunk,
+    ready_chunks: VecDeque<CompressedDecodeChunk>,
+    next_sequence: usize,
+    next_frame_index: usize,
+    next_sample_number: u64,
+    finished: bool,
+}
+
+impl ChunkScanner {
+    pub(super) fn new(stream_info: StreamInfo, config: ChunkScannerConfig) -> Self {
+        Self {
+            stream_info,
+            config,
+            buffered_bytes: Vec::new(),
+            current_frame: None,
+            pending_chunk: PendingChunk::default(),
+            ready_chunks: VecDeque::new(),
+            next_sequence: 0,
+            next_frame_index: 0,
+            next_sample_number: 0,
+            finished: false,
+        }
+    }
+
+    pub(super) fn push_bytes(&mut self, bytes: &[u8]) -> Result<ChunkStep> {
+        if let Some(chunk) = self.ready_chunks.pop_front() {
+            return Ok(ChunkStep::Sealed(chunk));
+        }
+        if self.finished {
+            return Ok(ChunkStep::Pending);
+        }
+        self.buffered_bytes.extend_from_slice(bytes);
+        self.scan_available_frames(false)
+    }
+
+    pub(super) fn finish(&mut self) -> Result<ChunkStep> {
+        if let Some(chunk) = self.ready_chunks.pop_front() {
+            return Ok(ChunkStep::Sealed(chunk));
+        }
+        if self.finished {
+            return Ok(ChunkStep::Pending);
+        }
+        let step = self.scan_available_frames(true)?;
+        if matches!(step, ChunkStep::Pending) {
+            self.finished = true;
+        }
+        Ok(step)
+    }
+
+    fn scan_available_frames(&mut self, eof: bool) -> Result<ChunkStep> {
+        loop {
+            if let Some(chunk) = self.ready_chunks.pop_front() {
+                return Ok(ChunkStep::Sealed(chunk));
+            }
+
+            if self.current_frame.is_none() {
+                if self.buffered_bytes.is_empty() {
+                    return Ok(self.finish_or_pending(eof));
+                }
+
+                match parse_frame_header(
+                    &self.buffered_bytes,
+                    self.stream_info,
+                    self.next_frame_index as u64,
+                    self.next_sample_number,
+                ) {
+                    Ok(parsed) => {
+                        self.current_frame = Some(ScannedFrame {
+                            start_offset: 0,
+                            parsed,
+                        });
+                    }
+                    Err(error) if is_incomplete_header(&error) && !eof => {
+                        return Ok(ChunkStep::Pending);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            if self.should_seal_before_scanning_current_frame() {
+                let chunk = self
+                    .seal_pending_chunk()
+                    .expect("pending chunk exists before scanning the next frame");
+                self.ready_chunks.push_back(chunk);
+                continue;
+            }
+
+            let current = self
+                .current_frame
+                .expect("scanner populates the current frame before boundary search");
+            let next = find_next_frame_start(
+                &self.buffered_bytes,
+                current.start_offset + current.parsed.header_bytes_consumed,
+                self.stream_info,
+                self.next_frame_index as u64 + 1,
+                self.next_sample_number + u64::from(current.parsed.block_size),
+            )?;
+
+            if let Some(next_frame) = next {
+                self.current_frame = Some(next_frame);
+                self.accept_frame(current, next_frame.start_offset);
+                continue;
+            }
+
+            if eof {
+                self.current_frame = None;
+                self.accept_frame(current, self.buffered_bytes.len());
+                return Ok(self.finish_or_pending(true));
+            }
+
+            return Ok(ChunkStep::Pending);
+        }
+    }
+
+    fn finish_or_pending(&mut self, eof: bool) -> ChunkStep {
+        if let Some(chunk) = self.ready_chunks.pop_front() {
+            return ChunkStep::Sealed(chunk);
+        }
+
+        if eof {
+            if let Some(chunk) = self.seal_pending_chunk() {
+                return ChunkStep::Sealed(chunk);
+            }
+            self.finished = true;
+        }
+
+        ChunkStep::Pending
+    }
+
+    fn accept_frame(&mut self, frame: ScannedFrame, frame_end: usize) {
+        let frame_len = frame_end.saturating_sub(frame.start_offset);
+        if self.should_seal_before_adding(frame.parsed, frame_len) {
+            let chunk = self
+                .seal_pending_chunk()
+                .expect("pending chunk exists before a pre-add seal");
+            self.ready_chunks.push_back(chunk);
+        }
+
+        self.append_frame(frame.parsed, frame_len);
+        if self.should_seal_after_adding() {
+            let chunk = self
+                .seal_pending_chunk()
+                .expect("pending chunk exists before a post-add seal");
+            self.ready_chunks.push_back(chunk);
+        }
+    }
+
+    fn append_frame(&mut self, parsed: ParsedFrame, frame_len: usize) {
+        if self.pending_chunk.frame_block_sizes.is_empty() {
+            self.pending_chunk.start_frame_index = self.next_frame_index;
+            self.pending_chunk.start_sample_number = self.next_sample_number;
+        }
+
+        self.pending_chunk.frame_block_sizes.push(parsed.block_size);
+        self.pending_chunk.pcm_frames = self
+            .pending_chunk
+            .pcm_frames
+            .saturating_add(usize::from(parsed.block_size));
+        self.pending_chunk.bytes_len = self.pending_chunk.bytes_len.saturating_add(frame_len);
+        self.next_frame_index += 1;
+        self.next_sample_number = self
+            .next_sample_number
+            .saturating_add(u64::from(parsed.block_size));
+    }
+
+    fn should_seal_before_adding(&self, parsed: ParsedFrame, frame_len: usize) -> bool {
+        !self.pending_chunk.frame_block_sizes.is_empty()
+            && (self
+                .pending_chunk
+                .pcm_frames
+                .saturating_add(usize::from(parsed.block_size))
+                > self.config.target_pcm_frames_per_chunk
+                || self.pending_chunk.bytes_len.saturating_add(frame_len)
+                    > self.config.max_bytes_per_chunk)
+    }
+
+    fn should_seal_after_adding(&self) -> bool {
+        !self.pending_chunk.frame_block_sizes.is_empty()
+            && (self.pending_chunk.pcm_frames >= self.config.target_pcm_frames_per_chunk
+                || self.pending_chunk.frame_block_sizes.len() >= self.config.max_frames_per_chunk
+                || self.pending_chunk.bytes_len >= self.config.max_bytes_per_chunk)
+    }
+
+    fn should_seal_before_scanning_current_frame(&self) -> bool {
+        let Some(current) = self.current_frame else {
+            return false;
+        };
+
+        !self.pending_chunk.frame_block_sizes.is_empty()
+            && self
+                .pending_chunk
+                .pcm_frames
+                .saturating_add(usize::from(current.parsed.block_size))
+                > self.config.target_pcm_frames_per_chunk
+    }
+
+    fn seal_pending_chunk(&mut self) -> Option<CompressedDecodeChunk> {
+        if self.pending_chunk.frame_block_sizes.is_empty() {
+            return None;
+        }
+
+        let bytes_len = self.pending_chunk.bytes_len;
+        let chunk = CompressedDecodeChunk {
+            sequence: self.next_sequence,
+            start_frame_index: self.pending_chunk.start_frame_index,
+            start_sample_number: self.pending_chunk.start_sample_number,
+            frame_block_sizes: std::mem::take(&mut self.pending_chunk.frame_block_sizes),
+            bytes: self.buffered_bytes.drain(..bytes_len).collect(),
+        };
+        self.next_sequence += 1;
+        self.pending_chunk.pcm_frames = 0;
+        self.pending_chunk.bytes_len = 0;
+        if let Some(frame) = self.current_frame.as_mut() {
+            frame.start_offset = frame.start_offset.saturating_sub(bytes_len);
+        }
+        Some(chunk)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,194 +268,11 @@ struct ScannedFrame {
 
 #[derive(Debug, Default)]
 struct PendingChunk {
-    start_offset: usize,
     start_frame_index: usize,
+    start_sample_number: u64,
     frame_block_sizes: Vec<u16>,
     pcm_frames: usize,
-    bytes: usize,
-}
-
-#[derive(Debug)]
-pub(super) struct ChunkScanner {
-    stream_info: StreamInfo,
-    config: ChunkScannerConfig,
-    next_sequence: usize,
-    next_frame_index: usize,
-    next_sample_number: u64,
-    current_frame: Option<ScannedFrame>,
-    pending_chunk: PendingChunk,
-    ready_chunks: VecDeque<CompressedDecodeChunk>,
-    input_finished: bool,
-    finished: bool,
-}
-
-impl ChunkScanner {
-    pub(super) fn new(stream_info: StreamInfo, config: ChunkScannerConfig) -> Self {
-        Self {
-            stream_info,
-            config,
-            next_sequence: 0,
-            next_frame_index: 0,
-            next_sample_number: 0,
-            current_frame: None,
-            pending_chunk: PendingChunk::default(),
-            ready_chunks: VecDeque::new(),
-            input_finished: false,
-            finished: false,
-        }
-    }
-
-    pub(super) fn step(&mut self, bytes: &[u8], eof: bool) -> Result<ChunkStep> {
-        if self.finished {
-            return Ok(ChunkStep::Finished);
-        }
-
-        if let Some(chunk) = self.ready_chunks.pop_front() {
-            return Ok(ChunkStep::Chunk(chunk));
-        }
-
-        if self.input_finished {
-            return Ok(self.finish_pending().map_or_else(
-                || {
-                    self.finished = true;
-                    ChunkStep::Finished
-                },
-                ChunkStep::Chunk,
-            ));
-        }
-
-        loop {
-            if self.current_frame.is_none() {
-                if bytes.is_empty() {
-                    if eof {
-                        self.input_finished = true;
-                        continue;
-                    }
-                    return Ok(ChunkStep::NeedMoreInput);
-                }
-                self.current_frame = Some(ScannedFrame {
-                    start_offset: 0,
-                    parsed: parse_frame_header(
-                        bytes,
-                        self.stream_info,
-                        self.next_frame_index as u64,
-                        self.next_sample_number,
-                    )?,
-                });
-            }
-
-            let current = self
-                .current_frame
-                .expect("current frame is populated before searching for the next frame");
-            let next = find_next_frame_start(
-                bytes,
-                current.start_offset + current.parsed.header_bytes_consumed,
-                self.stream_info,
-                self.next_frame_index as u64 + 1,
-                self.next_sample_number + u64::from(current.parsed.block_size),
-            )?;
-
-            if let Some(next_frame) = next {
-                self.current_frame = Some(next_frame);
-                self.accept_frame(current, next_frame.start_offset);
-                if let Some(chunk) = self.ready_chunks.pop_front() {
-                    return Ok(ChunkStep::Chunk(chunk));
-                }
-                continue;
-            }
-
-            if !eof {
-                return Ok(ChunkStep::NeedMoreInput);
-            }
-
-            self.current_frame = None;
-            self.input_finished = true;
-            self.accept_frame(current, bytes.len());
-            if let Some(chunk) = self.finish_pending() {
-                self.ready_chunks.push_back(chunk);
-            }
-            if let Some(chunk) = self.ready_chunks.pop_front() {
-                return Ok(ChunkStep::Chunk(chunk));
-            }
-        }
-    }
-
-    fn accept_frame(&mut self, frame: ScannedFrame, frame_end: usize) {
-        let frame_len = frame_end.saturating_sub(frame.start_offset);
-        if self.should_seal_before_adding(frame.parsed, frame_len) {
-            if let Some(chunk) = self.seal_pending_chunk() {
-                self.ready_chunks.push_back(chunk);
-            }
-        }
-
-        self.append_frame(frame, frame_len);
-        if self.should_seal_after_adding() {
-            if let Some(chunk) = self.seal_pending_chunk() {
-                self.ready_chunks.push_back(chunk);
-            }
-        }
-    }
-
-    fn append_frame(&mut self, frame: ScannedFrame, frame_len: usize) {
-        if self.pending_chunk.frame_block_sizes.is_empty() {
-            self.pending_chunk.start_offset = frame.start_offset;
-            self.pending_chunk.start_frame_index = self.next_frame_index;
-        }
-
-        self.pending_chunk
-            .frame_block_sizes
-            .push(frame.parsed.block_size);
-        self.pending_chunk.pcm_frames = self
-            .pending_chunk
-            .pcm_frames
-            .saturating_add(usize::from(frame.parsed.block_size));
-        self.pending_chunk.bytes = self.pending_chunk.bytes.saturating_add(frame_len);
-        self.next_frame_index += 1;
-        self.next_sample_number = self
-            .next_sample_number
-            .saturating_add(u64::from(frame.parsed.block_size));
-    }
-
-    fn should_seal_before_adding(&self, parsed: ParsedFrame, frame_len: usize) -> bool {
-        !self.pending_chunk.frame_block_sizes.is_empty()
-            && (self
-                .pending_chunk
-                .pcm_frames
-                .saturating_add(usize::from(parsed.block_size))
-                > self.config.target_pcm_frames_per_chunk
-                || self.pending_chunk.bytes.saturating_add(frame_len)
-                    > self.config.max_bytes_per_chunk)
-    }
-
-    fn should_seal_after_adding(&self) -> bool {
-        !self.pending_chunk.frame_block_sizes.is_empty()
-            && (self.pending_chunk.pcm_frames >= self.config.target_pcm_frames_per_chunk
-                || self.pending_chunk.frame_block_sizes.len() >= self.config.max_frames_per_chunk
-                || self.pending_chunk.bytes >= self.config.max_bytes_per_chunk)
-    }
-
-    fn finish_pending(&mut self) -> Option<CompressedDecodeChunk> {
-        self.seal_pending_chunk()
-    }
-
-    fn seal_pending_chunk(&mut self) -> Option<CompressedDecodeChunk> {
-        if self.pending_chunk.frame_block_sizes.is_empty() {
-            return None;
-        }
-
-        let byte_start = self.pending_chunk.start_offset;
-        let byte_end = byte_start.saturating_add(self.pending_chunk.bytes);
-        let chunk = CompressedDecodeChunk {
-            sequence: self.next_sequence,
-            start_frame_index: self.pending_chunk.start_frame_index,
-            frame_block_sizes: std::mem::take(&mut self.pending_chunk.frame_block_sizes),
-            byte_range: byte_start..byte_end,
-        };
-        self.next_sequence += 1;
-        self.pending_chunk.pcm_frames = 0;
-        self.pending_chunk.bytes = 0;
-        Some(chunk)
-    }
+    bytes_len: usize,
 }
 
 fn find_next_frame_start(
@@ -479,7 +520,7 @@ mod tests {
             sample_rate: 44_100,
             channels: 1,
             bits_per_sample: 16,
-            total_samples: 48,
+            total_samples: 64,
             md5: [0; 16],
         }
     }
@@ -492,28 +533,17 @@ mod tests {
 
     fn frame_bytes(frame_number: u8, payload_len: usize) -> Vec<u8> {
         let mut bytes = frame_header(frame_number, 16);
-        bytes.extend(std::iter::repeat_n(0x11 + frame_number, payload_len));
+        bytes.extend(std::iter::repeat_n(0x40 + frame_number, payload_len));
         bytes
     }
 
-    fn collect_chunks(
-        scanner: &mut ChunkScanner,
-        bytes: &[u8],
-        eof: bool,
-    ) -> crate::error::Result<Vec<super::CompressedDecodeChunk>> {
-        let mut chunks = Vec::new();
-        loop {
-            match scanner.step(bytes, eof)? {
-                ChunkStep::Chunk(chunk) => chunks.push(chunk),
-                ChunkStep::NeedMoreInput | ChunkStep::Finished => return Ok(chunks),
-            }
-        }
-    }
-
     #[test]
-    fn seals_before_frame_that_would_exceed_the_pcm_budget() {
-        let mut bytes = frame_bytes(0, 5);
-        bytes.extend(frame_bytes(1, 7));
+    fn split_input_seals_at_the_next_frame_boundary() {
+        let first_frame = frame_bytes(0, 5);
+        let second_frame = frame_bytes(1, 7);
+        let split_point = first_frame.len() + 3;
+        let mut joined = first_frame.clone();
+        joined.extend_from_slice(&second_frame);
 
         let mut scanner = ChunkScanner::new(
             stream_info(),
@@ -524,24 +554,65 @@ mod tests {
             },
         );
 
-        let chunks = collect_chunks(&mut scanner, &bytes, true).unwrap();
+        assert_eq!(
+            scanner.push_bytes(&joined[..split_point]).unwrap(),
+            ChunkStep::Pending
+        );
 
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].sequence, 0);
-        assert_eq!(chunks[0].start_frame_index, 0);
-        assert_eq!(chunks[0].frame_block_sizes, vec![16]);
-        assert_eq!(chunks[0].byte_range, 0..12);
-        assert_eq!(chunks[1].sequence, 1);
-        assert_eq!(chunks[1].start_frame_index, 1);
-        assert_eq!(chunks[1].frame_block_sizes, vec![16]);
-        assert_eq!(chunks[1].byte_range, 12..26);
+        match scanner.push_bytes(&joined[split_point..]).unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 0);
+                assert_eq!(chunk.start_frame_index, 0);
+                assert_eq!(chunk.start_sample_number, 0);
+                assert_eq!(chunk.frame_block_sizes, vec![16]);
+                assert_eq!(chunk.bytes, first_frame);
+            }
+            ChunkStep::Pending => panic!("expected the first chunk to seal at the next boundary"),
+        }
+
+        match scanner.finish().unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 1);
+                assert_eq!(chunk.start_frame_index, 1);
+                assert_eq!(chunk.start_sample_number, 16);
+                assert_eq!(chunk.frame_block_sizes, vec![16]);
+                assert_eq!(chunk.bytes, second_frame);
+            }
+            ChunkStep::Pending => panic!("expected finish to flush the trailing chunk"),
+        }
+    }
+
+    #[test]
+    fn finish_flushes_a_partial_final_chunk_without_full_frame_crc_validation() {
+        let trailing_frame = frame_bytes(0, 5);
+        let mut scanner = ChunkScanner::new(
+            stream_info(),
+            ChunkScannerConfig {
+                target_pcm_frames_per_chunk: 128,
+                max_frames_per_chunk: 8,
+                max_bytes_per_chunk: 128,
+            },
+        );
+
+        assert_eq!(scanner.push_bytes(&trailing_frame).unwrap(), ChunkStep::Pending);
+
+        match scanner.finish().unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 0);
+                assert_eq!(chunk.start_frame_index, 0);
+                assert_eq!(chunk.start_sample_number, 0);
+                assert_eq!(chunk.frame_block_sizes, vec![16]);
+                assert_eq!(chunk.bytes, trailing_frame);
+            }
+            ChunkStep::Pending => panic!("expected finish to flush the final partial chunk"),
+        }
     }
 
     #[test]
     fn seals_when_the_frame_count_budget_is_reached() {
-        let mut bytes = frame_bytes(0, 5);
-        bytes.extend(frame_bytes(1, 6));
-        bytes.extend(frame_bytes(2, 7));
+        let mut joined = frame_bytes(0, 5);
+        joined.extend(frame_bytes(1, 6));
+        joined.extend(frame_bytes(2, 7));
 
         let mut scanner = ChunkScanner::new(
             stream_info(),
@@ -552,42 +623,26 @@ mod tests {
             },
         );
 
-        let chunks = collect_chunks(&mut scanner, &bytes, true).unwrap();
+        match scanner.push_bytes(&joined).unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 0);
+                assert_eq!(chunk.start_frame_index, 0);
+                assert_eq!(chunk.start_sample_number, 0);
+                assert_eq!(chunk.frame_block_sizes, vec![16, 16]);
+                assert_eq!(chunk.bytes, joined[..25].to_vec());
+            }
+            ChunkStep::Pending => panic!("expected max-frames budget to seal a chunk"),
+        }
 
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].sequence, 0);
-        assert_eq!(chunks[0].start_frame_index, 0);
-        assert_eq!(chunks[0].frame_block_sizes, vec![16, 16]);
-        assert_eq!(chunks[0].byte_range, 0..25);
-        assert_eq!(chunks[1].sequence, 1);
-        assert_eq!(chunks[1].start_frame_index, 2);
-        assert_eq!(chunks[1].frame_block_sizes, vec![16]);
-        assert_eq!(chunks[1].byte_range, 25..39);
-    }
-
-    #[test]
-    fn waits_for_more_input_before_emitting_the_final_incomplete_chunk() {
-        let bytes = frame_bytes(0, 5);
-        let mut scanner = ChunkScanner::new(
-            stream_info(),
-            ChunkScannerConfig {
-                target_pcm_frames_per_chunk: 128,
-                max_frames_per_chunk: 8,
-                max_bytes_per_chunk: 128,
-            },
-        );
-
-        assert!(collect_chunks(&mut scanner, &bytes, false).unwrap().is_empty());
-        assert!(matches!(
-            scanner.step(&bytes, false).unwrap(),
-            ChunkStep::NeedMoreInput
-        ));
-
-        let chunks = collect_chunks(&mut scanner, &bytes, true).unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].sequence, 0);
-        assert_eq!(chunks[0].start_frame_index, 0);
-        assert_eq!(chunks[0].frame_block_sizes, vec![16]);
-        assert_eq!(chunks[0].byte_range, 0..12);
+        match scanner.finish().unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 1);
+                assert_eq!(chunk.start_frame_index, 2);
+                assert_eq!(chunk.start_sample_number, 32);
+                assert_eq!(chunk.frame_block_sizes, vec![16]);
+                assert_eq!(chunk.bytes, joined[25..].to_vec());
+            }
+            ChunkStep::Pending => panic!("expected finish to flush the trailing chunk"),
+        }
     }
 }
