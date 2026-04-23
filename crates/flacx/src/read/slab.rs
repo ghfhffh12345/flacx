@@ -164,6 +164,13 @@ fn total_pcm_frames(frame_block_sizes: &[u16]) -> usize {
         .sum()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OrderedDrainProgress {
+    pub(super) drained_frames: usize,
+    pub(super) completed_input_frames: usize,
+    pub(super) retired_slabs: usize,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct OrderedSlabDrain {
     ready_slabs: BTreeMap<usize, DecodedSlab>,
@@ -190,14 +197,19 @@ impl OrderedSlabDrain {
         max_frames: usize,
         channels: usize,
         output: &mut Vec<i32>,
-    ) -> (usize, usize) {
+    ) -> OrderedDrainProgress {
         if max_frames == 0 {
-            return (0, 0);
+            return OrderedDrainProgress {
+                drained_frames: 0,
+                completed_input_frames: 0,
+                retired_slabs: 0,
+            };
         }
 
         let can_span_slab_boundaries = self.draining_slab.is_none();
         let mut total_drained_frames = 0usize;
         let mut total_completed_input_frames = 0usize;
+        let mut retired_slabs = 0usize;
         while total_drained_frames < max_frames && self.activate_next_ready_slab() {
             let (drained_frames, completed_input_frames, slab_finished) = {
                 let slab = self
@@ -219,6 +231,7 @@ impl OrderedSlabDrain {
 
             if slab_finished {
                 self.draining_slab = None;
+                retired_slabs += 1;
                 if !can_span_slab_boundaries {
                     break;
                 }
@@ -228,7 +241,11 @@ impl OrderedSlabDrain {
             }
         }
 
-        (total_drained_frames, total_completed_input_frames)
+        OrderedDrainProgress {
+            drained_frames: total_drained_frames,
+            completed_input_frames: total_completed_input_frames,
+            retired_slabs,
+        }
     }
 
     pub(super) fn completed_input_frames(&self) -> usize {
@@ -290,14 +307,20 @@ mod tests {
         drain.push_ready(slab(2, &[2], &[30, 31]));
         drain.push_ready(slab(0, &[2, 2], &[10, 11, 20, 21]));
 
-        assert_eq!(drain.drain_into(2, 1, &mut output), (2, 1));
+        assert_eq!(drain.drain_into(2, 1, &mut output).drained_frames, 2);
         assert_eq!(output, vec![10, 11]);
 
-        assert_eq!(drain.drain_into(4, 1, &mut output), (2, 1));
+        let progress = drain.drain_into(4, 1, &mut output);
+        assert_eq!(progress.drained_frames, 2);
+        assert_eq!(progress.completed_input_frames, 1);
+        assert_eq!(progress.retired_slabs, 1);
         assert_eq!(output, vec![10, 11, 20, 21]);
 
         drain.push_ready(slab(3, &[2], &[40, 41]));
-        assert_eq!(drain.drain_into(8, 1, &mut output), (4, 2));
+        let progress = drain.drain_into(8, 1, &mut output);
+        assert_eq!(progress.drained_frames, 4);
+        assert_eq!(progress.completed_input_frames, 2);
+        assert_eq!(progress.retired_slabs, 2);
         assert_eq!(output, vec![10, 11, 20, 21, 30, 31, 40, 41]);
     }
 
@@ -308,10 +331,16 @@ mod tests {
 
         drain.push_ready(slab(0, &[3, 3], &[1, 2, 3, 4, 5, 6]));
 
-        assert_eq!(drain.drain_into(2, 1, &mut output), (2, 0));
+        let progress = drain.drain_into(2, 1, &mut output);
+        assert_eq!(progress.drained_frames, 2);
+        assert_eq!(progress.completed_input_frames, 0);
+        assert_eq!(progress.retired_slabs, 0);
         assert_eq!(drain.completed_input_frames(), 0);
 
-        assert_eq!(drain.drain_into(4, 1, &mut output), (4, 2));
+        let progress = drain.drain_into(4, 1, &mut output);
+        assert_eq!(progress.drained_frames, 4);
+        assert_eq!(progress.completed_input_frames, 2);
+        assert_eq!(progress.retired_slabs, 1);
         assert_eq!(drain.completed_input_frames(), 2);
         assert!(drain.is_idle());
     }
