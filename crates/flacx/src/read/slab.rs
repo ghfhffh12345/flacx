@@ -1,9 +1,8 @@
-use std::collections::BTreeMap;
-
 use super::{StreamInfo, frame};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct DecodedSlab {
+    pub(super) sequence: usize,
     pub(super) start_frame_index: usize,
     pub(super) frame_block_sizes: Vec<u16>,
     pub(super) decoded_samples: Vec<i32>,
@@ -25,6 +24,7 @@ impl DecodedSlab {
 impl From<frame::DecodedWorkSlab> for DecodedSlab {
     fn from(slab: frame::DecodedWorkSlab) -> Self {
         Self {
+            sequence: slab.sequence,
             start_frame_index: slab.start_frame_index,
             frame_block_sizes: slab.frame_block_sizes,
             decoded_samples: slab.decoded_samples,
@@ -171,9 +171,10 @@ pub(super) struct OrderedDrainProgress {
     pub(super) retired_slabs: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct OrderedSlabDrain {
-    ready_slabs: BTreeMap<usize, DecodedSlab>,
+    ready_slots: Vec<Option<DecodedSlab>>,
+    next_ready_sequence: usize,
     next_ready_slab_start_frame: usize,
     draining_slab: Option<DrainingSlab>,
     completed_input_frames: usize,
@@ -181,7 +182,18 @@ pub(super) struct OrderedSlabDrain {
 
 impl OrderedSlabDrain {
     pub(super) fn new() -> Self {
-        Self::default()
+        Self::with_window_capacity(1)
+    }
+
+    pub(super) fn with_window_capacity(window_capacity: usize) -> Self {
+        let ready_slot_capacity = window_capacity.max(1);
+        Self {
+            ready_slots: (0..ready_slot_capacity).map(|_| None).collect(),
+            next_ready_sequence: 0,
+            next_ready_slab_start_frame: 0,
+            draining_slab: None,
+            completed_input_frames: 0,
+        }
     }
 
     pub(super) fn push_ready<S>(&mut self, slab: S)
@@ -189,7 +201,25 @@ impl OrderedSlabDrain {
         S: Into<DecodedSlab>,
     {
         let slab = slab.into();
-        self.ready_slabs.insert(slab.start_frame_index, slab);
+        let sequence = slab.sequence;
+        assert!(
+            sequence >= self.next_ready_sequence,
+            "ready slab sequence {sequence} is behind the next expected sequence {}",
+            self.next_ready_sequence,
+        );
+        assert!(
+            sequence < self.next_ready_sequence + self.ready_slots.len(),
+            "ready slab sequence {sequence} exceeds bounded ready window ending before sequence {}",
+            self.next_ready_sequence + self.ready_slots.len(),
+        );
+
+        let slot_index = self.ready_slot_index(sequence);
+        let slot = &mut self.ready_slots[slot_index];
+        assert!(
+            slot.is_none(),
+            "ready slot collision at sequence {sequence} (slot {slot_index})",
+        );
+        *slot = Some(slab);
     }
 
     pub(super) fn drain_into(
@@ -253,11 +283,16 @@ impl OrderedSlabDrain {
     }
 
     pub(super) fn ready_slab_count(&self) -> usize {
-        self.ready_slabs.len()
+        self.ready_slots.iter().flatten().count()
     }
 
     pub(super) fn next_ready_slab_start_frame(&self) -> usize {
         self.next_ready_slab_start_frame
+    }
+
+    #[cfg(test)]
+    pub(super) fn ready_slot_capacity(&self) -> usize {
+        self.ready_slots.len()
     }
 
     pub(super) fn has_draining_slab(&self) -> bool {
@@ -265,11 +300,11 @@ impl OrderedSlabDrain {
     }
 
     pub(super) fn active_slab_count(&self) -> usize {
-        self.ready_slabs.len() + usize::from(self.draining_slab.is_some())
+        self.ready_slab_count() + usize::from(self.draining_slab.is_some())
     }
 
     pub(super) fn is_idle(&self) -> bool {
-        self.ready_slabs.is_empty() && self.draining_slab.is_none()
+        self.ready_slots.iter().all(Option::is_none) && self.draining_slab.is_none()
     }
 
     fn activate_next_ready_slab(&mut self) -> bool {
@@ -277,13 +312,20 @@ impl OrderedSlabDrain {
             return true;
         }
 
-        let Some(slab) = self.ready_slabs.remove(&self.next_ready_slab_start_frame) else {
+        let slot_index = self.ready_slot_index(self.next_ready_sequence);
+        let Some(slab) = self.ready_slots[slot_index].take() else {
             return false;
         };
 
+        debug_assert_eq!(slab.sequence, self.next_ready_sequence);
+        self.next_ready_sequence += 1;
         self.next_ready_slab_start_frame += slab.frame_count();
         self.draining_slab = Some(DrainingSlab::new(slab));
         true
+    }
+
+    fn ready_slot_index(&self, sequence: usize) -> usize {
+        sequence % self.ready_slots.len()
     }
 }
 
@@ -291,8 +333,14 @@ impl OrderedSlabDrain {
 mod tests {
     use super::{DecodedSlab, OrderedSlabDrain};
 
-    fn slab(start_frame_index: usize, block_sizes: &[u16], samples: &[i32]) -> DecodedSlab {
+    fn slab(
+        sequence: usize,
+        start_frame_index: usize,
+        block_sizes: &[u16],
+        samples: &[i32],
+    ) -> DecodedSlab {
         DecodedSlab {
+            sequence,
             start_frame_index,
             frame_block_sizes: block_sizes.to_vec(),
             decoded_samples: samples.to_vec(),
@@ -301,11 +349,11 @@ mod tests {
 
     #[test]
     fn drains_slabs_in_frame_order_even_when_completion_is_out_of_order() {
-        let mut drain = OrderedSlabDrain::new();
+        let mut drain = OrderedSlabDrain::with_window_capacity(4);
         let mut output = Vec::new();
 
-        drain.push_ready(slab(2, &[2], &[30, 31]));
-        drain.push_ready(slab(0, &[2, 2], &[10, 11, 20, 21]));
+        drain.push_ready(slab(1, 2, &[2], &[30, 31]));
+        drain.push_ready(slab(0, 0, &[2, 2], &[10, 11, 20, 21]));
 
         assert_eq!(drain.drain_into(2, 1, &mut output).drained_frames, 2);
         assert_eq!(output, vec![10, 11]);
@@ -316,7 +364,7 @@ mod tests {
         assert_eq!(progress.retired_slabs, 1);
         assert_eq!(output, vec![10, 11, 20, 21]);
 
-        drain.push_ready(slab(3, &[2], &[40, 41]));
+        drain.push_ready(slab(2, 3, &[2], &[40, 41]));
         let progress = drain.drain_into(8, 1, &mut output);
         assert_eq!(progress.drained_frames, 4);
         assert_eq!(progress.completed_input_frames, 2);
@@ -329,7 +377,7 @@ mod tests {
         let mut drain = OrderedSlabDrain::new();
         let mut output = Vec::new();
 
-        drain.push_ready(slab(0, &[3, 3], &[1, 2, 3, 4, 5, 6]));
+        drain.push_ready(slab(0, 0, &[3, 3], &[1, 2, 3, 4, 5, 6]));
 
         let progress = drain.drain_into(2, 1, &mut output);
         assert_eq!(progress.drained_frames, 2);

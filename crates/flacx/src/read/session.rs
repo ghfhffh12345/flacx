@@ -111,12 +111,13 @@ impl StreamingDecodeSession {
         result_receiver: Receiver<Result<DecodeSessionResult>>,
         window_depth_limit: usize,
     ) -> Self {
+        let window_depth_limit = window_depth_limit.max(1);
         Self {
             worker_pool: frame::FrameDecodeWorkerPool::new(1, 1),
-            ordered_drain: OrderedSlabDrain::new(),
+            ordered_drain: OrderedSlabDrain::with_window_capacity(window_depth_limit),
             outstanding_window_slabs: 0,
             result_channel_closed: false,
-            window_depth_limit: window_depth_limit.max(1),
+            window_depth_limit,
             worker_queue_saturated: false,
             submitted_input_bytes: VecDeque::new(),
             staged_input_bytes: 0,
@@ -138,7 +139,7 @@ impl StreamingDecodeSession {
                 worker_count,
                 DECODE_SESSION_QUEUE_DEPTH_MULTIPLIER.min(window_depth_limit),
             ),
-            ordered_drain: OrderedSlabDrain::new(),
+            ordered_drain: OrderedSlabDrain::with_window_capacity(window_depth_limit),
             outstanding_window_slabs: 0,
             result_channel_closed: false,
             window_depth_limit,
@@ -382,7 +383,7 @@ impl StreamingDecodeSession {
         (
             Self {
                 worker_pool,
-                ordered_drain: OrderedSlabDrain::new(),
+                ordered_drain: OrderedSlabDrain::with_window_capacity(window_depth_limit),
                 outstanding_window_slabs: 0,
                 result_channel_closed: false,
                 window_depth_limit,
@@ -431,6 +432,7 @@ mod tests {
 
     fn slab(start_frame_index: usize, block_sizes: &[u16], samples: &[i32]) -> DecodedSlab {
         DecodedSlab {
+            sequence: start_frame_index,
             start_frame_index,
             frame_block_sizes: block_sizes.to_vec(),
             decoded_samples: samples.to_vec(),
