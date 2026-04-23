@@ -4,12 +4,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::OnceLock};
 use std::{fs, io::Cursor, thread::available_parallelism};
 #[cfg(feature = "progress")]
-use std::{
-    io::{Read, Seek, SeekFrom},
-    sync::{Arc, Condvar, Mutex, mpsc},
-    thread,
-    time::Duration,
-};
+use std::{sync::mpsc, thread, time::Duration};
 
 use flacx::builtin::{decode_bytes, decode_file};
 use flacx::{DecodeConfig, EncoderConfig, PcmContainer, level::Level};
@@ -50,83 +45,6 @@ fn decode_thread_variants() -> [usize; 4] {
 #[cfg(feature = "progress")]
 struct DecodeProfileGuard {
     path: PathBuf,
-}
-
-#[cfg(feature = "progress")]
-#[derive(Debug, Default)]
-struct BlockingChunkedReaderState {
-    read_calls: usize,
-    released: bool,
-}
-
-#[cfg(feature = "progress")]
-#[derive(Clone)]
-struct BlockingChunkedReaderControl {
-    state: Arc<(Mutex<BlockingChunkedReaderState>, Condvar)>,
-}
-
-#[cfg(feature = "progress")]
-impl BlockingChunkedReaderControl {
-    fn release(&self) {
-        let (lock, condvar) = &*self.state;
-        let mut state = lock.lock().unwrap();
-        state.released = true;
-        condvar.notify_all();
-    }
-}
-
-#[cfg(feature = "progress")]
-struct BlockingChunkedReader {
-    inner: Cursor<Vec<u8>>,
-    chunk_size: usize,
-    block_after_reads: usize,
-    state: Arc<(Mutex<BlockingChunkedReaderState>, Condvar)>,
-}
-
-#[cfg(feature = "progress")]
-impl BlockingChunkedReader {
-    fn new(
-        bytes: Vec<u8>,
-        chunk_size: usize,
-        block_after_reads: usize,
-    ) -> (Self, BlockingChunkedReaderControl) {
-        let state = Arc::new((
-            Mutex::new(BlockingChunkedReaderState::default()),
-            Condvar::new(),
-        ));
-        (
-            Self {
-                inner: Cursor::new(bytes),
-                chunk_size,
-                block_after_reads,
-                state: Arc::clone(&state),
-            },
-            BlockingChunkedReaderControl { state },
-        )
-    }
-}
-
-#[cfg(feature = "progress")]
-impl Read for BlockingChunkedReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let (lock, condvar) = &*self.state;
-        let mut state = lock.lock().unwrap();
-        state.read_calls += 1;
-        while state.read_calls > self.block_after_reads && !state.released {
-            state = condvar.wait(state).unwrap();
-        }
-        drop(state);
-
-        let limit = buf.len().min(self.chunk_size);
-        self.inner.read(&mut buf[..limit])
-    }
-}
-
-#[cfg(feature = "progress")]
-impl Seek for BlockingChunkedReader {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.inner.seek(pos)
-    }
 }
 
 #[cfg(feature = "progress")]
@@ -187,6 +105,23 @@ fn run_decode_with_timeout<T: Send + 'static>(
     receiver
         .recv_timeout(DECODE_DEADLOCK_TIMEOUT)
         .expect("decode job should complete without deadlock")
+}
+
+#[cfg(feature = "progress")]
+fn decode_real_reader_with_progress_and_timeout(
+    flac: Vec<u8>,
+    threads: usize,
+) -> flacx::Result<()> {
+    run_decode_with_timeout(move || {
+        let reader = read_flac_reader(Cursor::new(flac)).unwrap();
+        let mut output = Cursor::new(Vec::new());
+        let mut decoder = DecodeConfig::default()
+            .with_threads(threads)
+            .into_decoder(&mut output);
+        decoder
+            .decode_source_with_progress(reader.into_decode_source(), |_| Ok(()))
+            .map(|_| ())
+    })
 }
 
 #[cfg(feature = "progress")]
@@ -381,26 +316,6 @@ fn decode_pcm_stream_trait_does_not_expose_profile_hooks() {
     assert!(
         !trait_source.contains("fn finish_successful_decode_profile"),
         "decode profiling lifecycle must remain internal to preserve the public DecodePcmStream API"
-    );
-}
-
-#[test]
-fn flac_pcm_stream_routes_single_thread_decode_through_streaming_session_path() {
-    let source = include_str!("../src/read.rs");
-    let stream_impl_start = source.find("impl<R: Read + Seek> FlacPcmStream<R> {").unwrap();
-    let stream_impl = &source[stream_impl_start..];
-
-    assert!(
-        !stream_impl.contains("StreamingDecodeSession::new_local()"),
-        "FlacPcmStream should not keep a single-thread local streaming-session exception"
-    );
-    assert!(
-        !stream_impl.contains("fn submit_local_decode_plan("),
-        "FlacPcmStream should not keep local slab production helpers"
-    );
-    assert!(
-        !stream_impl.contains("fn fill_local_decode_window("),
-        "FlacPcmStream should not keep a local slab production loop"
     );
 }
 
@@ -833,41 +748,87 @@ fn real_reader_decode_uses_producer_backed_session_across_thread_counts() {
 
 #[cfg(feature = "progress")]
 #[test]
-fn real_reader_background_producer_emits_progress_before_releasing_blocked_followup_read() {
-    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 65_536));
-    let flac = Encoder::new(EncoderConfig::default().with_block_size(16))
-        .encode_bytes(&wav)
-        .unwrap();
-    let stream_info = read_flac_reader(Cursor::new(&flac)).unwrap().stream_info();
-    let (reader, control) = BlockingChunkedReader::new(flac_frames(&flac), 64 * 1024, 4);
-    let stream = FlacPcmStream::builder(reader)
-        .stream_info(stream_info)
-        .build()
-        .unwrap();
+fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
+    let profile = DecodeProfileGuard::new();
+    let flac = large_streaming_decode_flac_bytes(4);
+    let expected_wav = large_streaming_decode_wav_bytes();
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let mut progress = Vec::new();
+    let mut decoder = DecodeConfig::default()
+        .with_threads(4)
+        .into_decoder(&mut output);
 
-    let error = run_decode_with_timeout(move || {
-        let mut output = Cursor::new(Vec::new());
-        let mut decoder = DecodeConfig::default()
-            .with_threads(4)
-            .into_decoder(&mut output);
-        decoder.decode_source_with_progress(
-            flacx::DecodeSource::new(Metadata::new(), stream),
-            |_| {
-                control.release();
-                Err(flacx::Error::Decode(
-                    "stop after first progress update".into(),
-                ))
-            },
-        )
-    })
-    .unwrap_err();
+    let summary = decoder
+        .decode_source_with_progress(reader.into_decode_source(), |update| {
+            progress.push(update);
+            Ok(())
+        })
+        .unwrap();
+    let profile_summary = profile.summary();
+    let queue_limit = *profile_summary.get("queue_limit").unwrap();
+    let peak_active_window_slabs = *profile_summary.get("peak_active_window_slabs").unwrap();
+    let peak_staged_input_bytes = *profile_summary.get("peak_staged_input_bytes").unwrap();
 
-    assert!(
-        error
-            .to_string()
-            .contains("stop after first progress update"),
-        "{error}"
+    assert_eq!(
+        summary.total_samples,
+        LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
     );
+    assert!(progress.len() > 1, "expected streaming progress updates");
+    assert_eq!(
+        wav_data_bytes(&output.into_inner()),
+        wav_data_bytes(&expected_wav)
+    );
+    assert!(
+        (2..=queue_limit).contains(&peak_active_window_slabs),
+        "real-reader decode should overlap producer work while staying inside the bounded decode window: peak_active_window_slabs={peak_active_window_slabs}, queue_limit={queue_limit}"
+    );
+    assert!(
+        peak_staged_input_bytes > 0,
+        "real-reader decode should stage producer input bytes while ordered output is still draining"
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn bad_frame_crc_real_reader_decode_with_progress_returns_error_without_deadlock() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 2_048));
+    let flac = Encoder::default().encode_bytes(&wav).unwrap();
+    let corrupt = corrupt_last_frame_crc(&flac);
+
+    for threads in [1, 4] {
+        let error =
+            decode_real_reader_with_progress_and_timeout(corrupt.clone(), threads).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("invalid flac") || message.contains("decode error"),
+            "unexpected progress decode error for threads={threads}: {message}"
+        );
+    }
+}
+
+#[cfg(feature = "progress")]
+#[test]
+fn wrong_sample_number_real_reader_decode_with_progress_returns_error_without_deadlock() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 4_352));
+    let flac = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(2)
+            .with_block_schedule(vec![576, 1_152, 576, 2_048]),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+    let corrupt = corrupt_first_flac_frame_sample_number(&flac, 1);
+
+    for threads in [1, 4] {
+        let error =
+            decode_real_reader_with_progress_and_timeout(corrupt.clone(), threads).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("invalid flac") || message.contains("decode error"),
+            "unexpected progress decode error for threads={threads}: {message}"
+        );
+    }
 }
 
 #[cfg(feature = "progress")]

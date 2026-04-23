@@ -90,6 +90,25 @@ struct DecodeSlabProducer<R> {
     discovered_input_bytes: u64,
 }
 
+struct ProducerExitGuard {
+    progress: SharedProducerProgress,
+}
+
+impl ProducerExitGuard {
+    fn new(progress: SharedProducerProgress) -> Self {
+        Self { progress }
+    }
+}
+
+impl Drop for ProducerExitGuard {
+    fn drop(&mut self) {
+        let (lock, condvar) = &*self.progress;
+        let mut state = lock.lock().unwrap();
+        state.producer_finished = true;
+        condvar.notify_all();
+    }
+}
+
 impl<R> DecodeSlabProducer<R> {
     fn inflight_slabs(&self) -> usize {
         self.producer.inflight_slabs()
@@ -145,6 +164,7 @@ impl<R: Read> DecodeSlabProducer<R> {
     }
 
     fn run(mut self, session_producer: session::SessionProducer) -> Result<()> {
+        let _producer_exit = ProducerExitGuard::new(Arc::clone(&self.progress));
         loop {
             if !self.refresh_completed_input_progress() {
                 break;
@@ -165,11 +185,6 @@ impl<R: Read> DecodeSlabProducer<R> {
                 break;
             }
         }
-
-        let (lock, condvar) = &*self.progress;
-        let mut state = lock.lock().unwrap();
-        state.producer_finished = true;
-        condvar.notify_all();
 
         Ok(())
     }
@@ -600,7 +615,7 @@ pub struct FlacPcmStream<R> {
     reader: Option<R>,
     slab_producer: Option<DecodeSlabProducer<R>>,
     producer_progress: SharedProducerProgress,
-    input_sender: Option<mpsc::Sender<std::io::Result<Option<Vec<u8>>>>>,
+    input_sender: Option<mpsc::SyncSender<std::io::Result<Option<Vec<u8>>>>>,
     session: Option<session::StreamingDecodeSession>,
     eof: bool,
 }
@@ -797,7 +812,8 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             .slab_producer
             .take()
             .expect("stream owns a slab producer until the background session starts");
-        let (input_sender, input_receiver) = mpsc::channel();
+        let (input_sender, input_receiver) =
+            mpsc::sync_channel(self.active_decode_window_limit().max(1));
         let (reader, slab_producer) =
             slab_producer.into_background(ChunkBackedReader::new(input_receiver));
         self.reader = Some(reader);
@@ -893,6 +909,12 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             return Ok(false);
         };
         if !session.wait_for_ready_slab()? {
+            // The session can report exhaustion before the queued producer
+            // error is drained; re-collect once before telling the caller
+            // there is nothing left to wait on.
+            session.collect_ready_slabs()?;
+            let completed_input_frames = session.completed_input_frames();
+            self.sync_completed_input_progress(completed_input_frames);
             return Ok(false);
         }
         let completed_input_frames = session.completed_input_frames();
