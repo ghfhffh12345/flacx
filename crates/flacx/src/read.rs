@@ -744,11 +744,9 @@ impl<R: Read + Seek> FlacPcmStreamBuilder<R> {
 
 impl<R> FlacPcmStream<R> {
     fn active_decode_window_limit(&self) -> usize {
-        if self.threads <= 1 {
-            1
-        } else {
-            self.threads.max(1) * DECODE_SESSION_WINDOW_DEPTH
-        }
+        self.threads
+            .max(1)
+            .saturating_mul(DECODE_SESSION_WINDOW_DEPTH)
     }
 }
 
@@ -777,13 +775,6 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             .unwrap_or(0);
         condvar.notify_all();
         drop(state);
-        if self.threads <= 1 {
-            if let Some(producer) = self.slab_producer.as_mut() {
-                producer
-                    .producer
-                    .retire_completed_input_frames(completed_input_frames);
-            }
-        }
     }
 
     #[cfg(not(feature = "progress"))]
@@ -796,21 +787,10 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         self.discovered_sample_number = state.discovered_sample_number;
         condvar.notify_all();
         drop(state);
-        if self.threads <= 1 {
-            if let Some(producer) = self.slab_producer.as_mut() {
-                producer
-                    .producer
-                    .retire_completed_input_frames(completed_input_frames);
-            }
-        }
     }
 
     fn ensure_streaming_session(&mut self) {
         if self.session.is_some() {
-            return;
-        }
-        if self.threads <= 1 {
-            self.session = Some(session::StreamingDecodeSession::new_local());
             return;
         }
         let slab_producer = self
@@ -829,17 +809,6 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         ));
     }
 
-    fn active_slab_count(&self) -> usize {
-        self.session
-            .as_ref()
-            .map_or(0, session::StreamingDecodeSession::active_slab_count)
-            .saturating_add(
-                self.slab_producer
-                    .as_ref()
-                    .map_or(0, DecodeSlabProducer::inflight_slabs),
-            )
-    }
-
     fn read_next_slab_plan(&mut self) -> Result<Option<DecodeSlabPlan>> {
         self.slab_producer
             .as_mut()
@@ -852,32 +821,6 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             .as_mut()
             .expect("slab producer is available before the background session starts")
             .seal_staged_decode_slab_plan(plan)
-    }
-
-    fn submit_local_decode_plan(&mut self, plan: DecodeSlabPlan) -> Result<()> {
-        let slab_producer = self
-            .slab_producer
-            .as_mut()
-            .expect("single-threaded decode keeps the slab producer local");
-        slab_producer.producer.record_ready_submission(&plan);
-        let slab = frame::decode_work_slab(plan.into())?;
-        self.session
-            .as_mut()
-            .expect("local streaming decode session initialized")
-            .accept_ready_slab(slab.into(), 1);
-        Ok(())
-    }
-
-    fn fill_local_decode_window(&mut self) -> Result<bool> {
-        let mut staged_any = false;
-        while self.active_slab_count() < self.active_decode_window_limit() {
-            let Some(plan) = self.read_next_slab_plan()? else {
-                break;
-            };
-            self.submit_local_decode_plan(plan)?;
-            staged_any = true;
-        }
-        Ok(staged_any)
     }
 
     fn pump_input_chunk(&mut self) -> Result<bool> {
@@ -985,52 +928,6 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             return Ok(0);
         }
         self.ensure_streaming_session();
-        if self.threads <= 1 {
-            if self.drained_pcm_frames >= self.spec.total_samples
-                && self
-                    .session
-                    .as_ref()
-                    .is_some_and(session::StreamingDecodeSession::is_idle)
-                && self
-                    .slab_producer
-                    .as_ref()
-                    .is_some_and(|producer| producer.eof)
-            {
-                return Ok(0);
-            }
-
-            let mut total_pcm_frames = 0usize;
-            while total_pcm_frames < max_frames {
-                total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
-                if total_pcm_frames == max_frames {
-                    break;
-                }
-
-                self.collect_ready_slabs()?;
-                total_pcm_frames += self.drain_ready_output(max_frames - total_pcm_frames, output);
-                if total_pcm_frames == max_frames {
-                    break;
-                }
-
-                if self
-                    .slab_producer
-                    .as_ref()
-                    .is_some_and(|producer| producer.eof)
-                    && self
-                        .session
-                        .as_ref()
-                        .is_none_or(session::StreamingDecodeSession::is_idle)
-                {
-                    break;
-                }
-
-                if !self.fill_local_decode_window()? {
-                    break;
-                }
-            }
-
-            return Ok(total_pcm_frames);
-        }
         if self.eof
             && self.producer_finished()
             && self.drained_pcm_frames >= self.spec.total_samples
@@ -1364,55 +1261,6 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(error.to_string().contains("1..8"));
-    }
-
-    #[test]
-    fn active_decode_window_counts_inflight_slabs_after_session_start() {
-        let stream_info = StreamInfo {
-            sample_rate: 44_100,
-            channels: 2,
-            bits_per_sample: 16,
-            total_samples: 4_096,
-            md5: [0; 16],
-            min_block_size: 4_096,
-            max_block_size: 4_096,
-            min_frame_size: 0,
-            max_frame_size: 0,
-        };
-        let mut stream = FlacPcmStream::builder(Cursor::new(Vec::<u8>::new()))
-            .stream_info(stream_info)
-            .build()
-            .unwrap();
-        stream.slab_producer.as_mut().unwrap().producer = ProducerState::new(
-            stream_info,
-            ProducerConfig {
-                target_pcm_frames_per_slab: super::DECODE_SLAB_TARGET_PCM_FRAMES,
-                max_frames_per_slab: super::DECODE_SLAB_MAX_INPUT_FRAMES,
-                max_bytes_per_slab: super::decode_slab_max_input_bytes(stream_info),
-                max_slabs_ahead: 1,
-            },
-        );
-        stream
-            .slab_producer
-            .as_mut()
-            .unwrap()
-            .producer
-            .record_inflight_submission_parts(0, 0);
-        stream
-            .slab_producer
-            .as_mut()
-            .unwrap()
-            .producer
-            .record_inflight_submission_parts(0, 0);
-        stream
-            .slab_producer
-            .as_mut()
-            .unwrap()
-            .producer
-            .record_inflight_submission_parts(0, 0);
-        stream.session = Some(super::session::StreamingDecodeSession::new_local());
-
-        assert_eq!(stream.active_slab_count(), 3);
     }
 
     #[test]

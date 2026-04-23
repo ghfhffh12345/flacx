@@ -384,6 +384,26 @@ fn decode_pcm_stream_trait_does_not_expose_profile_hooks() {
     );
 }
 
+#[test]
+fn flac_pcm_stream_routes_single_thread_decode_through_streaming_session_path() {
+    let source = include_str!("../src/read.rs");
+    let stream_impl_start = source.find("impl<R: Read + Seek> FlacPcmStream<R> {").unwrap();
+    let stream_impl = &source[stream_impl_start..];
+
+    assert!(
+        !stream_impl.contains("StreamingDecodeSession::new_local()"),
+        "FlacPcmStream should not keep a single-thread local streaming-session exception"
+    );
+    assert!(
+        !stream_impl.contains("fn submit_local_decode_plan("),
+        "FlacPcmStream should not keep local slab production helpers"
+    );
+    assert!(
+        !stream_impl.contains("fn fill_local_decode_window("),
+        "FlacPcmStream should not keep a local slab production loop"
+    );
+}
+
 #[cfg(feature = "progress")]
 #[test]
 fn segmented_direct_decode_emits_profile_summary_after_small_ordered_writes() {
@@ -770,42 +790,45 @@ fn streaming_decode_session_reports_bounded_slab_residency_for_small_writer_chun
 
 #[cfg(feature = "progress")]
 #[test]
-fn real_reader_background_producer_reports_staged_input_overlap() {
-    let profile = DecodeProfileGuard::new();
+fn real_reader_decode_uses_producer_backed_session_across_thread_counts() {
     let flac = large_streaming_decode_flac_bytes(4);
     let expected_wav = large_streaming_decode_wav_bytes();
-    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
-    let mut output = Cursor::new(Vec::new());
-    let mut progress = Vec::new();
-    let mut decoder = DecodeConfig::default()
-        .with_threads(4)
-        .into_decoder(&mut output);
+    for threads in [1, 4] {
+        let profile = DecodeProfileGuard::new();
+        let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+        let mut output = Cursor::new(Vec::new());
+        let mut progress = Vec::new();
+        let mut decoder = DecodeConfig::default()
+            .with_threads(threads)
+            .into_decoder(&mut output);
 
-    let summary = decoder
-        .decode_source_with_progress(reader.into_decode_source(), |update| {
-            progress.push(update);
-            Ok(())
-        })
-        .unwrap();
-    let profile_summary = profile.summary();
+        let summary = decoder
+            .decode_source_with_progress(reader.into_decode_source(), |update| {
+                progress.push(update);
+                Ok(())
+            })
+            .unwrap();
+        let profile_summary = profile.summary();
 
-    assert_eq!(
-        summary.total_samples,
-        LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
-    );
-    assert!(progress.len() > 1, "expected streaming progress updates");
-    assert_eq!(
-        wav_data_bytes(&output.into_inner()),
-        wav_data_bytes(&expected_wav)
-    );
-    assert!(
-        *profile_summary.get("peak_active_window_slabs").unwrap() > 1,
-        "real-reader decode should overlap background slab production with ordered draining"
-    );
-    assert!(
-        *profile_summary.get("peak_staged_input_bytes").unwrap() > 0,
-        "background producer should stage real input bytes while the stream drains"
-    );
+        assert_eq!(
+            summary.total_samples,
+            LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
+        );
+        assert!(progress.len() > 1, "expected streaming progress updates");
+        assert_eq!(
+            wav_data_bytes(&output.into_inner()),
+            wav_data_bytes(&expected_wav)
+        );
+        assert_eq!(
+            *profile_summary.get("worker_count").unwrap(),
+            threads,
+            "decode profile should report the configured worker count for threads={threads}"
+        );
+        assert!(
+            *profile_summary.get("peak_staged_input_bytes").unwrap() > 0,
+            "decode should stage real input bytes through the producer-backed session for threads={threads}"
+        );
+    }
 }
 
 #[cfg(feature = "progress")]
