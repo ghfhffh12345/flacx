@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     io::{Cursor, Read},
+    sync::Arc,
 };
 
 use bitstream_io::{BigEndian, BitRead, BitReader};
@@ -26,7 +27,7 @@ pub(super) struct CompressedDecodeChunk {
     pub(super) start_frame_index: usize,
     pub(super) start_sample_number: u64,
     pub(super) frame_block_sizes: Vec<u16>,
-    pub(super) bytes: Vec<u8>,
+    pub(super) bytes: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,7 +249,7 @@ impl ChunkScanner {
             start_frame_index: self.pending_chunk.start_frame_index,
             start_sample_number: self.pending_chunk.start_sample_number,
             frame_block_sizes: std::mem::take(&mut self.pending_chunk.frame_block_sizes),
-            bytes: self.buffered_bytes.drain(..bytes_len).collect(),
+            bytes: Arc::from(self.buffered_bytes.drain(..bytes_len).collect::<Vec<_>>()),
         };
         self.next_sequence += 1;
         self.pending_chunk.pcm_frames = 0;
@@ -565,7 +566,7 @@ mod tests {
                 assert_eq!(chunk.start_frame_index, 0);
                 assert_eq!(chunk.start_sample_number, 0);
                 assert_eq!(chunk.frame_block_sizes, vec![16]);
-                assert_eq!(chunk.bytes, first_frame);
+                assert_eq!(chunk.bytes.as_ref(), first_frame.as_slice());
             }
             ChunkStep::Pending => panic!("expected the first chunk to seal at the next boundary"),
         }
@@ -576,7 +577,7 @@ mod tests {
                 assert_eq!(chunk.start_frame_index, 1);
                 assert_eq!(chunk.start_sample_number, 16);
                 assert_eq!(chunk.frame_block_sizes, vec![16]);
-                assert_eq!(chunk.bytes, second_frame);
+                assert_eq!(chunk.bytes.as_ref(), second_frame.as_slice());
             }
             ChunkStep::Pending => panic!("expected finish to flush the trailing chunk"),
         }
@@ -602,7 +603,7 @@ mod tests {
                 assert_eq!(chunk.start_frame_index, 0);
                 assert_eq!(chunk.start_sample_number, 0);
                 assert_eq!(chunk.frame_block_sizes, vec![16]);
-                assert_eq!(chunk.bytes, trailing_frame);
+                assert_eq!(chunk.bytes.as_ref(), trailing_frame.as_slice());
             }
             ChunkStep::Pending => panic!("expected finish to flush the final partial chunk"),
         }
@@ -629,7 +630,7 @@ mod tests {
                 assert_eq!(chunk.start_frame_index, 0);
                 assert_eq!(chunk.start_sample_number, 0);
                 assert_eq!(chunk.frame_block_sizes, vec![16, 16]);
-                assert_eq!(chunk.bytes, joined[..25].to_vec());
+                assert_eq!(chunk.bytes.as_ref(), &joined[..25]);
             }
             ChunkStep::Pending => panic!("expected max-frames budget to seal a chunk"),
         }
@@ -640,7 +641,7 @@ mod tests {
                 assert_eq!(chunk.start_frame_index, 2);
                 assert_eq!(chunk.start_sample_number, 32);
                 assert_eq!(chunk.frame_block_sizes, vec![16]);
-                assert_eq!(chunk.bytes, joined[25..].to_vec());
+                assert_eq!(chunk.bytes.as_ref(), &joined[25..]);
             }
             ChunkStep::Pending => panic!("expected finish to flush the trailing chunk"),
         }
