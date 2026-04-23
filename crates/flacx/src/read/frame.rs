@@ -43,17 +43,29 @@ pub(super) struct DecodedWorkChunk {
     pub(super) decoded_samples: Vec<i32>,
 }
 
+#[cfg(test)]
+static WORKER_SCAN_SUBFRAME_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static WORKER_SCRATCH_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 struct DecodedFrame {
     bytes_consumed: usize,
     block_size: u16,
 }
 
-#[derive(Default)]
 struct WorkerScratch {
     channels: Vec<Vec<i32>>,
 }
 
 impl WorkerScratch {
+    fn new() -> Self {
+        #[cfg(test)]
+        WORKER_SCRATCH_CREATE_COUNT.fetch_add(1, Ordering::Relaxed);
+        Self {
+            channels: Vec::new(),
+        }
+    }
+
     fn prepare(&mut self, channel_count: usize, block_size: usize) {
         self.channels.resize_with(channel_count, Vec::new);
         for channel in &mut self.channels {
@@ -89,8 +101,12 @@ impl FrameDecodeWorkerPool {
             let (sender, receiver) = mpsc::sync_channel::<DecodeWorkChunk>(queue_depth);
             let result_sender = result_sender.clone();
             worker_handles.push(thread::spawn(move || {
+                let mut scratch = WorkerScratch::new();
                 while let Ok(chunk) = receiver.recv() {
-                    if result_sender.send(decode_work_chunk(chunk)).is_err() {
+                    if result_sender
+                        .send(decode_work_chunk_with_scratch(chunk, &mut scratch))
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -157,11 +173,18 @@ impl Drop for FrameDecodeWorkerPool {
 }
 
 pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChunk> {
+    let mut scratch = WorkerScratch::new();
+    decode_work_chunk_with_scratch(chunk, &mut scratch)
+}
+
+fn decode_work_chunk_with_scratch(
+    chunk: DecodeWorkChunk,
+    scratch: &mut WorkerScratch,
+) -> Result<DecodedWorkChunk> {
     let mut decoded_samples = Vec::new();
     let mut decoded_block_sizes = Vec::new();
     let mut cursor = 0usize;
     let mut expected_sample_number = chunk.start_sample_number;
-    let mut scratch = WorkerScratch::default();
 
     while cursor < chunk.bytes.len() {
         let decoded = decode_frame_into(
@@ -170,7 +193,7 @@ pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChu
             (chunk.start_frame_index + decoded_block_sizes.len()) as u64,
             expected_sample_number,
             &mut decoded_samples,
-            &mut scratch,
+            scratch,
         )?;
         cursor += decoded.bytes_consumed;
         expected_sample_number =
@@ -800,6 +823,8 @@ fn skip_subframe<R: Read>(
     bits_per_sample: u8,
     block_size: u16,
 ) -> Result<()> {
+    #[cfg(test)]
+    WORKER_SCAN_SUBFRAME_COUNT.fetch_add(1, Ordering::Relaxed);
     let header = parse_subframe_header(reader, bits_per_sample)?;
 
     match header.kind {
@@ -1118,7 +1143,7 @@ fn decode_utf8_number<R: Read>(reader: &mut R) -> Result<(u64, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use crate::{
         EncoderConfig,
@@ -1126,7 +1151,12 @@ mod tests {
         crc::{crc8, crc16},
     };
 
-    use super::{DecodeWorkChunk, Error, StreamInfo, decode_work_chunk, index_frames};
+    use super::{
+        DecodeWorkChunk, Error, FrameDecodeWorkerPool, StreamInfo, WORKER_SCAN_SUBFRAME_COUNT,
+        WORKER_SCRATCH_CREATE_COUNT, decode_work_chunk, index_frames,
+    };
+
+    static WORKER_DECODE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn wav_bytes_from_i16_samples(samples: &[i16]) -> Vec<u8> {
         let channels = 1u16;
@@ -1189,6 +1219,11 @@ mod tests {
         bytes[frame.offset..frame.offset + frame.bytes_consumed].to_vec()
     }
 
+    fn reset_worker_decode_test_counters() {
+        WORKER_SCAN_SUBFRAME_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+        WORKER_SCRATCH_CREATE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn build_chunk(frame_count: usize) -> DecodeWorkChunk {
         let (bytes, stream_info, _frame_offset, frames) = encoded_fixture();
         let chunk_frames = &frames[..frame_count];
@@ -1229,6 +1264,7 @@ mod tests {
 
     #[test]
     fn decode_work_chunk_rejects_bad_crc_in_single_worker_pass() {
+        let _guard = WORKER_DECODE_TEST_LOCK.lock().unwrap();
         let mut bytes = valid_test_chunk_bytes();
         *bytes.last_mut().unwrap() ^= 0x01;
 
@@ -1253,16 +1289,52 @@ mod tests {
             stream_info: stream_info_with_total_samples(16),
             bytes: valid_test_chunk_bytes().into(),
         };
+        let _guard = WORKER_DECODE_TEST_LOCK.lock().unwrap();
+        reset_worker_decode_test_counters();
 
         let decoded = decode_work_chunk(chunk).unwrap();
 
         assert_eq!(decoded.start_frame_index, 0);
         assert_eq!(decoded.frame_block_sizes, vec![16]);
         assert!(!decoded.decoded_samples.is_empty());
+        assert_eq!(
+            WORKER_SCAN_SUBFRAME_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn frame_decode_worker_pool_reuses_worker_scratch_across_chunks() {
+        let _guard = WORKER_DECODE_TEST_LOCK.lock().unwrap();
+        reset_worker_decode_test_counters();
+        let mut pool = FrameDecodeWorkerPool::new(1, 2);
+
+        for sequence in 0..2 {
+            pool.submit(DecodeWorkChunk {
+                sequence,
+                start_frame_index: 0,
+                start_sample_number: 0,
+                stream_info: stream_info_with_total_samples(16),
+                bytes: valid_test_chunk_bytes().into(),
+            })
+            .unwrap();
+        }
+
+        for _ in 0..2 {
+            let decoded = pool.recv().unwrap();
+            assert_eq!(decoded.frame_block_sizes, vec![16]);
+            assert!(!decoded.decoded_samples.is_empty());
+        }
+
+        assert_eq!(
+            WORKER_SCRATCH_CREATE_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
     fn worker_decode_rejects_bad_crc_in_compressed_chunk() {
+        let _guard = WORKER_DECODE_TEST_LOCK.lock().unwrap();
         let mut chunk = build_chunk(1);
         let bytes = Arc::make_mut(&mut chunk.bytes);
         let corrupt_index = bytes.len() - 3;
@@ -1277,6 +1349,7 @@ mod tests {
 
     #[test]
     fn worker_decode_rejects_wrong_sample_number_progression_in_compressed_chunk() {
+        let _guard = WORKER_DECODE_TEST_LOCK.lock().unwrap();
         let mut chunk = build_chunk(2);
         let header_sizes = {
             let (_stream_info, _, _frame_offset, frames) = encoded_fixture();
