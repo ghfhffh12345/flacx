@@ -766,10 +766,14 @@ fn real_reader_decode_uses_producer_backed_session_across_thread_counts() {
 #[cfg(feature = "progress")]
 #[test]
 fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
+    const DECODE_SLAB_MAX_INPUT_FRAMES: usize = 256;
+    const DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK: usize = 64 * 1024 * 4;
+
     let profile = DecodeProfileGuard::new();
     let flac = large_streaming_decode_flac_bytes(4);
     let expected_wav = large_streaming_decode_wav_bytes();
     let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let stream_info = reader.stream_info();
     let mut output = Cursor::new(Vec::new());
     let mut progress = Vec::new();
     let mut decoder = DecodeConfig::default()
@@ -786,7 +790,16 @@ fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
     let queue_limit = *profile_summary.get("queue_limit").unwrap();
     let peak_active_window_slabs = *profile_summary.get("peak_active_window_slabs").unwrap();
     let peak_staged_input_bytes = *profile_summary.get("peak_staged_input_bytes").unwrap();
-    let staged_input_bound = flac.len();
+    let advertised_max_frame_size =
+        usize::try_from(stream_info.max_frame_size).unwrap_or(usize::MAX);
+    let max_bytes_per_slab = if advertised_max_frame_size == 0 {
+        DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK
+    } else {
+        advertised_max_frame_size
+            .saturating_mul(DECODE_SLAB_MAX_INPUT_FRAMES)
+            .max(DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK)
+    };
+    let staged_input_bound = queue_limit.saturating_mul(max_bytes_per_slab);
 
     assert_eq!(
         summary.total_samples,
@@ -807,7 +820,7 @@ fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
     );
     assert!(
         peak_staged_input_bytes <= staged_input_bound,
-        "real-reader decode should keep staged producer input bounded by the decode window: peak_staged_input_bytes={peak_staged_input_bytes}, queue_limit={queue_limit}, staged_input_bound={staged_input_bound}"
+        "real-reader decode should keep staged producer input bounded by the decode window: peak_staged_input_bytes={peak_staged_input_bytes}, queue_limit={queue_limit}, max_bytes_per_slab={max_bytes_per_slab}, staged_input_bound={staged_input_bound}"
     );
 }
 
