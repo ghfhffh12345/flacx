@@ -72,6 +72,7 @@ impl DecodeSlabPlan {
 impl From<DecodeSlabPlan> for frame::DecodeWorkSlab {
     fn from(plan: DecodeSlabPlan) -> Self {
         Self {
+            sequence: plan.sequence,
             start_frame_index: plan.start_frame_index,
             start_sample_number: plan.start_sample_number,
             stream_info: plan.stream_info,

@@ -28,6 +28,7 @@ use std::{
 
 #[derive(Debug)]
 pub(super) struct DecodeWorkChunk {
+    pub(super) sequence: usize,
     pub(super) start_frame_index: usize,
     pub(super) start_sample_number: u64,
     pub(super) stream_info: StreamInfo,
@@ -37,6 +38,7 @@ pub(super) struct DecodeWorkChunk {
 
 #[derive(Debug)]
 pub(super) struct DecodedWorkChunk {
+    pub(super) sequence: usize,
     pub(super) start_frame_index: usize,
     pub(super) frame_block_sizes: Vec<u16>,
     pub(super) decoded_samples: Vec<i32>,
@@ -139,11 +141,13 @@ impl Drop for FrameDecodeWorkerPool {
 
 pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChunk> {
     let mut decoded_samples = Vec::new();
-    let mut decoded_block_sizes = Vec::with_capacity(chunk.frame_block_sizes.len());
+    let mut decoded_block_sizes = Vec::new();
     let mut cursor = 0usize;
     let mut expected_sample_number = chunk.start_sample_number;
+    let expected_block_sizes = &chunk.frame_block_sizes;
 
-    for (frame_offset, &expected_block_size) in chunk.frame_block_sizes.iter().enumerate() {
+    while cursor < chunk.bytes.len() {
+        let frame_offset = decoded_block_sizes.len();
         let parsed = scan_frame(
             &chunk.bytes[cursor..],
             chunk.stream_info,
@@ -159,7 +163,9 @@ pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChu
             bits_per_sample: parsed.bits_per_sample,
             assignment: parsed.assignment,
         };
-        if parsed.block_size != expected_block_size {
+        if let Some(&expected_block_size) = expected_block_sizes.get(frame_offset)
+            && parsed.block_size != expected_block_size
+        {
             return Err(Error::Decode(format!(
                 "decode chunk frame {} block size mismatch: expected {expected_block_size}, found {}",
                 chunk.start_frame_index + frame_offset,
@@ -174,14 +180,15 @@ pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChu
             expected_sample_number.saturating_add(u64::from(parsed.block_size));
     }
 
-    if cursor != chunk.bytes.len() {
+    if decoded_block_sizes.as_slice() != expected_block_sizes.as_slice() {
         return Err(Error::Decode(format!(
-            "decode chunk contained {} trailing bytes",
-            chunk.bytes.len() - cursor
+            "decode chunk block sizes mismatch: expected {:?}, found {:?}",
+            expected_block_sizes, decoded_block_sizes
         )));
     }
 
     Ok(DecodedWorkChunk {
+        sequence: chunk.sequence,
         start_frame_index: chunk.start_frame_index,
         frame_block_sizes: decoded_block_sizes,
         decoded_samples,
@@ -1136,6 +1143,7 @@ mod tests {
                 .expect("chunk fixture has at least one frame")
                 .bytes_consumed;
         DecodeWorkChunk {
+            sequence: 0,
             start_frame_index: 0,
             start_sample_number: 0,
             stream_info,
