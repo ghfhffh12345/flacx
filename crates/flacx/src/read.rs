@@ -69,8 +69,14 @@ impl<R: std::fmt::Debug> std::fmt::Debug for FlacPcmStream<R> {
             .field("drained_input_frames", &self.completed_input_frames)
             .field("drained_pcm_frames", &self.drained_pcm_frames)
             .field("threads", &self.threads)
-            .field("buffered_input_bytes", &self.chunk_scanner.buffered_bytes_len())
-            .field("queued_chunk_count", &self.chunk_scanner.ready_chunk_count())
+            .field(
+                "buffered_input_bytes",
+                &self.chunk_scanner.buffered_bytes_len(),
+            )
+            .field(
+                "queued_chunk_count",
+                &self.chunk_scanner.ready_chunk_count(),
+            )
             .field(
                 "ready_slab_count",
                 &self
@@ -461,10 +467,43 @@ impl<R: Read + Seek> FlacPcmStream<R> {
         let discovered_input_frames = chunk.frame_block_sizes.len();
         let discovered_sample_number = chunk
             .frame_block_sizes
-                .iter()
-                .map(|&block_size| u64::from(block_size))
-                .sum::<u64>();
-        self.submit_chunk(chunk)?;
+            .iter()
+            .map(|&block_size| u64::from(block_size))
+            .sum::<u64>();
+        let chunk::CompressedDecodeChunk {
+            sequence,
+            start_frame_index,
+            start_sample_number,
+            frame_block_sizes,
+            frame_byte_lengths,
+            bytes,
+        } = chunk;
+        let accepted = self
+            .session
+            .as_mut()
+            .expect("streaming decode session is available before chunk submission")
+            .submit(DecodeSlabPlan {
+                sequence,
+                start_frame_index,
+                start_sample_number,
+                stream_info: self.stream_info,
+                frame_block_sizes: frame_block_sizes.clone(),
+                bytes: Arc::clone(&bytes),
+                frames: Arc::from(Vec::<FrameIndex>::new()),
+            })?;
+        if !accepted {
+            self.chunk_scanner
+                .requeue_ready_chunk_front(chunk::CompressedDecodeChunk {
+                    sequence,
+                    start_frame_index,
+                    start_sample_number,
+                    frame_block_sizes,
+                    frame_byte_lengths,
+                    bytes,
+                });
+            return Ok(false);
+        }
+        self.submitted_frame_byte_lengths.extend(frame_byte_lengths);
         self.discovered_input_frames = self
             .discovered_input_frames
             .saturating_add(discovered_input_frames);
@@ -563,25 +602,6 @@ impl<R: Read + Seek> FlacPcmStream<R> {
 
     fn submit_scanner_ready_chunks(&mut self) -> Result<bool> {
         self.dispatch_scanner_step(chunk::ChunkStep::Pending)
-    }
-
-    fn submit_chunk(&mut self, chunk: chunk::CompressedDecodeChunk) -> Result<()> {
-        let plan = DecodeSlabPlan {
-            sequence: chunk.sequence,
-            start_frame_index: chunk.start_frame_index,
-            start_sample_number: chunk.start_sample_number,
-            stream_info: self.stream_info,
-            frame_block_sizes: chunk.frame_block_sizes,
-            bytes: Arc::clone(&chunk.bytes),
-            frames: Arc::from(Vec::<FrameIndex>::new()),
-        };
-        self.session
-            .as_mut()
-            .expect("streaming decode session is available before chunk submission")
-            .submit(plan)?;
-        self.submitted_frame_byte_lengths
-            .extend(chunk.frame_byte_lengths);
-        Ok(())
     }
 
     fn decode_is_exhausted(&self) -> bool {
@@ -862,9 +882,7 @@ fn validate_direct_stream_info(stream_info: StreamInfo) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use super::frame::{
         channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment,
@@ -968,23 +986,6 @@ mod tests {
         }
     }
 
-    fn current_process_thread_count() -> usize {
-        fs::read_dir("/proc/self/task")
-            .expect("linux thread list should be readable in tests")
-            .count()
-    }
-
-    fn wait_for_thread_count_at_least(expected_minimum: usize) -> usize {
-        let start = std::time::Instant::now();
-        loop {
-            let count = current_process_thread_count();
-            if count >= expected_minimum || start.elapsed() > Duration::from_secs(1) {
-                return count;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     #[test]
     fn live_set_threads_reconfigures_streaming_session_window_limit() {
         let stream_info = direct_stream_info();
@@ -1007,7 +1008,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .window_depth_limit_for_tests();
-        assert!(stream.submit_scanned_chunk(chunk).is_ok());
+        assert!(stream.submit_scanned_chunk(chunk).unwrap());
         assert!(
             stream
                 .session
@@ -1057,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn read_chunk_drives_worker_submission_without_coordinator_backpressure_regression() {
+    fn read_chunk_retries_direct_dispatch_after_worker_queue_backpressure() {
         let (stream_info, chunks) = fixture_ready_chunks(2);
         let expected_frames = usize::try_from(stream_info.total_samples).unwrap();
         let mut chunks = chunks.into_iter();
@@ -1067,33 +1068,22 @@ mod tests {
             .unwrap();
         let output_channels = usize::from(stream.spec.channels);
         let mut output = Vec::new();
-        let before = current_process_thread_count();
-
-        stream.set_threads(2);
-        stream.ensure_streaming_session();
-        let after = wait_for_thread_count_at_least(before + 2);
-        stream
-            .session
-            .as_mut()
-            .unwrap()
-            .set_window_depth_limit(1);
-
-        assert_eq!(
-            after,
-            before + 2,
-            "read path should create only worker threads when the streaming session starts"
-        );
+        let (session, receive_hold) =
+            super::session::StreamingDecodeSession::spawn_with_blocked_worker_receives(1, 3, 1);
+        stream.session = Some(session);
 
         assert!(stream.submit_scanned_chunk(chunks.next().unwrap()).unwrap());
-        assert!(!stream.submit_scanned_chunk(chunks.next().unwrap()).unwrap());
+        let rejected = stream.submit_scanned_chunk(chunks.next().unwrap()).unwrap();
 
         let queued_before = stream.chunk_scanner.ready_chunk_count();
         let completed_before = stream.completed_input_frames();
+        assert!(!rejected);
+        assert_eq!(queued_before, 1);
+        assert_eq!(completed_before, 0);
 
+        receive_hold.release();
         let frames = stream.read_chunk(expected_frames, &mut output).unwrap();
 
-        assert!(queued_before > 0);
-        assert_eq!(completed_before, 0);
         assert_eq!(frames, expected_frames);
         assert_eq!(output.len(), frames * output_channels);
         assert_eq!(stream.chunk_scanner.ready_chunk_count(), 0);

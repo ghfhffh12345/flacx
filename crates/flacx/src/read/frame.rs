@@ -15,6 +15,8 @@ use crate::{
 #[cfg(feature = "progress")]
 use crate::{input::container_bits_from_valid_bits, progress::emit_progress};
 use bitstream_io::{BigEndian, BitRead, BitReader};
+#[cfg(test)]
+use std::sync::{Condvar, Mutex};
 use std::{
     collections::HashMap,
     io::{Cursor, Read},
@@ -90,8 +92,111 @@ pub(super) struct FrameDecodeWorkerPool {
     next_worker: usize,
 }
 
+#[cfg(test)]
+pub(super) type WorkerReceiveGate = Arc<(Mutex<bool>, Condvar)>;
+
+#[cfg(test)]
+pub(super) struct WorkerReceiveHold {
+    gate: WorkerReceiveGate,
+}
+
+#[cfg(test)]
+impl WorkerReceiveHold {
+    pub(super) fn release(&self) {
+        FrameDecodeWorkerPool::release_receive_gate(&self.gate);
+    }
+}
+
+#[cfg(test)]
+impl Drop for WorkerReceiveHold {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(test)]
+fn wait_for_worker_receive_gate(gate: &WorkerReceiveGate) {
+    let (lock, condvar) = &**gate;
+    let mut open = lock.lock().unwrap();
+    while !*open {
+        open = condvar.wait(open).unwrap();
+    }
+}
+
 impl FrameDecodeWorkerPool {
     pub(super) fn new(worker_count: usize, queue_depth: usize) -> Self {
+        #[cfg(test)]
+        {
+            Self::new_with_receive_gate(worker_count, queue_depth, None)
+        }
+
+        #[cfg(not(test))]
+        {
+            Self::new_with_receive_gate(worker_count, queue_depth)
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_receive_gate(
+        worker_count: usize,
+        queue_depth: usize,
+        receive_gate: Option<WorkerReceiveGate>,
+    ) -> Self {
+        Self::new_with_receive_gate_impl(worker_count, queue_depth, receive_gate)
+    }
+
+    #[cfg(not(test))]
+    fn new_with_receive_gate(worker_count: usize, queue_depth: usize) -> Self {
+        Self::new_with_receive_gate_impl(worker_count, queue_depth)
+    }
+
+    #[cfg(test)]
+    fn new_with_receive_gate_impl(
+        worker_count: usize,
+        queue_depth: usize,
+        receive_gate: Option<WorkerReceiveGate>,
+    ) -> Self {
+        let queue_depth = queue_depth.max(1);
+        let (result_sender, result_receiver) = mpsc::channel::<Result<DecodedWorkChunk>>();
+        let mut worker_senders = Vec::with_capacity(worker_count);
+        let mut worker_handles = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count.max(1) {
+            let (sender, receiver) = mpsc::sync_channel::<DecodeWorkChunk>(queue_depth);
+            let result_sender = result_sender.clone();
+            let receive_gate = receive_gate.clone();
+            worker_handles.push(thread::spawn(move || {
+                let mut scratch = WorkerScratch::new();
+                if let Some(gate) = receive_gate.as_ref() {
+                    wait_for_worker_receive_gate(gate);
+                }
+                while let Ok(chunk) = receiver.recv() {
+                    if result_sender
+                        .send(decode_work_chunk_with_scratch(chunk, &mut scratch))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if let Some(gate) = receive_gate.as_ref() {
+                        wait_for_worker_receive_gate(gate);
+                    }
+                }
+            }));
+            worker_senders.push(sender);
+        }
+
+        drop(result_sender);
+
+        Self {
+            worker_senders,
+            result_receiver,
+            worker_handles,
+            next_worker: 0,
+        }
+    }
+
+    #[cfg(not(test))]
+    fn new_with_receive_gate_impl(worker_count: usize, queue_depth: usize) -> Self {
         let queue_depth = queue_depth.max(1);
         let (result_sender, result_receiver) = mpsc::channel::<Result<DecodedWorkChunk>>();
         let mut worker_senders = Vec::with_capacity(worker_count);
@@ -122,6 +227,18 @@ impl FrameDecodeWorkerPool {
             worker_handles,
             next_worker: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_blocked_receives(
+        worker_count: usize,
+        queue_depth: usize,
+    ) -> (Self, WorkerReceiveHold) {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        (
+            Self::new_with_receive_gate(worker_count, queue_depth, Some(Arc::clone(&gate))),
+            WorkerReceiveHold { gate },
+        )
     }
 
     pub(super) fn submit(&mut self, slab: DecodeWorkChunk) -> Result<()> {
@@ -160,6 +277,13 @@ impl FrameDecodeWorkerPool {
         self.result_receiver
             .recv()
             .map_err(|_| Error::Thread("decode worker result channel closed unexpectedly".into()))?
+    }
+
+    #[cfg(test)]
+    pub(super) fn release_receive_gate(gate: &WorkerReceiveGate) {
+        let (lock, condvar) = &**gate;
+        *lock.lock().unwrap() = true;
+        condvar.notify_all();
     }
 }
 

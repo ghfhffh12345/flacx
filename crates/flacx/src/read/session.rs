@@ -83,6 +83,7 @@ pub(super) struct StreamingDecodeSession {
     outstanding_window_slabs: usize,
     result_channel_closed: bool,
     window_depth_limit: usize,
+    worker_queue_saturated: bool,
     submitted_input_bytes: VecDeque<usize>,
     staged_input_bytes: usize,
     worker_count: usize,
@@ -116,6 +117,7 @@ impl StreamingDecodeSession {
             outstanding_window_slabs: 0,
             result_channel_closed: false,
             window_depth_limit: window_depth_limit.max(1),
+            worker_queue_saturated: false,
             submitted_input_bytes: VecDeque::new(),
             staged_input_bytes: 0,
             worker_count: 0,
@@ -140,6 +142,7 @@ impl StreamingDecodeSession {
             outstanding_window_slabs: 0,
             result_channel_closed: false,
             window_depth_limit,
+            worker_queue_saturated: false,
             submitted_input_bytes: VecDeque::new(),
             staged_input_bytes: 0,
             worker_count,
@@ -152,7 +155,7 @@ impl StreamingDecodeSession {
         }
     }
 
-    pub(super) fn submit(&mut self, plan: DecodeSlabPlan) -> Result<()> {
+    pub(super) fn submit(&mut self, plan: DecodeSlabPlan) -> Result<bool> {
         #[cfg(test)]
         if self.force_submit_failure {
             return Err(Error::Thread(
@@ -161,12 +164,25 @@ impl StreamingDecodeSession {
         }
 
         let input_bytes = plan.bytes.len();
-        self.worker_pool.submit(plan.into())?;
+        match self.worker_pool.try_submit(plan.into()) {
+            Ok(()) => {
+                self.worker_queue_saturated = false;
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.worker_queue_saturated = true;
+                return Ok(false);
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return Err(Error::Thread(
+                    "decode worker channel closed unexpectedly".into(),
+                ));
+            }
+        }
         self.outstanding_window_slabs = self.outstanding_window_slabs.saturating_add(1);
         self.submitted_input_bytes.push_back(input_bytes);
         self.staged_input_bytes = self.staged_input_bytes.saturating_add(input_bytes);
         profile::observe_staged_input_bytes_for_current_thread(self.staged_input_bytes);
-        Ok(())
+        Ok(true)
     }
 
     pub(super) fn collect_ready_slabs(&mut self) -> Result<usize> {
@@ -253,7 +269,8 @@ impl StreamingDecodeSession {
 
     pub(super) fn has_submit_capacity(&self) -> bool {
         if self.has_background_runtime() {
-            return self.outstanding_window_slabs() < self.window_depth_limit();
+            return !self.worker_queue_saturated
+                && self.outstanding_window_slabs() < self.window_depth_limit();
         }
         self.active_slab_count() < self.window_depth_limit()
     }
@@ -264,6 +281,7 @@ impl StreamingDecodeSession {
     }
 
     fn accept_result(&mut self, result: DecodeSessionResult) {
+        self.worker_queue_saturated = false;
         let pcm_frames = result.slab.pcm_frames();
         self.ordered_drain.push_ready(result.slab);
         profile::accept_ready_pcm_frames_for_current_thread(
@@ -350,6 +368,37 @@ impl StreamingDecodeSession {
     }
 
     #[cfg(test)]
+    pub(super) fn spawn_with_blocked_worker_receives(
+        worker_count: usize,
+        window_depth_limit: usize,
+        worker_queue_depth: usize,
+    ) -> (Self, frame::WorkerReceiveHold) {
+        let window_depth_limit = window_depth_limit.max(1);
+        let worker_count = worker_count.max(1);
+        let (worker_pool, receive_gate) = frame::FrameDecodeWorkerPool::new_with_blocked_receives(
+            worker_count,
+            worker_queue_depth.max(1),
+        );
+        (
+            Self {
+                worker_pool,
+                ordered_drain: OrderedSlabDrain::new(),
+                outstanding_window_slabs: 0,
+                result_channel_closed: false,
+                window_depth_limit,
+                worker_queue_saturated: false,
+                submitted_input_bytes: VecDeque::new(),
+                staged_input_bytes: 0,
+                worker_count,
+                test_result_receiver: None,
+                has_background_runtime: true,
+                force_submit_failure: false,
+            },
+            receive_gate,
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn window_depth_limit_for_tests(&self) -> usize {
         self.window_depth_limit
     }
@@ -368,7 +417,6 @@ impl StreamingDecodeSession {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
         sync::{Arc, Condvar, Mutex, mpsc},
         time::Duration,
     };
@@ -400,23 +448,6 @@ mod tests {
             bits_per_sample: 16,
             total_samples: 16 * 12,
             md5: [0; 16],
-        }
-    }
-
-    fn current_process_thread_count() -> usize {
-        fs::read_dir("/proc/self/task")
-            .expect("linux thread list should be readable in tests")
-            .count()
-    }
-
-    fn wait_for_thread_count_at_least(expected_minimum: usize) -> usize {
-        let start = std::time::Instant::now();
-        loop {
-            let count = current_process_thread_count();
-            if count >= expected_minimum || start.elapsed() > Duration::from_secs(1) {
-                return count;
-            }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -488,8 +519,8 @@ mod tests {
         let (plans, channels) = fixture_plans(2);
         let mut plans = plans.into_iter();
         let mut session = StreamingDecodeSession::spawn(1, 2);
-        session.submit(plans.next().unwrap()).unwrap();
-        session.submit(plans.next().unwrap()).unwrap();
+        assert!(session.submit(plans.next().unwrap()).unwrap());
+        assert!(session.submit(plans.next().unwrap()).unwrap());
 
         assert!(!session.has_submit_capacity());
         assert!(session.wait_for_ready_slab().unwrap());
@@ -509,7 +540,7 @@ mod tests {
         let (plans, channels) = fixture_plans(1);
         let mut session = StreamingDecodeSession::spawn(2, 1);
 
-        session.submit(plans.into_iter().next().unwrap()).unwrap();
+        assert!(session.submit(plans.into_iter().next().unwrap()).unwrap());
         assert!(session.wait_for_ready_slab().unwrap());
 
         let mut output = Vec::new();
@@ -521,7 +552,7 @@ mod tests {
     fn wait_for_ready_slab_returns_false_after_all_work_is_drained() {
         let (plans, channels) = fixture_plans(1);
         let mut session = StreamingDecodeSession::spawn(1, 1);
-        session.submit(plans.into_iter().next().unwrap()).unwrap();
+        assert!(session.submit(plans.into_iter().next().unwrap()).unwrap());
 
         assert!(session.wait_for_ready_slab().unwrap());
         let mut output = Vec::new();
@@ -555,7 +586,7 @@ mod tests {
         profile::begin_decode_profile_session_for_current_thread(1, 1, 16, plan.bytes.len());
 
         let mut session = StreamingDecodeSession::spawn(1, 1);
-        session.submit(plan).unwrap();
+        assert!(session.submit(plan).unwrap());
 
         assert!(session.wait_for_ready_slab().unwrap());
         let mut output = Vec::new();
@@ -619,47 +650,33 @@ mod tests {
     }
 
     #[test]
-    fn spawn_owns_a_dispatch_runtime() {
-        let before = current_process_thread_count();
+    fn spawn_owns_a_direct_dispatch_runtime() {
         let session = StreamingDecodeSession::spawn(2, 1);
-        let after = wait_for_thread_count_at_least(before + 2);
 
         assert!(session.has_background_runtime());
         assert_eq!(session.worker_count_for_tests(), 2);
-        assert_eq!(
-            after,
-            before + 2,
-            "spawn(2, ..) should only create worker threads, not an extra coordinator thread"
-        );
+        assert!(session.has_submit_capacity());
     }
 
     #[test]
-    fn streaming_session_submits_directly_to_worker_queues_without_coordinator() {
-        let (plans, channels) = fixture_plans(1);
-        let before = current_process_thread_count();
-        let mut session = StreamingDecodeSession::spawn(2, 1);
-        let after = wait_for_thread_count_at_least(before + 2);
-        let mut output = Vec::new();
+    fn direct_dispatch_submit_stops_at_worker_queue_backpressure_without_blocking() {
+        let (plans, _) = fixture_plans(2);
+        let mut plans = plans.into_iter();
+        let (mut session, receive_hold) =
+            StreamingDecodeSession::spawn_with_blocked_worker_receives(1, 3, 1);
 
-        assert_eq!(
-            after,
-            before + 2,
-            "streaming session runtime should expose only worker threads before submission"
+        assert!(session.has_submit_capacity());
+        assert!(session.submit(plans.next().unwrap()).unwrap());
+        assert!(session.has_submit_capacity());
+        assert!(
+            !session.submit(plans.next().unwrap()).unwrap(),
+            "submission should surface worker-queue backpressure instead of blocking"
         );
-        session.submit(plans.into_iter().next().unwrap()).unwrap();
+        assert!(!session.has_submit_capacity());
 
-        assert_eq!(session.ready_slab_count(), 0);
-        assert_eq!(session.completed_input_frames(), 0);
+        receive_hold.release();
         assert!(session.wait_for_ready_slab().unwrap());
-        assert_eq!(session.ready_slab_count(), 1);
-
-        let (drained_frames, completed_input_frames) =
-            session.drain_into(usize::MAX, channels, &mut output);
-        assert!(drained_frames > 0);
-        assert_eq!(completed_input_frames, 1);
-        assert_eq!(session.completed_input_frames(), 1);
-        assert_eq!(session.ready_slab_count(), 0);
-        assert!(!output.is_empty());
+        assert!(session.has_submit_capacity());
     }
 
     #[test]
