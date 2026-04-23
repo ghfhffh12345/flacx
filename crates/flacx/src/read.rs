@@ -862,7 +862,9 @@ fn validate_direct_stream_info(stream_info: StreamInfo) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::frame::{
         channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment,
@@ -966,6 +968,23 @@ mod tests {
         }
     }
 
+    fn current_process_thread_count() -> usize {
+        fs::read_dir("/proc/self/task")
+            .expect("linux thread list should be readable in tests")
+            .count()
+    }
+
+    fn wait_for_thread_count_at_least(expected_minimum: usize) -> usize {
+        let start = std::time::Instant::now();
+        loop {
+            let count = current_process_thread_count();
+            if count >= expected_minimum || start.elapsed() > Duration::from_secs(1) {
+                return count;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn live_set_threads_reconfigures_streaming_session_window_limit() {
         let stream_info = direct_stream_info();
@@ -1038,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn read_chunk_releases_backpressure_and_submits_queued_ready_chunks() {
+    fn read_chunk_drives_worker_submission_without_coordinator_backpressure_regression() {
         let (stream_info, chunks) = fixture_ready_chunks(2);
         let expected_frames = usize::try_from(stream_info.total_samples).unwrap();
         let mut chunks = chunks.into_iter();
@@ -1048,13 +1067,22 @@ mod tests {
             .unwrap();
         let output_channels = usize::from(stream.spec.channels);
         let mut output = Vec::new();
+        let before = current_process_thread_count();
 
+        stream.set_threads(2);
         stream.ensure_streaming_session();
+        let after = wait_for_thread_count_at_least(before + 2);
         stream
             .session
             .as_mut()
             .unwrap()
             .set_window_depth_limit(1);
+
+        assert_eq!(
+            after,
+            before + 2,
+            "read path should create only worker threads when the streaming session starts"
+        );
 
         assert!(stream.submit_scanned_chunk(chunks.next().unwrap()).unwrap());
         assert!(!stream.submit_scanned_chunk(chunks.next().unwrap()).unwrap());

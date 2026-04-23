@@ -368,6 +368,7 @@ impl StreamingDecodeSession {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         sync::{Arc, Condvar, Mutex, mpsc},
         time::Duration,
     };
@@ -399,6 +400,23 @@ mod tests {
             bits_per_sample: 16,
             total_samples: 16 * 12,
             md5: [0; 16],
+        }
+    }
+
+    fn current_process_thread_count() -> usize {
+        fs::read_dir("/proc/self/task")
+            .expect("linux thread list should be readable in tests")
+            .count()
+    }
+
+    fn wait_for_thread_count_at_least(expected_minimum: usize) -> usize {
+        let start = std::time::Instant::now();
+        loop {
+            let count = current_process_thread_count();
+            if count >= expected_minimum || start.elapsed() > Duration::from_secs(1) {
+                return count;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -602,18 +620,32 @@ mod tests {
 
     #[test]
     fn spawn_owns_a_dispatch_runtime() {
+        let before = current_process_thread_count();
         let session = StreamingDecodeSession::spawn(2, 1);
+        let after = wait_for_thread_count_at_least(before + 2);
 
         assert!(session.has_background_runtime());
         assert_eq!(session.worker_count_for_tests(), 2);
+        assert_eq!(
+            after,
+            before + 2,
+            "spawn(2, ..) should only create worker threads, not an extra coordinator thread"
+        );
     }
 
     #[test]
-    fn streaming_session_submit_reaches_worker_output_without_coordinator_dispatch() {
+    fn streaming_session_submits_directly_to_worker_queues_without_coordinator() {
         let (plans, channels) = fixture_plans(1);
-        let mut session = StreamingDecodeSession::spawn(1, 1);
+        let before = current_process_thread_count();
+        let mut session = StreamingDecodeSession::spawn(2, 1);
+        let after = wait_for_thread_count_at_least(before + 2);
         let mut output = Vec::new();
 
+        assert_eq!(
+            after,
+            before + 2,
+            "streaming session runtime should expose only worker threads before submission"
+        );
         session.submit(plans.into_iter().next().unwrap()).unwrap();
 
         assert_eq!(session.ready_slab_count(), 0);
