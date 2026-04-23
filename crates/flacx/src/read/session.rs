@@ -189,10 +189,6 @@ impl StreamingDecodeSession {
         }
     }
 
-    pub(super) fn collect_ready_packets(&mut self) -> Result<usize> {
-        self.collect_ready_slabs()
-    }
-
     pub(super) fn wait_for_ready_slab(&mut self) -> Result<bool> {
         if self.background_work_is_exhausted() {
             return Ok(false);
@@ -207,10 +203,6 @@ impl StreamingDecodeSession {
                 Ok(false)
             }
         }
-    }
-
-    pub(super) fn wait_for_ready_packet(&mut self) -> Result<bool> {
-        self.wait_for_ready_slab()
     }
 
     pub(super) fn drain_into(
@@ -238,32 +230,16 @@ impl StreamingDecodeSession {
         self.ordered_drain.ready_slab_count()
     }
 
-    pub(super) fn ready_packet_count(&self) -> usize {
-        self.ready_slab_count()
-    }
-
     pub(super) fn next_ready_slab_start_frame(&self) -> usize {
         self.ordered_drain.next_ready_slab_start_frame()
-    }
-
-    pub(super) fn next_ready_packet_start_frame(&self) -> usize {
-        self.next_ready_slab_start_frame()
     }
 
     pub(super) fn has_draining_slab(&self) -> bool {
         self.ordered_drain.has_draining_slab()
     }
 
-    pub(super) fn has_draining_packet(&self) -> bool {
-        self.has_draining_slab()
-    }
-
     pub(super) fn active_slab_count(&self) -> usize {
         self.ordered_drain.active_slab_count()
-    }
-
-    pub(super) fn active_packet_count(&self) -> usize {
-        self.active_slab_count()
     }
 
     pub(super) fn is_idle(&self) -> bool {

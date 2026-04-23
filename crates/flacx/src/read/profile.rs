@@ -108,14 +108,14 @@ pub(crate) fn clear_decode_profile_session_for_current_thread() {
 
 pub(crate) fn accept_ready_pcm_frames_for_current_thread(
     pcm_frames: usize,
-    inflight_packets: usize,
+    active_window_slabs: usize,
 ) {
     CURRENT_PROFILE_SESSION.with(|session| {
         if let Some(session) = session.borrow().as_ref() {
             let mut session = session.0.lock().unwrap();
             session
                 .summary
-                .observe_active_window_slabs(inflight_packets);
+                .observe_active_window_slabs(active_window_slabs);
             session.resident_pcm_frames = session.resident_pcm_frames.saturating_add(pcm_frames);
             let resident_pcm_frames = session.resident_pcm_frames;
             session
@@ -181,7 +181,7 @@ pub(crate) fn append_decode_session_summary(
     };
     let _ = writeln!(
         file,
-        "event=decode_session_summary\tworker_count={}\tqueue_limit={}\tpeak_active_window_slabs={}\tpeak_inflight_packets={}\tpeak_resident_pcm_frames={}\tpeak_inflight_pcm_frames={}\tpeak_staged_input_bytes={}\ttarget_pcm_frames={}\tmax_input_bytes_per_chunk={}",
+        "event=decode_session_summary\tworker_count={}\tqueue_limit={}\tpeak_active_window_slabs={}\tpeak_dispatch_window_slabs={}\tpeak_resident_pcm_frames={}\tpeak_dispatch_pcm_frames={}\tpeak_staged_input_bytes={}\ttarget_pcm_frames={}\tmax_input_bytes_per_chunk={}",
         profile.worker_count,
         profile.queue_limit,
         profile.peak_active_window_slabs,

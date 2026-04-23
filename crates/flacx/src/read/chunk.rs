@@ -71,26 +71,23 @@ impl ChunkScanner {
         }
 
         self.buffered_bytes.extend_from_slice(bytes);
-        if let Some(chunk) = self.ready_chunks.pop_front() {
-            return Ok(ChunkStep::Sealed(chunk));
-        }
-
-        self.scan_available_frames(false)
+        self.scan_available_frames(false)?;
+        Ok(self
+            .ready_chunks
+            .pop_front()
+            .map_or(ChunkStep::Pending, ChunkStep::Sealed))
     }
 
     pub(super) fn finish(&mut self) -> Result<ChunkStep> {
-        if let Some(chunk) = self.ready_chunks.pop_front() {
-            return Ok(ChunkStep::Sealed(chunk));
-        }
         if self.finished {
             return Ok(ChunkStep::Pending);
         }
 
-        let step = self.scan_available_frames(true)?;
-        if matches!(step, ChunkStep::Pending) {
-            self.finished = true;
-        }
-        Ok(step)
+        self.scan_available_frames(true)?;
+        Ok(self
+            .ready_chunks
+            .pop_front()
+            .map_or(ChunkStep::Pending, ChunkStep::Sealed))
     }
 
     pub(super) fn take_ready_chunk(&mut self) -> Option<CompressedDecodeChunk> {
@@ -113,23 +110,26 @@ impl ChunkScanner {
         self.finished
     }
 
-    fn scan_available_frames(&mut self, eof: bool) -> Result<ChunkStep> {
+    fn scan_available_frames(&mut self, eof: bool) -> Result<()> {
         loop {
-            if let Some(chunk) = self.ready_chunks.pop_front() {
-                return Ok(ChunkStep::Sealed(chunk));
-            }
-
             if self.next_sample_number >= self.stream_info.total_samples {
                 if let Some(chunk) = self.seal_pending_chunk() {
-                    return Ok(ChunkStep::Sealed(chunk));
+                    self.ready_chunks.push_back(chunk);
                 }
                 self.finished = true;
-                return Ok(ChunkStep::Pending);
+                return Ok(());
             }
 
             if self.current_frame.is_none() {
                 if self.buffered_bytes.is_empty() {
-                    return Ok(self.finish_or_pending(eof));
+                    if eof {
+                        if let Some(chunk) = self.seal_pending_chunk() {
+                            self.ready_chunks.push_back(chunk);
+                        } else {
+                            self.finished = true;
+                        }
+                    }
+                    return Ok(());
                 }
 
                 match super::frame::parse_frame_header(
@@ -146,7 +146,7 @@ impl ChunkScanner {
                         });
                     }
                     Err(error) if is_incomplete_header(&error) && !eof => {
-                        return Ok(ChunkStep::Pending);
+                        return Ok(());
                     }
                     Err(error) => return Err(error),
                 }
@@ -178,36 +178,35 @@ impl ChunkScanner {
             }
 
             if eof {
-                let current_end = current.start_offset
-                    + super::frame::scan_frame(
+                let current_end = if self
+                    .next_sample_number
+                    .saturating_add(u64::from(current.parsed.block_size))
+                    >= self.stream_info.total_samples
+                {
+                    match super::frame::scan_frame(
                         &self.buffered_bytes[current.start_offset..],
                         self.stream_info,
                         self.next_frame_index as u64,
                         self.next_sample_number,
-                    )?
-                    .bytes_consumed;
+                    ) {
+                        Ok(parsed) => current.start_offset + parsed.bytes_consumed,
+                        Err(_) => self.buffered_bytes.len(),
+                    }
+                } else {
+                    self.buffered_bytes.len()
+                };
                 self.current_frame = None;
                 self.accept_frame(current, current_end);
-                return Ok(self.finish_or_pending(true));
+                if let Some(chunk) = self.seal_pending_chunk() {
+                    self.ready_chunks.push_back(chunk);
+                } else {
+                    self.finished = true;
+                }
+                return Ok(());
             }
 
-            return Ok(ChunkStep::Pending);
+            return Ok(());
         }
-    }
-
-    fn finish_or_pending(&mut self, eof: bool) -> ChunkStep {
-        if let Some(chunk) = self.ready_chunks.pop_front() {
-            return ChunkStep::Sealed(chunk);
-        }
-
-        if eof {
-            if let Some(chunk) = self.seal_pending_chunk() {
-                return ChunkStep::Sealed(chunk);
-            }
-            self.finished = true;
-        }
-
-        ChunkStep::Pending
     }
 
     fn accept_frame(&mut self, frame: ScannedFrame, frame_end: usize) {
@@ -365,6 +364,10 @@ mod tests {
     };
 
     fn stream_info() -> StreamInfo {
+        stream_info_with_total_samples(64)
+    }
+
+    fn stream_info_with_total_samples(total_samples: u64) -> StreamInfo {
         StreamInfo {
             min_block_size: 16,
             max_block_size: 16,
@@ -373,7 +376,7 @@ mod tests {
             sample_rate: 44_100,
             channels: 1,
             bits_per_sample: 16,
-            total_samples: 64,
+            total_samples,
             md5: [0; 16],
         }
     }
@@ -468,7 +471,7 @@ mod tests {
         joined.extend(frame_bytes(2, 7));
 
         let mut scanner = ChunkScanner::new(
-            stream_info(),
+            stream_info_with_total_samples(96),
             ChunkScannerConfig {
                 target_pcm_frames_per_chunk: 128,
                 max_frames_per_chunk: 2,
@@ -547,7 +550,7 @@ mod tests {
         let trailing = frame_bytes(5, 10);
 
         let mut scanner = ChunkScanner::new(
-            stream_info(),
+            stream_info_with_total_samples(96),
             ChunkScannerConfig {
                 target_pcm_frames_per_chunk: 128,
                 max_frames_per_chunk: 2,

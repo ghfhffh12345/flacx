@@ -45,8 +45,6 @@ pub(super) struct DecodedWorkChunk {
 
 pub(super) type DecodeWorkSlab = DecodeWorkChunk;
 pub(super) type DecodedWorkSlab = DecodedWorkChunk;
-pub(super) type DecodeWorkPacket = DecodeWorkChunk;
-pub(super) type DecodedWorkPacket = DecodedWorkChunk;
 
 pub(super) enum DecodeWorkerRecv {
     Empty,
@@ -179,10 +177,6 @@ pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChu
 
 pub(super) fn decode_work_slab(slab: DecodeWorkSlab) -> Result<DecodedWorkSlab> {
     decode_work_chunk(slab)
-}
-
-pub(super) fn decode_work_packet(packet: DecodeWorkPacket) -> Result<DecodedWorkPacket> {
-    decode_work_chunk(packet)
 }
 
 #[allow(dead_code)]
