@@ -841,8 +841,7 @@ mod tests {
     }
 
     fn fixture_plans(count: usize) -> (Vec<DecodeSlabPlan>, usize) {
-        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-flacs/case1/test01.flac");
+        let fixture_path = workspace_fixture_dir("test-flacs").join("case1/test01.flac");
         let bytes = std::fs::read(fixture_path).unwrap();
         let (stream_info, _, frame_offset) =
             crate::read::metadata::parse_metadata(&bytes, false).unwrap();
@@ -871,5 +870,13 @@ mod tests {
             })
             .collect();
         (plans, usize::from(stream_info.channels))
+    }
+
+    fn workspace_fixture_dir(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .map(|path| path.join(name))
+            .find(|path| path.is_dir())
+            .unwrap_or_else(|| panic!("fixture directory '{name}' should exist from the workspace root"))
     }
 }

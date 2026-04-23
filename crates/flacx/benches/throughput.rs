@@ -22,8 +22,12 @@ use support::{
 };
 use support::{cue_chunk, info_list_chunk, pcm_wav_bytes, sample_fixture, wav_with_chunks};
 
-fn corpus_root(relative: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+fn corpus_root(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .map(|path| path.join(name))
+        .find(|path| path.is_dir())
+        .unwrap_or_else(|| panic!("corpus root '{name}' should exist from the workspace root"))
 }
 
 fn encode_corpus_throughput(c: &mut Criterion) {
@@ -249,8 +253,8 @@ struct Corpus {
 
 impl Corpus {
     fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let wav_root = corpus_root("../../test-wavs");
-        let flac_root = corpus_root("../../test-flacs");
+        let wav_root = corpus_root("test-wavs");
+        let flac_root = corpus_root("test-flacs");
         let wav_files = load_sorted_corpus_files(&wav_root, "wav")?;
         let flac_files = load_sorted_corpus_files(&flac_root, "flac")?;
         let flac_files = flac_files
