@@ -32,7 +32,6 @@ pub(super) struct DecodeWorkChunk {
     pub(super) start_frame_index: usize,
     pub(super) start_sample_number: u64,
     pub(super) stream_info: StreamInfo,
-    pub(super) frame_block_sizes: Vec<u16>,
     pub(super) bytes: Arc<[u8]>,
 }
 
@@ -144,7 +143,6 @@ pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChu
     let mut decoded_block_sizes = Vec::new();
     let mut cursor = 0usize;
     let mut expected_sample_number = chunk.start_sample_number;
-    let expected_block_sizes = &chunk.frame_block_sizes;
 
     while cursor < chunk.bytes.len() {
         let frame_offset = decoded_block_sizes.len();
@@ -163,28 +161,12 @@ pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChu
             bits_per_sample: parsed.bits_per_sample,
             assignment: parsed.assignment,
         };
-        if let Some(&expected_block_size) = expected_block_sizes.get(frame_offset)
-            && parsed.block_size != expected_block_size
-        {
-            return Err(Error::Decode(format!(
-                "decode chunk frame {} block size mismatch: expected {expected_block_size}, found {}",
-                chunk.start_frame_index + frame_offset,
-                parsed.block_size
-            )));
-        }
         let frame_end = cursor + parsed.bytes_consumed;
         decode_frame_samples_into(&chunk.bytes[cursor..frame_end], &frame, &mut decoded_samples)?;
         decoded_block_sizes.push(parsed.block_size);
         cursor = frame_end;
         expected_sample_number =
             expected_sample_number.saturating_add(u64::from(parsed.block_size));
-    }
-
-    if decoded_block_sizes.as_slice() != expected_block_sizes.as_slice() {
-        return Err(Error::Decode(format!(
-            "decode chunk block sizes mismatch: expected {:?}, found {:?}",
-            expected_block_sizes, decoded_block_sizes
-        )));
     }
 
     Ok(DecodedWorkChunk {
@@ -1147,7 +1129,6 @@ mod tests {
             start_frame_index: 0,
             start_sample_number: 0,
             stream_info,
-            frame_block_sizes: chunk_frames.iter().map(|frame| frame.block_size).collect(),
             bytes: Arc::from(bytes[start..end].to_vec()),
         }
     }

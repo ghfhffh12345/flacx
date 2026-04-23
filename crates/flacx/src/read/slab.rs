@@ -76,7 +76,6 @@ impl From<DecodeSlabPlan> for frame::DecodeWorkSlab {
             start_frame_index: plan.start_frame_index,
             start_sample_number: plan.start_sample_number,
             stream_info: plan.stream_info,
-            frame_block_sizes: plan.frame_block_sizes,
             bytes: plan.bytes,
         }
     }
