@@ -32,13 +32,14 @@ struct SealedSlab {
 
 #[derive(Debug)]
 pub(super) struct RollingIndexWindow {
-    #[cfg(test)]
     stream_info: StreamInfo,
     config: RollingIndexConfig,
     next_sequence: usize,
     next_frame_index: usize,
+    next_sample_number: u64,
     retired_sequence: usize,
     pending_frames: Vec<FrameDescriptor>,
+    pending_start_sample_number: u64,
     pending_pcm_frames: usize,
     pending_bytes: usize,
     sealed_slabs: VecDeque<SealedSlab>,
@@ -47,16 +48,15 @@ pub(super) struct RollingIndexWindow {
 
 impl RollingIndexWindow {
     pub(super) fn new(stream_info: StreamInfo, config: RollingIndexConfig) -> Self {
-        #[cfg(not(test))]
-        let _ = stream_info;
         Self {
-            #[cfg(test)]
             stream_info,
             config,
             next_sequence: 0,
             next_frame_index: 0,
+            next_sample_number: 0,
             retired_sequence: 0,
             pending_frames: Vec::new(),
+            pending_start_sample_number: 0,
             pending_pcm_frames: 0,
             pending_bytes: 0,
             sealed_slabs: VecDeque::new(),
@@ -115,6 +115,9 @@ impl RollingIndexWindow {
     }
 
     fn append_frame(&mut self, frame: ParsedFrame, offset: usize) {
+        if self.pending_frames.is_empty() {
+            self.pending_start_sample_number = self.next_sample_number;
+        }
         let frame_index = FrameIndex {
             header_number: frame.header_number,
             offset,
@@ -126,6 +129,9 @@ impl RollingIndexWindow {
         };
         self.pending_pcm_frames += usize::from(frame.block_size);
         self.pending_bytes += frame.bytes_consumed;
+        self.next_sample_number = self
+            .next_sample_number
+            .saturating_add(u64::from(frame.block_size));
         self.pending_frames
             .push(FrameDescriptor { frame: frame_index });
         self.next_frame_index += 1;
@@ -167,11 +173,18 @@ impl RollingIndexWindow {
             .pending_frames
             .drain(..)
             .map(|descriptor| descriptor.frame)
-            .collect();
+            .collect::<Vec<_>>();
+        let start_sample_number = self.pending_start_sample_number;
         self.pending_pcm_frames = 0;
         self.pending_bytes = 0;
 
-        DecodeSlabPlan::new(sequence, start_frame_index, frames)
+        DecodeSlabPlan::new(
+            sequence,
+            start_frame_index,
+            start_sample_number,
+            self.stream_info,
+            frames,
+        )
     }
 
     #[cfg(test)]

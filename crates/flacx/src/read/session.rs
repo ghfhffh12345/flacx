@@ -901,6 +901,7 @@ mod tests {
 
     #[test]
     fn coordinator_reports_a_bounded_active_window_for_ready_slabs() {
+        let (plans, _) = fixture_plans(6);
         let session = StreamingDecodeSession::spawn(2, 2);
         let submitter = std::thread::spawn({
             let job_sender = session
@@ -909,8 +910,8 @@ mod tests {
                 .expect("spawned session owns a job sender")
                 .clone();
             move || {
-                for sequence in 0..6 {
-                    job_sender.send(test_plan(sequence).into()).unwrap();
+                for plan in plans {
+                    job_sender.send(plan.into()).unwrap();
                 }
             }
         });
@@ -943,6 +944,8 @@ mod tests {
         DecodeSlabPlan {
             sequence,
             start_frame_index: sequence,
+            start_sample_number: sequence as u64,
+            stream_info: stream_info(),
             frame_block_sizes: vec![1],
             bytes: Arc::from(Vec::<u8>::new()),
             frames: Arc::<[FrameIndex]>::from(Vec::new()),
@@ -959,11 +962,24 @@ mod tests {
             .unwrap()
             .into_iter()
             .take(count)
+            .scan(0u64, |start_sample_number, frame| {
+                let current = *start_sample_number;
+                *start_sample_number =
+                    start_sample_number.saturating_add(u64::from(frame.block_size));
+                Some((current, frame))
+            })
             .enumerate()
-            .map(|(sequence, frame)| {
+            .map(|(sequence, (start_sample_number, frame))| {
                 let frame_bytes = bytes[frame.offset..frame.offset + frame.bytes_consumed].to_vec();
                 let frame = FrameIndex { offset: 0, ..frame };
-                DecodeSlabPlan::new(sequence, sequence, vec![frame]).seal_bytes(frame_bytes)
+                DecodeSlabPlan::new(
+                    sequence,
+                    sequence,
+                    start_sample_number,
+                    stream_info,
+                    vec![frame],
+                )
+                .seal_bytes(frame_bytes)
             })
             .collect();
         (plans, usize::from(stream_info.channels))

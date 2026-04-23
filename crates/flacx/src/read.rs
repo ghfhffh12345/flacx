@@ -1331,11 +1331,14 @@ mod tests {
         let plan = stream.seal_staged_decode_slab_plan(super::slab::DecodeSlabPlan::new(
             3,
             7,
+            14,
+            stream_info,
             frames.clone(),
         ));
 
         assert_eq!(plan.sequence, 3);
         assert_eq!(plan.start_frame_index, 7);
+        assert_eq!(plan.start_sample_number, 14);
         assert_eq!(plan.frame_block_sizes, vec![2]);
         assert_eq!(plan.bytes.as_ref(), &[1, 2, 3]);
         assert_eq!(plan.frames.as_ref(), frames.as_slice());

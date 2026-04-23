@@ -27,31 +27,34 @@ use std::{
 };
 
 #[derive(Debug)]
-pub(super) struct DecodeWorkSlab {
+pub(super) struct DecodeWorkChunk {
     pub(super) start_frame_index: usize,
+    pub(super) start_sample_number: u64,
+    pub(super) stream_info: StreamInfo,
     pub(super) frame_block_sizes: Vec<u16>,
     pub(super) bytes: Arc<[u8]>,
-    pub(super) frames: Arc<[FrameIndex]>,
 }
 
 #[derive(Debug)]
-pub(super) struct DecodedWorkSlab {
+pub(super) struct DecodedWorkChunk {
     pub(super) start_frame_index: usize,
     pub(super) frame_block_sizes: Vec<u16>,
     pub(super) decoded_samples: Vec<i32>,
 }
 
-pub(super) type DecodeWorkPacket = DecodeWorkSlab;
-pub(super) type DecodedWorkPacket = DecodedWorkSlab;
+pub(super) type DecodeWorkSlab = DecodeWorkChunk;
+pub(super) type DecodedWorkSlab = DecodedWorkChunk;
+pub(super) type DecodeWorkPacket = DecodeWorkChunk;
+pub(super) type DecodedWorkPacket = DecodedWorkChunk;
 
 pub(super) enum DecodeWorkerRecv {
     Empty,
-    Slab(Result<DecodedWorkSlab>),
+    Slab(Result<DecodedWorkChunk>),
 }
 
 pub(super) struct FrameDecodeWorkerPool {
-    worker_senders: Vec<SyncSender<DecodeWorkSlab>>,
-    result_receiver: Receiver<Result<DecodedWorkSlab>>,
+    worker_senders: Vec<SyncSender<DecodeWorkChunk>>,
+    result_receiver: Receiver<Result<DecodedWorkChunk>>,
     worker_handles: Vec<thread::JoinHandle<()>>,
     next_worker: usize,
 }
@@ -59,16 +62,16 @@ pub(super) struct FrameDecodeWorkerPool {
 impl FrameDecodeWorkerPool {
     pub(super) fn new(worker_count: usize, queue_depth: usize) -> Self {
         let queue_depth = queue_depth.max(1);
-        let (result_sender, result_receiver) = mpsc::channel::<Result<DecodedWorkSlab>>();
+        let (result_sender, result_receiver) = mpsc::channel::<Result<DecodedWorkChunk>>();
         let mut worker_senders = Vec::with_capacity(worker_count);
         let mut worker_handles = Vec::with_capacity(worker_count);
 
         for _ in 0..worker_count.max(1) {
-            let (sender, receiver) = mpsc::sync_channel::<DecodeWorkSlab>(queue_depth);
+            let (sender, receiver) = mpsc::sync_channel::<DecodeWorkChunk>(queue_depth);
             let result_sender = result_sender.clone();
             worker_handles.push(thread::spawn(move || {
-                while let Ok(slab) = receiver.recv() {
-                    if result_sender.send(decode_work_slab(slab)).is_err() {
+                while let Ok(chunk) = receiver.recv() {
+                    if result_sender.send(decode_work_chunk(chunk)).is_err() {
                         return;
                     }
                 }
@@ -86,7 +89,7 @@ impl FrameDecodeWorkerPool {
         }
     }
 
-    pub(super) fn submit(&mut self, slab: DecodeWorkSlab) -> Result<()> {
+    pub(super) fn submit(&mut self, slab: DecodeWorkChunk) -> Result<()> {
         let sender = &self.worker_senders[self.next_worker % self.worker_senders.len()];
         self.next_worker = self.next_worker.wrapping_add(1);
         sender
@@ -96,8 +99,8 @@ impl FrameDecodeWorkerPool {
 
     pub(super) fn try_submit(
         &mut self,
-        slab: DecodeWorkSlab,
-    ) -> std::result::Result<(), mpsc::TrySendError<DecodeWorkSlab>> {
+        slab: DecodeWorkChunk,
+    ) -> std::result::Result<(), mpsc::TrySendError<DecodeWorkChunk>> {
         let sender = &self.worker_senders[self.next_worker % self.worker_senders.len()];
         match sender.try_send(slab) {
             Ok(()) => {
@@ -118,7 +121,7 @@ impl FrameDecodeWorkerPool {
         }
     }
 
-    pub(super) fn recv(&self) -> Result<DecodedWorkSlab> {
+    pub(super) fn recv(&self) -> Result<DecodedWorkChunk> {
         self.result_receiver
             .recv()
             .map_err(|_| Error::Thread("decode worker result channel closed unexpectedly".into()))?
@@ -134,22 +137,63 @@ impl Drop for FrameDecodeWorkerPool {
     }
 }
 
-pub(super) fn decode_work_slab(slab: DecodeWorkSlab) -> Result<DecodedWorkSlab> {
-    let mut decoded_samples = Vec::with_capacity(total_interleaved_sample_count(&slab.frames));
-    for frame in slab.frames.iter() {
-        let frame_bytes = &slab.bytes[frame.offset..frame.offset + frame.bytes_consumed];
-        decode_frame_samples_into(frame_bytes, frame, &mut decoded_samples)?;
+pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChunk> {
+    let mut decoded_samples = Vec::new();
+    let mut decoded_block_sizes = Vec::with_capacity(chunk.frame_block_sizes.len());
+    let mut cursor = 0usize;
+    let mut expected_sample_number = chunk.start_sample_number;
+
+    for (frame_offset, &expected_block_size) in chunk.frame_block_sizes.iter().enumerate() {
+        let parsed = scan_frame(
+            &chunk.bytes[cursor..],
+            chunk.stream_info,
+            (chunk.start_frame_index + frame_offset) as u64,
+            expected_sample_number,
+        )?;
+        let frame = FrameIndex {
+            header_number: parsed.header_number,
+            offset: cursor,
+            header_bytes_consumed: parsed.header_bytes_consumed,
+            bytes_consumed: parsed.bytes_consumed,
+            block_size: parsed.block_size,
+            bits_per_sample: parsed.bits_per_sample,
+            assignment: parsed.assignment,
+        };
+        if parsed.block_size != expected_block_size {
+            return Err(Error::Decode(format!(
+                "decode chunk frame {} block size mismatch: expected {expected_block_size}, found {}",
+                chunk.start_frame_index + frame_offset,
+                parsed.block_size
+            )));
+        }
+        let frame_end = cursor + parsed.bytes_consumed;
+        decode_frame_samples_into(&chunk.bytes[cursor..frame_end], &frame, &mut decoded_samples)?;
+        decoded_block_sizes.push(parsed.block_size);
+        cursor = frame_end;
+        expected_sample_number =
+            expected_sample_number.saturating_add(u64::from(parsed.block_size));
     }
 
-    Ok(DecodedWorkSlab {
-        start_frame_index: slab.start_frame_index,
-        frame_block_sizes: slab.frame_block_sizes,
+    if cursor != chunk.bytes.len() {
+        return Err(Error::Decode(format!(
+            "decode chunk contained {} trailing bytes",
+            chunk.bytes.len() - cursor
+        )));
+    }
+
+    Ok(DecodedWorkChunk {
+        start_frame_index: chunk.start_frame_index,
+        frame_block_sizes: decoded_block_sizes,
         decoded_samples,
     })
 }
 
+pub(super) fn decode_work_slab(slab: DecodeWorkSlab) -> Result<DecodedWorkSlab> {
+    decode_work_chunk(slab)
+}
+
 pub(super) fn decode_work_packet(packet: DecodeWorkPacket) -> Result<DecodedWorkPacket> {
-    decode_work_slab(packet)
+    decode_work_chunk(packet)
 }
 
 #[allow(dead_code)]
@@ -1021,4 +1065,139 @@ fn decode_utf8_number<R: Read>(reader: &mut R) -> Result<(u64, usize)> {
     }
 
     Ok((value, additional + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{
+        EncoderConfig,
+        convenience::encode_bytes_with_config,
+        crc::{crc8, crc16},
+    };
+
+    use super::{DecodeWorkChunk, Error, StreamInfo, decode_work_chunk, index_frames};
+
+    fn wav_bytes_from_i16_samples(samples: &[i16]) -> Vec<u8> {
+        let channels = 1u16;
+        let sample_rate = 44_100u32;
+        let bits_per_sample = 16u16;
+        let block_align = channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate * u32::from(block_align);
+        let data_bytes = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        let chunk_size = 36 + data_bytes.len() as u32;
+
+        let mut wav = Vec::with_capacity(44 + data_bytes.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&chunk_size.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_bytes.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data_bytes);
+        wav
+    }
+
+    fn encoded_fixture() -> (Vec<u8>, StreamInfo, usize, Vec<super::FrameIndex>) {
+        let samples = (0i16..48).collect::<Vec<_>>();
+        let wav = wav_bytes_from_i16_samples(&samples);
+        let flac = encode_bytes_with_config(&EncoderConfig::default().with_block_size(16), &wav)
+            .expect("encode test fixture");
+        let (stream_info, _, frame_offset) =
+            crate::read::metadata::parse_metadata(&flac, false).expect("parse metadata");
+        let frames = index_frames(&flac, frame_offset, stream_info).expect("index fixture frames");
+        (flac, stream_info, frame_offset, frames)
+    }
+
+    fn build_chunk(frame_count: usize) -> DecodeWorkChunk {
+        let (bytes, stream_info, _frame_offset, frames) = encoded_fixture();
+        let chunk_frames = &frames[..frame_count];
+        let start = chunk_frames
+            .first()
+            .expect("chunk fixture has at least one frame")
+            .offset;
+        let end = chunk_frames
+            .last()
+            .expect("chunk fixture has at least one frame")
+            .offset
+            + chunk_frames
+                .last()
+                .expect("chunk fixture has at least one frame")
+                .bytes_consumed;
+        DecodeWorkChunk {
+            start_frame_index: 0,
+            start_sample_number: 0,
+            stream_info,
+            frame_block_sizes: chunk_frames.iter().map(|frame| frame.block_size).collect(),
+            bytes: Arc::from(bytes[start..end].to_vec()),
+        }
+    }
+
+    fn rewrite_frame_as_sample_number_coded(
+        frame_bytes: &mut [u8],
+        header_bytes_consumed: usize,
+        sample_number: u8,
+    ) {
+        frame_bytes[1] |= 0x01;
+        frame_bytes[4] = sample_number;
+        let header_crc_pos = header_bytes_consumed - 1;
+        frame_bytes[header_crc_pos] = crc8(&frame_bytes[..header_crc_pos]);
+        let footer_crc_pos = frame_bytes.len() - 2;
+        let footer_crc = crc16(&frame_bytes[..footer_crc_pos]).to_be_bytes();
+        frame_bytes[footer_crc_pos..].copy_from_slice(&footer_crc);
+    }
+
+    #[test]
+    fn worker_decode_rejects_bad_crc_in_compressed_chunk() {
+        let mut chunk = build_chunk(1);
+        let bytes = Arc::make_mut(&mut chunk.bytes);
+        let corrupt_index = bytes.len() - 3;
+        bytes[corrupt_index] ^= 0x01;
+
+        let error = decode_work_chunk(chunk).expect_err("chunk decode should fail on CRC mismatch");
+        assert!(matches!(error, Error::InvalidFlac("frame footer CRC16 mismatch")));
+    }
+
+    #[test]
+    fn worker_decode_rejects_wrong_sample_number_progression_in_compressed_chunk() {
+        let mut chunk = build_chunk(2);
+        let header_sizes = {
+            let (_stream_info, _, _frame_offset, frames) = encoded_fixture();
+            vec![frames[0].header_bytes_consumed, frames[1].header_bytes_consumed]
+        };
+        let first_frame_len = {
+            let (_bytes, _stream_info, _frame_offset, frames) = encoded_fixture();
+            frames[0].bytes_consumed
+        };
+
+        let bytes = Arc::make_mut(&mut chunk.bytes);
+        rewrite_frame_as_sample_number_coded(
+            &mut bytes[..first_frame_len],
+            header_sizes[0],
+            0,
+        );
+        rewrite_frame_as_sample_number_coded(
+            &mut bytes[first_frame_len..],
+            header_sizes[1],
+            15,
+        );
+
+        let error =
+            decode_work_chunk(chunk).expect_err("chunk decode should fail on sample progression");
+        assert!(matches!(
+            error,
+            Error::Decode(message) if message == "expected sample number 16, found 15"
+        ));
+    }
 }

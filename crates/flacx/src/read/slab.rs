@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::frame;
+use super::{StreamInfo, frame};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct DecodedSlab {
@@ -36,6 +36,8 @@ impl From<frame::DecodedWorkSlab> for DecodedSlab {
 pub(super) struct DecodeSlabPlan {
     pub(super) sequence: usize,
     pub(super) start_frame_index: usize,
+    pub(super) start_sample_number: u64,
+    pub(super) stream_info: StreamInfo,
     pub(super) frame_block_sizes: Vec<u16>,
     pub(super) bytes: std::sync::Arc<[u8]>,
     pub(super) frames: std::sync::Arc<[super::FrameIndex]>,
@@ -45,12 +47,16 @@ impl DecodeSlabPlan {
     pub(super) fn new(
         sequence: usize,
         start_frame_index: usize,
+        start_sample_number: u64,
+        stream_info: StreamInfo,
         frames: Vec<super::FrameIndex>,
     ) -> Self {
         let frame_block_sizes = frames.iter().map(|frame| frame.block_size).collect();
         Self {
             sequence,
             start_frame_index,
+            start_sample_number,
+            stream_info,
             frame_block_sizes,
             bytes: std::sync::Arc::from(Vec::<u8>::new()),
             frames: std::sync::Arc::from(frames),
@@ -67,9 +73,10 @@ impl From<DecodeSlabPlan> for frame::DecodeWorkSlab {
     fn from(plan: DecodeSlabPlan) -> Self {
         Self {
             start_frame_index: plan.start_frame_index,
+            start_sample_number: plan.start_sample_number,
+            stream_info: plan.stream_info,
             frame_block_sizes: plan.frame_block_sizes,
             bytes: plan.bytes,
-            frames: plan.frames,
         }
     }
 }
