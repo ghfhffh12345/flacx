@@ -468,7 +468,7 @@ pub(super) fn scan_frame(
     expected_frame_number: u64,
     expected_sample_number: u64,
 ) -> Result<ParsedFrame> {
-    let parsed = parse_frame(
+    let parsed = parse_frame_header(
         bytes,
         stream_info,
         expected_frame_number,
@@ -502,7 +502,7 @@ pub(super) fn scan_frame(
     })
 }
 
-fn parse_frame(
+pub(super) fn parse_frame_header(
     bytes: &[u8],
     stream_info: StreamInfo,
     expected_frame_number: u64,

@@ -1,18 +1,11 @@
-use std::{
-    collections::VecDeque,
-    io::{Cursor, Read},
-    sync::Arc,
-};
-
-use bitstream_io::{BigEndian, BitRead, BitReader};
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::{
-    crc::crc8,
     error::{Error, Result},
     stream_info::StreamInfo,
 };
 
-use super::{FLAC_SYNC_CODE, FrameHeaderNumber, FrameHeaderNumberKind, ParsedFrame};
+use super::ParsedFrame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ChunkScannerConfig {
@@ -68,12 +61,19 @@ impl ChunkScanner {
 
     pub(super) fn push_bytes(&mut self, bytes: &[u8]) -> Result<ChunkStep> {
         if self.finished {
-            return Ok(ChunkStep::Pending);
+            if bytes.is_empty() {
+                return Ok(ChunkStep::Pending);
+            }
+            return Err(Error::Decode(
+                "cannot push additional input after chunk scanner is finished".into(),
+            ));
         }
+
         self.buffered_bytes.extend_from_slice(bytes);
         if let Some(chunk) = self.ready_chunks.pop_front() {
             return Ok(ChunkStep::Sealed(chunk));
         }
+
         self.scan_available_frames(false)
     }
 
@@ -84,6 +84,7 @@ impl ChunkScanner {
         if self.finished {
             return Ok(ChunkStep::Pending);
         }
+
         let step = self.scan_available_frames(true)?;
         if matches!(step, ChunkStep::Pending) {
             self.finished = true;
@@ -102,11 +103,12 @@ impl ChunkScanner {
                     return Ok(self.finish_or_pending(eof));
                 }
 
-                match parse_frame_header(
+                match super::frame::parse_frame_header(
                     &self.buffered_bytes,
                     self.stream_info,
                     self.next_frame_index as u64,
                     self.next_sample_number,
+                    None,
                 ) {
                     Ok(parsed) => {
                         self.current_frame = Some(ScannedFrame {
@@ -285,11 +287,12 @@ fn find_next_frame_start(
 ) -> Result<Option<ScannedFrame>> {
     let mut offset = search_from;
     while offset < bytes.len() {
-        match parse_frame_header(
+        match super::frame::parse_frame_header(
             &bytes[offset..],
             stream_info,
             expected_frame_number,
             expected_sample_number,
+            None,
         ) {
             Ok(parsed) => {
                 return Ok(Some(ScannedFrame {
@@ -312,202 +315,11 @@ fn is_incomplete_header(error: &Error) -> bool {
     }
 }
 
-fn parse_frame_header(
-    bytes: &[u8],
-    stream_info: StreamInfo,
-    expected_frame_number: u64,
-    expected_sample_number: u64,
-) -> Result<ParsedFrame> {
-    if bytes.len() < 2 {
-        return Err(Error::InvalidFlac("unexpected EOF while reading frames"));
-    }
-
-    let mut reader = BitReader::endian(Cursor::new(bytes), BigEndian);
-    let sync_code: u16 = reader.read_unsigned_var(14)?;
-    if sync_code != FLAC_SYNC_CODE {
-        return Err(Error::InvalidFlac("invalid frame sync code"));
-    }
-    if reader.read_bit()? {
-        return Err(Error::InvalidFlac("frame header reserved bit must be zero"));
-    }
-    let is_variable_blocksize = reader.read_bit()?;
-    let block_size_bits: u8 = reader.read_unsigned_var(4)?;
-    let sample_rate_bits: u8 = reader.read_unsigned_var(4)?;
-    let assignment_bits: u8 = reader.read_unsigned_var(4)?;
-    let bits_per_sample_bits: u8 = reader.read_unsigned_var(3)?;
-    if reader.read_bit()? {
-        return Err(Error::InvalidFlac("frame header reserved bit must be zero"));
-    }
-
-    reader.byte_align();
-    let (coded_number, utf8_len) = decode_utf8_number(reader.aligned_reader())?;
-    let header_number = if is_variable_blocksize {
-        FrameHeaderNumber {
-            kind: FrameHeaderNumberKind::SampleNumber,
-            value: coded_number,
-        }
-    } else {
-        FrameHeaderNumber {
-            kind: FrameHeaderNumberKind::FrameNumber,
-            value: coded_number,
-        }
-    };
-
-    let expected_number = match header_number.kind {
-        FrameHeaderNumberKind::FrameNumber => expected_frame_number,
-        FrameHeaderNumberKind::SampleNumber => expected_sample_number,
-    };
-    if header_number.value != expected_number {
-        return Err(Error::Decode(format!(
-            "expected {}, found {}",
-            expected_number, header_number.value
-        )));
-    }
-
-    let block_size = decode_block_size(block_size_bits, reader.aligned_reader())?;
-    let sample_rate = decode_sample_rate(
-        sample_rate_bits,
-        reader.aligned_reader(),
-        stream_info.sample_rate,
-    )?;
-    let bits_per_sample =
-        super::frame::decode_bits_per_sample(bits_per_sample_bits, stream_info.bits_per_sample)?;
-    let assignment = super::frame::decode_channel_assignment(assignment_bits)?;
-
-    let header_end = 4usize
-        .saturating_add(utf8_len)
-        .saturating_add(block_size_extra_len(block_size_bits))
-        .saturating_add(sample_rate_extra_len(sample_rate_bits));
-    let header_crc = read_exact_byte(reader.aligned_reader())?;
-    if crc8(&bytes[..header_end]) != header_crc {
-        return Err(Error::InvalidFlac("frame header CRC8 mismatch"));
-    }
-
-    if sample_rate != stream_info.sample_rate {
-        return Err(Error::UnsupportedFlac(format!(
-            "sample rate changed mid-stream: expected {}, found {sample_rate}",
-            stream_info.sample_rate
-        )));
-    }
-
-    Ok(ParsedFrame {
-        header_number,
-        block_size,
-        bits_per_sample,
-        assignment,
-        header_bytes_consumed: header_end + 1,
-        bytes_consumed: header_end + 1,
-    })
-}
-
-fn decode_block_size<R: Read>(code: u8, reader: &mut R) -> Result<u16> {
-    Ok(match code {
-        0b0000 => return Err(Error::InvalidFlac("reserved block-size code encountered")),
-        0b0001 => 192,
-        0b0010 => 576,
-        0b0011 => 1152,
-        0b0100 => 2304,
-        0b0101 => 4608,
-        0b0110 => u16::from(read_exact_byte(reader)?) + 1,
-        0b0111 => u16::from_be_bytes([read_exact_byte(reader)?, read_exact_byte(reader)?]) + 1,
-        0b1000 => 256,
-        0b1001 => 512,
-        0b1010 => 1024,
-        0b1011 => 2048,
-        0b1100 => 4096,
-        0b1101 => 8192,
-        0b1110 => 16384,
-        0b1111 => 32768,
-        _ => unreachable!(),
-    })
-}
-
-fn block_size_extra_len(code: u8) -> usize {
-    match code {
-        0b0110 => 1,
-        0b0111 => 2,
-        _ => 0,
-    }
-}
-
-fn decode_sample_rate<R: Read>(code: u8, reader: &mut R, stream_rate: u32) -> Result<u32> {
-    Ok(match code {
-        0b0000 => stream_rate,
-        0b0001 => 88_200,
-        0b0010 => 176_400,
-        0b0011 => 192_000,
-        0b0100 => 8_000,
-        0b0101 => 16_000,
-        0b0110 => 22_050,
-        0b0111 => 24_000,
-        0b1000 => 32_000,
-        0b1001 => 44_100,
-        0b1010 => 48_000,
-        0b1011 => 96_000,
-        0b1100 => u32::from(read_exact_byte(reader)?) * 1000,
-        0b1101 => u32::from(u16::from_be_bytes([
-            read_exact_byte(reader)?,
-            read_exact_byte(reader)?,
-        ])),
-        0b1110 => {
-            u32::from(u16::from_be_bytes([
-                read_exact_byte(reader)?,
-                read_exact_byte(reader)?,
-            ])) * 10
-        }
-        0b1111 => {
-            return Err(Error::UnsupportedFlac(
-                "sample-rate code 0b1111 is out of scope".into(),
-            ));
-        }
-        _ => unreachable!(),
-    })
-}
-
-fn sample_rate_extra_len(code: u8) -> usize {
-    match code {
-        0b1100 => 1,
-        0b1101 | 0b1110 => 2,
-        _ => 0,
-    }
-}
-
-fn read_exact_byte<R: Read>(reader: &mut R) -> Result<u8> {
-    let mut byte = [0u8; 1];
-    reader.read_exact(&mut byte)?;
-    Ok(byte[0])
-}
-
-fn decode_utf8_number<R: Read>(reader: &mut R) -> Result<(u64, usize)> {
-    let first = read_exact_byte(reader)?;
-    let (mut value, additional) = match first {
-        0x00..=0x7f => (u64::from(first), 0usize),
-        0xc0..=0xdf => (u64::from(first & 0x1f), 1usize),
-        0xe0..=0xef => (u64::from(first & 0x0f), 2usize),
-        0xf0..=0xf7 => (u64::from(first & 0x07), 3usize),
-        0xf8..=0xfb => (u64::from(first & 0x03), 4usize),
-        0xfc..=0xfd => (u64::from(first & 0x01), 5usize),
-        0xfe => (0, 6usize),
-        _ => return Err(Error::InvalidFlac("invalid UTF-8-like frame number prefix")),
-    };
-
-    for _ in 0..additional {
-        let continuation = read_exact_byte(reader)?;
-        if continuation & 0b1100_0000 != 0b1000_0000 {
-            return Err(Error::InvalidFlac(
-                "invalid UTF-8-like frame number continuation byte",
-            ));
-        }
-        value = (value << 6) | u64::from(continuation & 0b0011_1111);
-    }
-
-    Ok((value, additional + 1))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
         crc::crc8,
+        error::Error,
         read::chunk::{ChunkScanner, ChunkScannerConfig, ChunkStep},
         stream_info::StreamInfo,
     };
@@ -648,6 +460,44 @@ mod tests {
     }
 
     #[test]
+    fn seals_when_the_byte_budget_is_reached() {
+        let mut joined = frame_bytes(0, 5);
+        joined.extend(frame_bytes(1, 6));
+        joined.extend(frame_bytes(2, 7));
+
+        let mut scanner = ChunkScanner::new(
+            stream_info(),
+            ChunkScannerConfig {
+                target_pcm_frames_per_chunk: 128,
+                max_frames_per_chunk: 8,
+                max_bytes_per_chunk: 25,
+            },
+        );
+
+        match scanner.push_bytes(&joined).unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 0);
+                assert_eq!(chunk.start_frame_index, 0);
+                assert_eq!(chunk.start_sample_number, 0);
+                assert_eq!(chunk.frame_block_sizes, vec![16, 16]);
+                assert_eq!(chunk.bytes.as_ref(), &joined[..25]);
+            }
+            ChunkStep::Pending => panic!("expected max-bytes budget to seal a chunk"),
+        }
+
+        match scanner.finish().unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 1);
+                assert_eq!(chunk.start_frame_index, 2);
+                assert_eq!(chunk.start_sample_number, 32);
+                assert_eq!(chunk.frame_block_sizes, vec![16]);
+                assert_eq!(chunk.bytes.as_ref(), &joined[25..]);
+            }
+            ChunkStep::Pending => panic!("expected finish to flush the trailing chunk"),
+        }
+    }
+
+    #[test]
     fn push_bytes_buffers_new_input_before_returning_a_queued_chunk() {
         let mut initial = frame_bytes(0, 5);
         initial.extend(frame_bytes(1, 6));
@@ -699,7 +549,29 @@ mod tests {
                 expected.extend_from_slice(&trailing);
                 assert_eq!(chunk.bytes.as_ref(), expected.as_slice());
             }
-            ChunkStep::Pending => panic!("expected buffered trailing input to survive queued return"),
+            ChunkStep::Pending => {
+                panic!("expected buffered trailing input to survive queued return")
+            }
         }
+    }
+
+    #[test]
+    fn push_bytes_rejects_non_empty_input_after_finish() {
+        let mut scanner = ChunkScanner::new(
+            stream_info(),
+            ChunkScannerConfig {
+                target_pcm_frames_per_chunk: 128,
+                max_frames_per_chunk: 8,
+                max_bytes_per_chunk: 128,
+            },
+        );
+
+        assert_eq!(scanner.finish().unwrap(), ChunkStep::Pending);
+
+        let error = scanner.push_bytes(&frame_bytes(0, 5)).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Decode(message) if message == "cannot push additional input after chunk scanner is finished"
+        ));
     }
 }
