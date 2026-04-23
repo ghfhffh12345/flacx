@@ -299,6 +299,23 @@ fn decode_thread_variants_cover_throughput_comparison_set() {
 }
 
 #[test]
+fn throughput_bench_reuses_decode_matrix_for_producer_backed_path() {
+    let source = include_str!("../benches/throughput.rs");
+    assert!(
+        source.contains("bench_large_streaming_producer_backed_decode_matrix("),
+        "throughput bench should reuse a shared producer-backed decode matrix helper"
+    );
+    assert!(
+        source.contains("\"decode_large_streaming_producer_backed_path\""),
+        "throughput bench should label the large streaming decode matrix as producer-backed"
+    );
+    assert!(
+        source.contains("\"matched_large_streaming_producer_backed_decode\""),
+        "matched throughput bench should label the shared decode matrix as producer-backed"
+    );
+}
+
+#[test]
 fn decode_pcm_stream_trait_does_not_expose_profile_hooks() {
     let source = include_str!("../src/read.rs");
     let trait_start = source
@@ -769,6 +786,7 @@ fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
     let queue_limit = *profile_summary.get("queue_limit").unwrap();
     let peak_active_window_slabs = *profile_summary.get("peak_active_window_slabs").unwrap();
     let peak_staged_input_bytes = *profile_summary.get("peak_staged_input_bytes").unwrap();
+    let staged_input_bound = flac.len();
 
     assert_eq!(
         summary.total_samples,
@@ -786,6 +804,10 @@ fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
     assert!(
         peak_staged_input_bytes > 0,
         "real-reader decode should stage producer input bytes while ordered output is still draining"
+    );
+    assert!(
+        peak_staged_input_bytes <= staged_input_bound,
+        "real-reader decode should keep staged producer input bounded by the decode window: peak_staged_input_bytes={peak_staged_input_bytes}, queue_limit={queue_limit}, staged_input_bound={staged_input_bound}"
     );
 }
 

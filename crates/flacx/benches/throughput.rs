@@ -5,7 +5,9 @@ use std::{
     time::Duration,
 };
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{
+    BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
+};
 use flacx::{
     DecodeConfig, EncoderConfig, FlacReaderOptions, RecompressConfig, RecompressMode, WavReader,
     WavReaderOptions, builtin, read_flac_reader_with_options,
@@ -127,18 +129,12 @@ fn decode_large_streaming_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("flacx throughput");
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(10);
-    for threads in decode_thread_variants() {
-        let input = large_streaming_decode_flac_bytes(threads);
-        let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(threads));
-        group.throughput(Throughput::Bytes(input.len() as u64));
-        group.bench_function(format!("decode_large_streaming_path_threads_{threads}"), |b| {
-            b.iter(|| {
-                decoder
-                    .decode_bytes(&input)
-                    .expect("decode large streaming path")
-            })
-        });
-    }
+    bench_large_streaming_producer_backed_decode_matrix(
+        &mut group,
+        "decode_large_streaming_producer_backed_path",
+        |_threads, input| Throughput::Bytes(input.len() as u64),
+        |threads| large_streaming_decode_flac_bytes(threads),
+    );
     group.finish();
 }
 
@@ -153,15 +149,12 @@ fn matched_large_streaming_encode_decode(c: &mut Criterion) {
     group.bench_function("matched_large_streaming_encode", |b| {
         b.iter(|| encode_fixture_bytes(&encoder_config, &wav_input).expect("matched encode"))
     });
-    for decode_threads in decode_thread_variants() {
-        let flac_input = large_streaming_decode_flac_bytes(decode_threads);
-        let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(decode_threads));
-        group.throughput(Throughput::Bytes(wav_input.len() as u64));
-        group.bench_function(
-            format!("matched_large_streaming_decode_threads_{decode_threads}"),
-            |b| b.iter(|| decoder.decode_bytes(&flac_input).expect("matched decode")),
-        );
-    }
+    bench_large_streaming_producer_backed_decode_matrix(
+        &mut group,
+        "matched_large_streaming_producer_backed_decode",
+        |_, _| Throughput::Bytes(wav_input.len() as u64),
+        large_streaming_decode_flac_bytes,
+    );
     group.finish();
 }
 
@@ -581,6 +574,29 @@ fn shared_thread_count() -> usize {
         "default encode/recompress thread counts diverged"
     );
     encode_threads
+}
+
+fn bench_large_streaming_producer_backed_decode_matrix<F, T>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    name_prefix: &str,
+    throughput: T,
+    input_for_threads: F,
+) where
+    F: Fn(usize) -> Vec<u8>,
+    T: Fn(usize, &[u8]) -> Throughput,
+{
+    for threads in decode_thread_variants() {
+        let input = input_for_threads(threads);
+        let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(threads));
+        group.throughput(throughput(threads, &input));
+        group.bench_function(format!("{name_prefix}_threads_{threads}"), |b| {
+            b.iter(|| {
+                decoder
+                    .decode_bytes(&input)
+                    .expect("producer-backed large streaming decode")
+            })
+        });
+    }
 }
 
 fn decode_thread_variants() -> [usize; 4] {
