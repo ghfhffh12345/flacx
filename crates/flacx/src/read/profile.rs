@@ -97,30 +97,6 @@ pub(crate) fn clear_decode_profile_session_for_current_thread() {
     });
 }
 
-pub(crate) fn clone_decode_profile_session_for_current_thread() -> Option<DecodeProfileSessionHandle>
-{
-    CURRENT_PROFILE_SESSION.with(|session| session.borrow().clone())
-}
-
-pub(crate) fn attach_decode_profile_session_to_current_thread(
-    session_handle: Option<DecodeProfileSessionHandle>,
-) {
-    CURRENT_PROFILE_SESSION.with(|session| {
-        *session.borrow_mut() = session_handle;
-    });
-}
-
-pub(crate) fn observe_inflight_packets_for_current_thread(inflight_packets: usize) {
-    CURRENT_PROFILE_SESSION.with(|session| {
-        if let Some(session) = session.borrow().as_ref() {
-            let mut session = session.0.lock().unwrap();
-            session
-                .summary
-                .observe_active_window_slabs(inflight_packets);
-        }
-    });
-}
-
 pub(crate) fn accept_ready_pcm_frames_for_current_thread(
     pcm_frames: usize,
     inflight_packets: usize,

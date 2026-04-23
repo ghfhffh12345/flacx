@@ -374,6 +374,64 @@ fn segmented_direct_decode_emits_profile_summary_after_small_ordered_writes() {
 
 #[cfg(feature = "progress")]
 #[test]
+fn segmented_direct_decode_keeps_dispatch_window_and_residency_bounded() {
+    let profile = DecodeProfileGuard::new();
+    let flac = large_streaming_decode_flac_bytes(4);
+    let expected_wav = large_streaming_decode_wav_bytes();
+    let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
+    let stream_info = reader.stream_info();
+    let max_bytes_per_chunk = {
+        let advertised_max_frame_size =
+            usize::try_from(stream_info.max_frame_size).unwrap_or(usize::MAX);
+        if advertised_max_frame_size == 0 {
+            64 * 1024 * 4
+        } else {
+            advertised_max_frame_size
+                .saturating_mul(256)
+                .max(64 * 1024 * 4)
+        }
+    };
+    let mut output = Cursor::new(Vec::new());
+    let mut decoder = DecodeConfig::default()
+        .with_threads(4)
+        .into_decoder(&mut output);
+
+    let summary = decoder
+        .decode_source(segmented_decode_source_with_advertised_max_block_size(
+            &flac, 1,
+        ))
+        .unwrap();
+    let profile_summary = profile.summary();
+    let queue_limit = *profile_summary.get("queue_limit").unwrap();
+    let peak_active_window_slabs = *profile_summary.get("peak_active_window_slabs").unwrap();
+    let peak_resident_pcm_frames = *profile_summary.get("peak_resident_pcm_frames").unwrap();
+    let peak_staged_input_bytes = *profile_summary.get("peak_staged_input_bytes").unwrap();
+    let target_pcm_frames = *profile_summary.get("target_pcm_frames").unwrap();
+
+    assert_eq!(
+        summary.total_samples,
+        LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
+    );
+    assert_eq!(
+        wav_data_bytes(&output.into_inner()),
+        wav_data_bytes(&expected_wav)
+    );
+    assert!(
+        (1..=queue_limit).contains(&peak_active_window_slabs),
+        "segmented direct decode should stay inside the bounded dispatch window: peak_active_window_slabs={peak_active_window_slabs}, queue_limit={queue_limit}"
+    );
+    assert!(
+        peak_resident_pcm_frames <= queue_limit * target_pcm_frames,
+        "segmented direct decode should keep resident pcm frames bounded by the dispatch window: peak_resident_pcm_frames={peak_resident_pcm_frames}, queue_limit={queue_limit}, target_pcm_frames={target_pcm_frames}"
+    );
+    assert!(
+        peak_staged_input_bytes <= queue_limit.saturating_mul(max_bytes_per_chunk),
+        "segmented direct decode should keep staged compressed input bounded by the dispatch window: peak_staged_input_bytes={peak_staged_input_bytes}, queue_limit={queue_limit}, max_bytes_per_chunk={max_bytes_per_chunk}"
+    );
+}
+
+#[cfg(feature = "progress")]
+#[test]
 fn segmented_direct_decode_progress_failure_does_not_emit_profile_summary() {
     let profile = DecodeProfileGuard::new();
     let flac = large_streaming_decode_flac_bytes(4);
@@ -722,7 +780,7 @@ fn streaming_decode_session_reports_bounded_slab_residency_for_small_writer_chun
 
 #[cfg(feature = "progress")]
 #[test]
-fn real_reader_decode_uses_producer_backed_session_across_thread_counts() {
+fn real_reader_decode_uses_dispatcher_backed_session_across_thread_counts() {
     let flac = large_streaming_decode_flac_bytes(4);
     let expected_wav = large_streaming_decode_wav_bytes();
     for threads in [1, 4] {
@@ -758,14 +816,14 @@ fn real_reader_decode_uses_producer_backed_session_across_thread_counts() {
         );
         assert!(
             *profile_summary.get("peak_staged_input_bytes").unwrap() > 0,
-            "decode should stage real input bytes through the producer-backed session for threads={threads}"
+            "decode should stage real input bytes through the dispatcher-backed session for threads={threads}"
         );
     }
 }
 
 #[cfg(feature = "progress")]
 #[test]
-fn producer_backed_decode_stops_after_declared_samples_before_physical_eof() {
+fn dispatcher_backed_decode_stops_after_declared_samples_before_physical_eof() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
     let mut flac = Encoder::new(EncoderConfig::default().with_block_size(576))
         .encode_bytes(&wav)
@@ -779,7 +837,7 @@ fn producer_backed_decode_stops_after_declared_samples_before_physical_eof() {
 
 #[cfg(feature = "progress")]
 #[test]
-fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
+fn real_reader_dispatcher_overlaps_and_stays_window_bounded() {
     const DECODE_SLAB_MAX_INPUT_FRAMES: usize = 256;
     const DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK: usize = 64 * 1024 * 4;
 
@@ -826,15 +884,15 @@ fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
     );
     assert!(
         (2..=queue_limit).contains(&peak_active_window_slabs),
-        "real-reader decode should overlap producer work while staying inside the bounded decode window: peak_active_window_slabs={peak_active_window_slabs}, queue_limit={queue_limit}"
+        "real-reader decode should overlap dispatcher submissions while staying inside the bounded decode window: peak_active_window_slabs={peak_active_window_slabs}, queue_limit={queue_limit}"
     );
     assert!(
         peak_staged_input_bytes > 0,
-        "real-reader decode should stage producer input bytes while ordered output is still draining"
+        "real-reader decode should stage dispatcher-submitted input bytes while ordered output is still draining"
     );
     assert!(
         peak_staged_input_bytes <= staged_input_bound,
-        "real-reader decode should keep staged producer input bounded by the decode window: peak_staged_input_bytes={peak_staged_input_bytes}, queue_limit={queue_limit}, max_bytes_per_slab={max_bytes_per_slab}, staged_input_bound={staged_input_bound}"
+        "real-reader decode should keep dispatcher-submitted input bounded by the decode window: peak_staged_input_bytes={peak_staged_input_bytes}, queue_limit={queue_limit}, max_bytes_per_slab={max_bytes_per_slab}, staged_input_bound={staged_input_bound}"
     );
 }
 
@@ -907,17 +965,21 @@ fn failed_streaming_decode_does_not_emit_session_summary() {
 
 #[cfg(feature = "progress")]
 #[test]
-fn real_reader_background_producer_matches_single_thread_output() {
+fn real_reader_dispatcher_matches_single_thread_output() {
     let expected_wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 16_384));
     let flac = Encoder::new(EncoderConfig::default().with_block_size(16))
         .encode_bytes(&expected_wav)
         .unwrap();
-    let single_threaded = decoder_for_threads(1)
-        .decode_bytes(&flac)
-        .expect("single-thread decode should succeed");
-    let multi_threaded = decoder_for_threads(4)
-        .decode_bytes(&flac)
-        .expect("multi-thread decode should succeed");
+    let single_threaded = run_decode_with_timeout({
+        let flac = flac.clone();
+        move || decoder_for_threads(1).decode_bytes(&flac)
+    })
+    .expect("single-thread decode should succeed");
+    let multi_threaded = run_decode_with_timeout({
+        let flac = flac.clone();
+        move || decoder_for_threads(4).decode_bytes(&flac)
+    })
+    .expect("multi-thread decode should succeed");
 
     assert_eq!(
         wav_data_bytes(&single_threaded),
@@ -946,7 +1008,7 @@ fn rolling_segmented_decode_matches_single_thread_output_for_small_writer_chunks
 
 #[cfg(feature = "progress")]
 #[test]
-fn real_reader_progress_error_cancels_background_producer_without_deadlock() {
+fn real_reader_progress_error_cancels_dispatcher_without_deadlock() {
     let profile = DecodeProfileGuard::new();
     let flac = large_streaming_decode_flac_bytes(4);
 

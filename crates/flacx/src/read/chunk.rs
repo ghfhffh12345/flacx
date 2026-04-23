@@ -20,6 +20,7 @@ pub(super) struct CompressedDecodeChunk {
     pub(super) start_frame_index: usize,
     pub(super) start_sample_number: u64,
     pub(super) frame_block_sizes: Vec<u16>,
+    pub(super) frame_byte_lengths: Vec<usize>,
     pub(super) bytes: Arc<[u8]>,
 }
 
@@ -92,10 +93,30 @@ impl ChunkScanner {
         Ok(step)
     }
 
+    pub(super) fn take_ready_chunk(&mut self) -> Option<CompressedDecodeChunk> {
+        self.ready_chunks.pop_front()
+    }
+
+    pub(super) fn buffered_bytes_len(&self) -> usize {
+        self.buffered_bytes.len()
+    }
+
+    pub(super) fn is_finished(&self) -> bool {
+        self.finished
+    }
+
     fn scan_available_frames(&mut self, eof: bool) -> Result<ChunkStep> {
         loop {
             if let Some(chunk) = self.ready_chunks.pop_front() {
                 return Ok(ChunkStep::Sealed(chunk));
+            }
+
+            if self.next_sample_number >= self.stream_info.total_samples {
+                if let Some(chunk) = self.seal_pending_chunk() {
+                    return Ok(ChunkStep::Sealed(chunk));
+                }
+                self.finished = true;
+                return Ok(ChunkStep::Pending);
             }
 
             if self.current_frame.is_none() {
@@ -149,8 +170,16 @@ impl ChunkScanner {
             }
 
             if eof {
+                let current_end = current.start_offset
+                    + super::frame::scan_frame(
+                        &self.buffered_bytes[current.start_offset..],
+                        self.stream_info,
+                        self.next_frame_index as u64,
+                        self.next_sample_number,
+                    )?
+                    .bytes_consumed;
                 self.current_frame = None;
-                self.accept_frame(current, self.buffered_bytes.len());
+                self.accept_frame(current, current_end);
                 return Ok(self.finish_or_pending(true));
             }
 
@@ -198,6 +227,7 @@ impl ChunkScanner {
         }
 
         self.pending_chunk.frame_block_sizes.push(parsed.block_size);
+        self.pending_chunk.frame_byte_lengths.push(frame_len);
         self.pending_chunk.pcm_frames = self
             .pending_chunk
             .pcm_frames
@@ -251,6 +281,7 @@ impl ChunkScanner {
             start_frame_index: self.pending_chunk.start_frame_index,
             start_sample_number: self.pending_chunk.start_sample_number,
             frame_block_sizes: std::mem::take(&mut self.pending_chunk.frame_block_sizes),
+            frame_byte_lengths: std::mem::take(&mut self.pending_chunk.frame_byte_lengths),
             bytes: Arc::from(self.buffered_bytes.drain(..bytes_len).collect::<Vec<_>>()),
         };
         self.next_sequence += 1;
@@ -274,6 +305,7 @@ struct PendingChunk {
     start_frame_index: usize,
     start_sample_number: u64,
     frame_block_sizes: Vec<u16>,
+    frame_byte_lengths: Vec<usize>,
     pcm_frames: usize,
     bytes_len: usize,
 }
