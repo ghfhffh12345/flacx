@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, sync::Arc};
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{cell::Cell, thread_local};
 
 use crate::{
     error::{Error, Result},
@@ -11,7 +11,9 @@ use crate::{
 use super::ParsedFrame;
 
 #[cfg(test)]
-static FIND_NEXT_FRAME_START_PARSE_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static FIND_NEXT_FRAME_START_PARSE_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ChunkScannerConfig {
@@ -365,7 +367,9 @@ fn parse_frame_header_for_scan(
     expected_kind: Option<super::FrameHeaderNumberKind>,
 ) -> Result<ParsedFrame> {
     #[cfg(test)]
-    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.with(|attempts| {
+        attempts.set(attempts.get() + 1);
+    });
 
     super::frame::parse_frame_header(
         bytes,
@@ -378,12 +382,12 @@ fn parse_frame_header_for_scan(
 
 #[cfg(test)]
 fn reset_find_next_frame_start_parse_attempts() {
-    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.store(0, Ordering::Relaxed);
+    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.with(|attempts| attempts.set(0));
 }
 
 #[cfg(test)]
 fn find_next_frame_start_parse_attempts() -> usize {
-    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.load(Ordering::Relaxed)
+    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.with(Cell::get)
 }
 
 fn is_incomplete_header(error: &Error) -> bool {
