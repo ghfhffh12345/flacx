@@ -43,6 +43,26 @@ pub(super) struct DecodedWorkChunk {
     pub(super) decoded_samples: Vec<i32>,
 }
 
+struct DecodedFrame {
+    bytes_consumed: usize,
+    block_size: u16,
+}
+
+#[derive(Default)]
+struct WorkerScratch {
+    channels: Vec<Vec<i32>>,
+}
+
+impl WorkerScratch {
+    fn prepare(&mut self, channel_count: usize, block_size: usize) {
+        self.channels.resize_with(channel_count, Vec::new);
+        for channel in &mut self.channels {
+            channel.clear();
+            channel.reserve(block_size);
+        }
+    }
+}
+
 pub(super) type DecodeWorkSlab = DecodeWorkChunk;
 pub(super) type DecodedWorkSlab = DecodedWorkChunk;
 
@@ -141,30 +161,21 @@ pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChu
     let mut decoded_block_sizes = Vec::new();
     let mut cursor = 0usize;
     let mut expected_sample_number = chunk.start_sample_number;
+    let mut scratch = WorkerScratch::default();
 
     while cursor < chunk.bytes.len() {
-        let frame_offset = decoded_block_sizes.len();
-        let parsed = scan_frame(
+        let decoded = decode_frame_into(
             &chunk.bytes[cursor..],
             chunk.stream_info,
-            (chunk.start_frame_index + frame_offset) as u64,
+            (chunk.start_frame_index + decoded_block_sizes.len()) as u64,
             expected_sample_number,
+            &mut decoded_samples,
+            &mut scratch,
         )?;
-        let frame = FrameIndex {
-            header_number: parsed.header_number,
-            offset: cursor,
-            header_bytes_consumed: parsed.header_bytes_consumed,
-            bytes_consumed: parsed.bytes_consumed,
-            block_size: parsed.block_size,
-            bits_per_sample: parsed.bits_per_sample,
-            assignment: parsed.assignment,
-        };
-        let frame_end = cursor + parsed.bytes_consumed;
-        decode_frame_samples_into(&chunk.bytes[cursor..frame_end], &frame, &mut decoded_samples)?;
-        decoded_block_sizes.push(parsed.block_size);
-        cursor = frame_end;
+        cursor += decoded.bytes_consumed;
         expected_sample_number =
-            expected_sample_number.saturating_add(u64::from(parsed.block_size));
+            expected_sample_number.saturating_add(u64::from(decoded.block_size));
+        decoded_block_sizes.push(decoded.block_size);
     }
 
     Ok(DecodedWorkChunk {
@@ -630,6 +641,54 @@ pub(super) fn parse_frame_header(
     })
 }
 
+fn decode_frame_into(
+    bytes: &[u8],
+    stream_info: StreamInfo,
+    expected_frame_number: u64,
+    expected_sample_number: u64,
+    output: &mut Vec<i32>,
+    scratch: &mut WorkerScratch,
+) -> Result<DecodedFrame> {
+    let parsed = parse_frame_header(
+        bytes,
+        stream_info,
+        expected_frame_number,
+        expected_sample_number,
+        None,
+    )?;
+    let mut reader = BitReader::endian(
+        Cursor::new(&bytes[parsed.header_bytes_consumed..]),
+        BigEndian,
+    );
+    let subframe_bps = channel_bits_per_sample(parsed.assignment, parsed.bits_per_sample);
+    scratch.prepare(
+        parsed.assignment.channel_count(),
+        usize::from(parsed.block_size),
+    );
+
+    for (channel, bits_per_channel) in scratch.channels.iter_mut().zip(subframe_bps.into_iter()) {
+        decode_subframe_into(&mut reader, bits_per_channel, parsed.block_size, channel)?;
+    }
+
+    interleave_channels_into(parsed.assignment, &scratch.channels, output)?;
+
+    reader.byte_align();
+    let footer_pos = reader.aligned_reader().position() as usize;
+    let footer_start = parsed.header_bytes_consumed + footer_pos;
+    let expected_crc = u16::from_be_bytes([
+        read_exact_byte(reader.aligned_reader())?,
+        read_exact_byte(reader.aligned_reader())?,
+    ]);
+    if crc16(&bytes[..footer_start]) != expected_crc {
+        return Err(Error::InvalidFlac("frame footer CRC16 mismatch"));
+    }
+
+    Ok(DecodedFrame {
+        bytes_consumed: footer_start + 2,
+        block_size: parsed.block_size,
+    })
+}
+
 fn decode_frame_samples_into(
     bytes: &[u8],
     frame: &FrameIndex,
@@ -668,31 +727,40 @@ fn decode_subframe<R: Read>(
     bits_per_sample: u8,
     block_size: u16,
 ) -> Result<Vec<i32>> {
-    let header = parse_subframe_header(reader, bits_per_sample)?;
+    let mut samples = Vec::with_capacity(usize::from(block_size));
+    decode_subframe_into(reader, bits_per_sample, block_size, &mut samples)?;
+    Ok(samples)
+}
 
-    let mut samples = match header.kind {
+fn decode_subframe_into<R: Read>(
+    reader: &mut BitReader<R, BigEndian>,
+    bits_per_sample: u8,
+    block_size: u16,
+    output: &mut Vec<i32>,
+) -> Result<()> {
+    let header = parse_subframe_header(reader, bits_per_sample)?;
+    output.clear();
+
+    match header.kind {
         0b000000 => {
-            vec![read_signed_sample(reader, header.effective_bps)?; usize::from(block_size)]
+            let sample = read_signed_sample(reader, header.effective_bps)?;
+            output.resize(usize::from(block_size), sample);
         }
         0b000001 => {
-            let mut samples = Vec::with_capacity(usize::from(block_size));
             for _ in 0..block_size {
-                samples.push(read_signed_sample(reader, header.effective_bps)?);
+                output.push(read_signed_sample(reader, header.effective_bps)?);
             }
-            samples
         }
         0b001000..=0b001100 => {
             let order = header.kind - 0b001000;
-            let mut samples = read_warmup(reader, header.effective_bps, order)?;
-            samples.reserve(usize::from(block_size) - usize::from(order));
+            read_warmup_into(reader, header.effective_bps, order, output)?;
             visit_residuals(reader, block_size, order, |residual| {
-                append_fixed_residual(&mut samples, order, residual)
+                append_fixed_residual(output, order, residual)
             })?;
-            samples
         }
         0b100000..=0b111111 => {
             let order = header.kind - 0b100000 + 1;
-            let mut samples = read_warmup(reader, header.effective_bps, order)?;
+            read_warmup_into(reader, header.effective_bps, order, output)?;
             let precision_minus_one: u8 = reader.read_unsigned_var(4)?;
             if precision_minus_one == 0b1111 {
                 return Err(Error::UnsupportedFlac(
@@ -705,11 +773,9 @@ fn decode_subframe<R: Read>(
             for _ in 0..order {
                 coefficients.push(reader.read_signed_var::<i16>(u32::from(precision))?);
             }
-            samples.reserve(usize::from(block_size) - usize::from(order));
             visit_residuals(reader, block_size, order, |residual| {
-                append_lpc_residual(&mut samples, shift, &coefficients, residual)
+                append_lpc_residual(output, shift, &coefficients, residual)
             })?;
-            samples
         }
         _ => {
             return Err(Error::UnsupportedFlac(format!(
@@ -717,16 +783,16 @@ fn decode_subframe<R: Read>(
                 kind = header.kind
             )));
         }
-    };
+    }
 
     if header.wasted_bits > 0 {
-        for sample in &mut samples {
+        for sample in output {
             *sample = i32::try_from(i64::from(*sample) << header.wasted_bits)
                 .map_err(|_| Error::Decode("wasted-bit restoration overflowed".into()))?;
         }
     }
 
-    Ok(samples)
+    Ok(())
 }
 
 fn skip_subframe<R: Read>(
@@ -886,16 +952,16 @@ fn skip_residual<R: Read>(
     visit_residuals(reader, block_size, predictor_order, |_| Ok(()))
 }
 
-fn read_warmup<R: Read>(
+fn read_warmup_into<R: Read>(
     reader: &mut BitReader<R, BigEndian>,
     bits_per_sample: u8,
     order: u8,
-) -> Result<Vec<i32>> {
-    let mut warmup = Vec::with_capacity(usize::from(order));
+    output: &mut Vec<i32>,
+) -> Result<()> {
     for _ in 0..order {
-        warmup.push(read_signed_sample(reader, bits_per_sample)?);
+        output.push(read_signed_sample(reader, bits_per_sample)?);
     }
-    Ok(warmup)
+    Ok(())
 }
 
 fn decode_block_size<R: Read>(code: u8, reader: &mut R) -> Result<u16> {
@@ -1103,6 +1169,26 @@ mod tests {
         (flac, stream_info, frame_offset, frames)
     }
 
+    fn stream_info_with_total_samples(total_samples: u64) -> StreamInfo {
+        StreamInfo {
+            min_block_size: 16,
+            max_block_size: 16,
+            min_frame_size: 8,
+            max_frame_size: 64,
+            sample_rate: 44_100,
+            channels: 1,
+            bits_per_sample: 16,
+            total_samples,
+            md5: [0; 16],
+        }
+    }
+
+    fn valid_test_chunk_bytes() -> Vec<u8> {
+        let (bytes, _stream_info, _frame_offset, frames) = encoded_fixture();
+        let frame = &frames[0];
+        bytes[frame.offset..frame.offset + frame.bytes_consumed].to_vec()
+    }
+
     fn build_chunk(frame_count: usize) -> DecodeWorkChunk {
         let (bytes, stream_info, _frame_offset, frames) = encoded_fixture();
         let chunk_frames = &frames[..frame_count];
@@ -1142,6 +1228,40 @@ mod tests {
     }
 
     #[test]
+    fn decode_work_chunk_rejects_bad_crc_in_single_worker_pass() {
+        let mut bytes = valid_test_chunk_bytes();
+        *bytes.last_mut().unwrap() ^= 0x01;
+
+        let error = decode_work_chunk(DecodeWorkChunk {
+            sequence: 0,
+            start_frame_index: 0,
+            start_sample_number: 0,
+            stream_info: stream_info_with_total_samples(16),
+            bytes: bytes.into(),
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("CRC"));
+    }
+
+    #[test]
+    fn decode_work_chunk_decodes_complete_frame_payload_without_scan_frame_roundtrip() {
+        let chunk = DecodeWorkChunk {
+            sequence: 0,
+            start_frame_index: 0,
+            start_sample_number: 0,
+            stream_info: stream_info_with_total_samples(16),
+            bytes: valid_test_chunk_bytes().into(),
+        };
+
+        let decoded = decode_work_chunk(chunk).unwrap();
+
+        assert_eq!(decoded.start_frame_index, 0);
+        assert_eq!(decoded.frame_block_sizes, vec![16]);
+        assert!(!decoded.decoded_samples.is_empty());
+    }
+
+    #[test]
     fn worker_decode_rejects_bad_crc_in_compressed_chunk() {
         let mut chunk = build_chunk(1);
         let bytes = Arc::make_mut(&mut chunk.bytes);
@@ -1149,7 +1269,10 @@ mod tests {
         bytes[corrupt_index] ^= 0x01;
 
         let error = decode_work_chunk(chunk).expect_err("chunk decode should fail on CRC mismatch");
-        assert!(matches!(error, Error::InvalidFlac("frame footer CRC16 mismatch")));
+        assert!(matches!(
+            error,
+            Error::InvalidFlac("frame footer CRC16 mismatch")
+        ));
     }
 
     #[test]
@@ -1157,7 +1280,10 @@ mod tests {
         let mut chunk = build_chunk(2);
         let header_sizes = {
             let (_stream_info, _, _frame_offset, frames) = encoded_fixture();
-            vec![frames[0].header_bytes_consumed, frames[1].header_bytes_consumed]
+            vec![
+                frames[0].header_bytes_consumed,
+                frames[1].header_bytes_consumed,
+            ]
         };
         let first_frame_len = {
             let (_bytes, _stream_info, _frame_offset, frames) = encoded_fixture();
@@ -1165,16 +1291,8 @@ mod tests {
         };
 
         let bytes = Arc::make_mut(&mut chunk.bytes);
-        rewrite_frame_as_sample_number_coded(
-            &mut bytes[..first_frame_len],
-            header_sizes[0],
-            0,
-        );
-        rewrite_frame_as_sample_number_coded(
-            &mut bytes[first_frame_len..],
-            header_sizes[1],
-            15,
-        );
+        rewrite_frame_as_sample_number_coded(&mut bytes[..first_frame_len], header_sizes[0], 0);
+        rewrite_frame_as_sample_number_coded(&mut bytes[first_frame_len..], header_sizes[1], 15);
 
         let error =
             decode_work_chunk(chunk).expect_err("chunk decode should fail on sample progression");
