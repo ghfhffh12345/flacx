@@ -96,15 +96,23 @@ pub(super) struct StreamingDecodeSession {
 }
 
 impl StreamingDecodeSession {
+    const LOCAL_RESULT_WINDOW_DEPTH: usize = 4;
+
     pub(super) fn new_local() -> Self {
         let (_sender, result_receiver) = mpsc::sync_channel(1);
-        Self::from_result_receiver_with_window_depth(result_receiver, 1)
+        Self::from_result_receiver_with_window_depth(
+            result_receiver,
+            Self::LOCAL_RESULT_WINDOW_DEPTH,
+        )
     }
 
     pub(super) fn from_result_receiver(
         result_receiver: Receiver<Result<DecodeSessionResult>>,
     ) -> Self {
-        Self::from_result_receiver_with_window_depth(result_receiver, 1)
+        Self::from_result_receiver_with_window_depth(
+            result_receiver,
+            Self::LOCAL_RESULT_WINDOW_DEPTH,
+        )
     }
 
     fn from_result_receiver_with_window_depth(
@@ -432,9 +440,14 @@ mod tests {
         slab::{DecodeSlabPlan, DecodedSlab},
     };
 
-    fn slab(start_frame_index: usize, block_sizes: &[u16], samples: &[i32]) -> DecodedSlab {
+    fn slab(
+        sequence: usize,
+        start_frame_index: usize,
+        block_sizes: &[u16],
+        samples: &[i32],
+    ) -> DecodedSlab {
         DecodedSlab {
-            sequence: start_frame_index,
+            sequence,
             start_frame_index,
             frame_block_sizes: block_sizes.to_vec(),
             decoded_samples: samples.to_vec(),
@@ -463,13 +476,13 @@ mod tests {
 
         sender
             .send(Ok(DecodeSessionResult {
-                slab: slab(2, &[2], &[30, 31]),
+                slab: slab(1, 2, &[2], &[30, 31]),
                 active_window_slabs: 1,
             }))
             .unwrap();
         sender
             .send(Ok(DecodeSessionResult {
-                slab: slab(0, &[2, 2], &[10, 11, 20, 21]),
+                slab: slab(0, 0, &[2, 2], &[10, 11, 20, 21]),
                 active_window_slabs: 2,
             }))
             .unwrap();
@@ -491,7 +504,7 @@ mod tests {
 
         sender
             .send(Ok(DecodeSessionResult {
-                slab: slab(2, &[2], &[30, 31]),
+                slab: slab(1, 2, &[2], &[30, 31]),
                 active_window_slabs: 2,
             }))
             .unwrap();
@@ -505,7 +518,7 @@ mod tests {
 
         sender
             .send(Ok(DecodeSessionResult {
-                slab: slab(0, &[2, 2], &[10, 11, 20, 21]),
+                slab: slab(0, 0, &[2, 2], &[10, 11, 20, 21]),
                 active_window_slabs: 1,
             }))
             .unwrap();
@@ -691,8 +704,8 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        session.accept_ready_slab(slab(1, &[1], &[20]), 2);
-        session.accept_ready_slab(slab(0, &[1], &[10]), 2);
+        session.accept_ready_slab(slab(1, 1, &[1], &[20]), 2);
+        session.accept_ready_slab(slab(0, 0, &[1], &[10]), 2);
 
         assert!(!session.has_submit_capacity());
         assert_eq!(session.drain_into(1, 1, &mut output), (1, 1));
