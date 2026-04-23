@@ -67,13 +67,13 @@ impl ChunkScanner {
     }
 
     pub(super) fn push_bytes(&mut self, bytes: &[u8]) -> Result<ChunkStep> {
-        if let Some(chunk) = self.ready_chunks.pop_front() {
-            return Ok(ChunkStep::Sealed(chunk));
-        }
         if self.finished {
             return Ok(ChunkStep::Pending);
         }
         self.buffered_bytes.extend_from_slice(bytes);
+        if let Some(chunk) = self.ready_chunks.pop_front() {
+            return Ok(ChunkStep::Sealed(chunk));
+        }
         self.scan_available_frames(false)
     }
 
@@ -644,6 +644,62 @@ mod tests {
                 assert_eq!(chunk.bytes.as_ref(), &joined[25..]);
             }
             ChunkStep::Pending => panic!("expected finish to flush the trailing chunk"),
+        }
+    }
+
+    #[test]
+    fn push_bytes_buffers_new_input_before_returning_a_queued_chunk() {
+        let mut initial = frame_bytes(0, 5);
+        initial.extend(frame_bytes(1, 6));
+        initial.extend(frame_bytes(2, 7));
+        initial.extend(frame_bytes(3, 8));
+        initial.extend(frame_bytes(4, 9));
+        let trailing = frame_bytes(5, 10);
+
+        let mut scanner = ChunkScanner::new(
+            stream_info(),
+            ChunkScannerConfig {
+                target_pcm_frames_per_chunk: 128,
+                max_frames_per_chunk: 2,
+                max_bytes_per_chunk: 128,
+            },
+        );
+
+        match scanner.push_bytes(&initial).unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 0);
+                assert_eq!(chunk.start_frame_index, 0);
+                assert_eq!(chunk.start_sample_number, 0);
+                assert_eq!(chunk.frame_block_sizes, vec![16, 16]);
+                assert_eq!(chunk.bytes.as_ref(), &initial[..25]);
+            }
+            ChunkStep::Pending => panic!("expected first push to queue and return the first chunk"),
+        }
+
+        match scanner.push_bytes(&trailing).unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 1);
+                assert_eq!(chunk.start_frame_index, 2);
+                assert_eq!(chunk.start_sample_number, 32);
+                assert_eq!(chunk.frame_block_sizes, vec![16, 16]);
+                assert_eq!(chunk.bytes.as_ref(), &initial[25..54]);
+            }
+            ChunkStep::Pending => {
+                panic!("expected queued chunk to be returned while buffering new trailing input")
+            }
+        }
+
+        match scanner.finish().unwrap() {
+            ChunkStep::Sealed(chunk) => {
+                assert_eq!(chunk.sequence, 2);
+                assert_eq!(chunk.start_frame_index, 4);
+                assert_eq!(chunk.start_sample_number, 64);
+                assert_eq!(chunk.frame_block_sizes, vec![16, 16]);
+                let mut expected = initial[54..].to_vec();
+                expected.extend_from_slice(&trailing);
+                assert_eq!(chunk.bytes.as_ref(), expected.as_slice());
+            }
+            ChunkStep::Pending => panic!("expected buffered trailing input to survive queued return"),
         }
     }
 }
