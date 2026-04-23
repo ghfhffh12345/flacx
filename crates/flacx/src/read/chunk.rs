@@ -1,11 +1,17 @@
 use std::{collections::VecDeque, sync::Arc};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::{
     error::{Error, Result},
     stream_info::StreamInfo,
 };
 
 use super::ParsedFrame;
+
+#[cfg(test)]
+static FIND_NEXT_FRAME_START_PARSE_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ChunkScannerConfig {
@@ -325,8 +331,13 @@ fn find_next_frame_start(
     expected_sample_number: u64,
 ) -> Result<Option<ScannedFrame>> {
     let mut offset = search_from;
-    while offset < bytes.len() {
-        match super::frame::parse_frame_header(
+    while offset + 1 < bytes.len() {
+        if bytes[offset] != 0xff || (bytes[offset + 1] & 0b1111_1110) != 0b1111_1000 {
+            offset += 1;
+            continue;
+        }
+
+        match parse_frame_header_for_scan(
             &bytes[offset..],
             stream_info,
             expected_frame_number,
@@ -344,6 +355,35 @@ fn find_next_frame_start(
         }
     }
     Ok(None)
+}
+
+fn parse_frame_header_for_scan(
+    bytes: &[u8],
+    stream_info: StreamInfo,
+    expected_frame_number: u64,
+    expected_sample_number: u64,
+    expected_kind: Option<super::FrameHeaderNumberKind>,
+) -> Result<ParsedFrame> {
+    #[cfg(test)]
+    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+
+    super::frame::parse_frame_header(
+        bytes,
+        stream_info,
+        expected_frame_number,
+        expected_sample_number,
+        expected_kind,
+    )
+}
+
+#[cfg(test)]
+fn reset_find_next_frame_start_parse_attempts() {
+    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn find_next_frame_start_parse_attempts() -> usize {
+    FIND_NEXT_FRAME_START_PARSE_ATTEMPTS.load(Ordering::Relaxed)
 }
 
 fn is_incomplete_header(error: &Error) -> bool {
@@ -391,6 +431,40 @@ mod tests {
         let mut bytes = frame_header(frame_number, 16);
         bytes.extend(std::iter::repeat_n(0x40 + frame_number, payload_len));
         bytes
+    }
+
+    fn valid_test_frame_bytes() -> Vec<u8> {
+        frame_bytes(0, 5)
+    }
+
+    #[test]
+    fn find_next_frame_start_skips_non_sync_bytes_without_reparsing_every_offset() {
+        let stream_info = stream_info_with_total_samples(16);
+        let mut bytes = vec![0x00, 0x11, 0x22];
+        bytes.extend_from_slice(&valid_test_frame_bytes());
+        super::reset_find_next_frame_start_parse_attempts();
+
+        let next = super::find_next_frame_start(bytes.as_slice(), 0, stream_info, 0, 0).unwrap();
+
+        assert!(matches!(next, Some(frame) if frame.start_offset == 3));
+        assert_eq!(super::find_next_frame_start_parse_attempts(), 1);
+    }
+
+    #[test]
+    fn find_next_frame_start_does_not_parse_when_no_sync_candidate_exists() {
+        super::reset_find_next_frame_start_parse_attempts();
+
+        let next = super::find_next_frame_start(
+            &[0x00, 0x11, 0x22, 0x33, 0x44],
+            0,
+            stream_info_with_total_samples(16),
+            0,
+            0,
+        )
+        .unwrap();
+
+        assert!(next.is_none());
+        assert_eq!(super::find_next_frame_start_parse_attempts(), 0);
     }
 
     #[test]
