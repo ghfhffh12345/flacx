@@ -335,6 +335,10 @@ impl<R> FlacPcmStream<R> {
 
     pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads.max(1);
+        let window_depth_limit = self.active_decode_window_limit();
+        if let Some(session) = self.session.as_mut() {
+            session.set_window_depth_limit(window_depth_limit);
+        }
     }
 }
 
@@ -454,16 +458,19 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             self.chunk_scanner.requeue_ready_chunk_front(chunk);
             return Ok(false);
         }
-        self.discovered_input_frames = self
-            .discovered_input_frames
-            .saturating_add(chunk.frame_block_sizes.len());
-        self.discovered_sample_number = self.discovered_sample_number.saturating_add(
-            chunk.frame_block_sizes
+        let discovered_input_frames = chunk.frame_block_sizes.len();
+        let discovered_sample_number = chunk
+            .frame_block_sizes
                 .iter()
                 .map(|&block_size| u64::from(block_size))
-                .sum::<u64>(),
-        );
+                .sum::<u64>();
         self.submit_chunk(chunk)?;
+        self.discovered_input_frames = self
+            .discovered_input_frames
+            .saturating_add(discovered_input_frames);
+        self.discovered_sample_number = self
+            .discovered_sample_number
+            .saturating_add(discovered_sample_number);
         Ok(true)
     }
 
@@ -855,6 +862,8 @@ fn validate_direct_stream_info(stream_info: StreamInfo) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::frame::{
         channel_bits_per_sample, decode_bits_per_sample, decode_channel_assignment,
     };
@@ -939,6 +948,74 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(error.to_string().contains("1..8"));
+    }
+
+    fn direct_stream_info() -> StreamInfo {
+        StreamInfo {
+            sample_rate: 44_100,
+            channels: 1,
+            bits_per_sample: 16,
+            total_samples: 16,
+            md5: [0; 16],
+            min_block_size: 16,
+            max_block_size: 16,
+            min_frame_size: 32,
+            max_frame_size: 32,
+        }
+    }
+
+    #[test]
+    fn live_set_threads_reconfigures_streaming_session_window_limit() {
+        let stream_info = direct_stream_info();
+        let mut stream = FlacPcmStream::builder(Cursor::new(Vec::<u8>::new()))
+            .stream_info(stream_info)
+            .build()
+            .unwrap();
+
+        stream.ensure_streaming_session();
+        let initial_window_limit = stream
+            .session
+            .as_ref()
+            .unwrap()
+            .window_depth_limit_for_tests();
+
+        stream.set_threads(4);
+
+        assert_eq!(stream.threads, 4);
+        assert_eq!(initial_window_limit, super::DECODE_SESSION_WINDOW_DEPTH);
+        assert_eq!(
+            stream
+                .session
+                .as_ref()
+                .unwrap()
+                .window_depth_limit_for_tests(),
+            4 * super::DECODE_SESSION_WINDOW_DEPTH
+        );
+    }
+
+    #[test]
+    fn submit_scanned_chunk_only_advances_discovery_after_accepted_submission() {
+        let stream_info = direct_stream_info();
+        let mut stream = FlacPcmStream::builder(Cursor::new(Vec::<u8>::new()))
+            .stream_info(stream_info)
+            .build()
+            .unwrap();
+        stream.session = Some(super::session::StreamingDecodeSession::broken_for_submit_failure());
+        let chunk = super::chunk::CompressedDecodeChunk {
+            sequence: 0,
+            start_frame_index: 0,
+            start_sample_number: 0,
+            frame_block_sizes: vec![16],
+            frame_byte_lengths: vec![32],
+            bytes: Arc::from(vec![0u8; 32]),
+        };
+
+        let error = stream.submit_scanned_chunk(chunk).unwrap_err();
+
+        assert!(matches!(error, crate::Error::Thread(_)));
+        assert_eq!(stream.discovered_input_frames, 0);
+        assert_eq!(stream.discovered_sample_number, 0);
+        assert!(stream.submitted_frame_byte_lengths.is_empty());
     }
 
 }

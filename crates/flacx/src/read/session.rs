@@ -299,6 +299,11 @@ impl StreamingDecodeSession {
         self.window_depth_limit
     }
 
+    pub(super) fn set_window_depth_limit(&mut self, window_depth_limit: usize) {
+        self.window_depth_limit = window_depth_limit.max(1);
+        self.window_state.1.notify_all();
+    }
+
     fn release_window_capacity(&self, completed_slabs: usize) {
         let (lock, condvar) = &*self.window_state;
         let mut state = lock.lock().unwrap();
@@ -332,6 +337,28 @@ impl StreamingDecodeSession {
         let mut state = lock.lock().unwrap();
         state.closed = true;
         condvar.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(super) fn broken_for_submit_failure() -> Self {
+        let (job_sender, job_receiver) = mpsc::sync_channel(1);
+        drop(job_receiver);
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        drop(result_sender);
+        Self {
+            job_sender: Some(job_sender),
+            result_receiver,
+            ordered_drain: OrderedSlabDrain::new(),
+            coordinator_handle: None,
+            window_state: Arc::new((Mutex::new(SessionWindowState::default()), Condvar::new())),
+            result_channel_closed: false,
+            window_depth_limit: 1,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn window_depth_limit_for_tests(&self) -> usize {
+        self.window_depth_limit
     }
 }
 
