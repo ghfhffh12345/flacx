@@ -855,17 +855,28 @@ impl<R: Read + Seek> FlacPcmStream<R> {
             Ok(0) => {
                 self.eof = true;
                 if let Some(sender) = self.input_sender.take() {
-                    sender.send(Ok(None)).map_err(|_| {
-                        Error::Thread("decode producer input channel closed unexpectedly".into())
-                    })?;
+                    if sender.send(Ok(None)).is_err() {
+                        self.wait_for_producer_progress();
+                        if !self.producer_finished() {
+                            return Err(Error::Thread(
+                                "decode producer input channel closed unexpectedly".into(),
+                            ));
+                        }
+                    }
                 }
                 Ok(false)
             }
             Ok(read) => {
                 chunk.truncate(read);
-                sender.send(Ok(Some(chunk))).map_err(|_| {
-                    Error::Thread("decode producer input channel closed unexpectedly".into())
-                })?;
+                if sender.send(Ok(Some(chunk))).is_err() {
+                    self.wait_for_producer_progress();
+                    if !self.producer_finished() {
+                        return Err(Error::Thread(
+                            "decode producer input channel closed unexpectedly".into(),
+                        ));
+                    }
+                    return Ok(false);
+                }
                 Ok(true)
             }
             Err(error) => {
@@ -950,8 +961,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             return Ok(0);
         }
         self.ensure_streaming_session();
-        if self.eof
-            && self.producer_finished()
+        if self.producer_finished()
             && self.drained_pcm_frames >= self.spec.total_samples
             && self
                 .session
@@ -973,8 +983,7 @@ impl<R: Read + Seek> EncodePcmStream for FlacPcmStream<R> {
             if total_pcm_frames == max_frames {
                 break;
             }
-            if self.eof
-                && self.producer_finished()
+            if self.producer_finished()
                 && self
                     .session
                     .as_ref()

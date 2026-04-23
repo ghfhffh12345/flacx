@@ -765,6 +765,20 @@ fn real_reader_decode_uses_producer_backed_session_across_thread_counts() {
 
 #[cfg(feature = "progress")]
 #[test]
+fn producer_backed_decode_stops_after_declared_samples_before_physical_eof() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_048));
+    let mut flac = Encoder::new(EncoderConfig::default().with_block_size(576))
+        .encode_bytes(&wav)
+        .unwrap();
+    flac.extend_from_slice(b"trailing bytes after the final declared frame");
+
+    let decoded = decode_bytes_with_threads(&flac, 4);
+
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+}
+
+#[cfg(feature = "progress")]
+#[test]
 fn real_reader_background_producer_overlaps_and_stays_window_bounded() {
     const DECODE_SLAB_MAX_INPUT_FRAMES: usize = 256;
     const DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK: usize = 64 * 1024 * 4;
