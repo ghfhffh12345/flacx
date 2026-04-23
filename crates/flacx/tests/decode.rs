@@ -299,19 +299,19 @@ fn decode_thread_variants_cover_throughput_comparison_set() {
 }
 
 #[test]
-fn throughput_bench_reuses_decode_matrix_for_producer_backed_path() {
+fn throughput_bench_reuses_decode_matrix_for_dispatcher_backed_path() {
     let source = include_str!("../benches/throughput.rs");
     assert!(
-        source.contains("bench_large_streaming_producer_backed_decode_matrix("),
-        "throughput bench should reuse a shared producer-backed decode matrix helper"
+        source.contains("bench_large_streaming_dispatcher_backed_decode_matrix("),
+        "throughput bench should reuse a shared dispatcher-backed decode matrix helper"
     );
     assert!(
-        source.contains("\"decode_large_streaming_producer_backed_path\""),
-        "throughput bench should label the large streaming decode matrix as producer-backed"
+        source.contains("\"decode_large_streaming_dispatcher_backed_path\""),
+        "throughput bench should label the large streaming decode matrix as dispatcher-backed"
     );
     assert!(
-        source.contains("\"matched_large_streaming_producer_backed_decode\""),
-        "matched throughput bench should label the shared decode matrix as producer-backed"
+        source.contains("\"matched_large_streaming_dispatcher_backed_decode\""),
+        "matched throughput bench should label the shared decode matrix as dispatcher-backed"
     );
 }
 

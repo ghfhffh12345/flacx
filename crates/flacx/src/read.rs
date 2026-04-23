@@ -971,6 +971,14 @@ mod tests {
             .stream_info(stream_info)
             .build()
             .unwrap();
+        let chunk = super::chunk::CompressedDecodeChunk {
+            sequence: 0,
+            start_frame_index: 0,
+            start_sample_number: 0,
+            frame_block_sizes: vec![16],
+            frame_byte_lengths: vec![32],
+            bytes: Arc::from(vec![0u8; 32]),
+        };
 
         stream.ensure_streaming_session();
         let initial_window_limit = stream
@@ -978,6 +986,15 @@ mod tests {
             .as_ref()
             .unwrap()
             .window_depth_limit_for_tests();
+        assert!(stream.submit_scanned_chunk(chunk).is_ok());
+        assert!(
+            stream
+                .session
+                .as_ref()
+                .unwrap()
+                .outstanding_window_slabs_for_tests()
+                > 0
+        );
 
         stream.set_threads(4);
 

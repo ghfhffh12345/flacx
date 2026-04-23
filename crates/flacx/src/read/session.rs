@@ -360,6 +360,11 @@ impl StreamingDecodeSession {
     pub(super) fn window_depth_limit_for_tests(&self) -> usize {
         self.window_depth_limit
     }
+
+    #[cfg(test)]
+    pub(super) fn outstanding_window_slabs_for_tests(&self) -> usize {
+        self.outstanding_window_slabs()
+    }
 }
 
 impl Drop for StreamingDecodeSession {

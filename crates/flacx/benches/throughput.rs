@@ -129,9 +129,9 @@ fn decode_large_streaming_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("flacx throughput");
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(10);
-    bench_large_streaming_producer_backed_decode_matrix(
+    bench_large_streaming_dispatcher_backed_decode_matrix(
         &mut group,
-        "decode_large_streaming_producer_backed_path",
+        "decode_large_streaming_dispatcher_backed_path",
         |_threads, input| Throughput::Bytes(input.len() as u64),
         |threads| large_streaming_decode_flac_bytes(threads),
     );
@@ -149,9 +149,9 @@ fn matched_large_streaming_encode_decode(c: &mut Criterion) {
     group.bench_function("matched_large_streaming_encode", |b| {
         b.iter(|| encode_fixture_bytes(&encoder_config, &wav_input).expect("matched encode"))
     });
-    bench_large_streaming_producer_backed_decode_matrix(
+    bench_large_streaming_dispatcher_backed_decode_matrix(
         &mut group,
-        "matched_large_streaming_producer_backed_decode",
+        "matched_large_streaming_dispatcher_backed_decode",
         |_, _| Throughput::Bytes(wav_input.len() as u64),
         large_streaming_decode_flac_bytes,
     );
@@ -576,7 +576,7 @@ fn shared_thread_count() -> usize {
     encode_threads
 }
 
-fn bench_large_streaming_producer_backed_decode_matrix<F, T>(
+fn bench_large_streaming_dispatcher_backed_decode_matrix<F, T>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     name_prefix: &str,
     throughput: T,
@@ -593,7 +593,7 @@ fn bench_large_streaming_producer_backed_decode_matrix<F, T>(
             b.iter(|| {
                 decoder
                     .decode_bytes(&input)
-                    .expect("producer-backed large streaming decode")
+                    .expect("dispatcher-backed large streaming decode")
             })
         });
     }
