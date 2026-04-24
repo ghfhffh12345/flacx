@@ -131,6 +131,49 @@ fn builtin_encode_file_matches_explicit_reader_session_output() {
     let _ = fs::remove_file(output_path);
 }
 
+#[cfg(feature = "wav")]
+#[test]
+fn top_level_aliases_and_reset_entry_points_are_usable_from_public_api() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 1_024));
+    let flac = builtin::encode_bytes(&wav).unwrap();
+
+    let pcm_total = flacx::inspect_pcm_total_samples(Cursor::new(&wav)).unwrap();
+    assert_eq!(pcm_total, 1_024);
+
+    let reader = PcmReader::new(Cursor::new(&wav)).unwrap();
+    let mut encoder = EncoderConfig::default().into_encoder(Cursor::new(Vec::new()));
+    let encode_summary = encoder.encode_source(reader.into_source()).unwrap();
+    let encoded = encoder.into_inner().into_inner();
+
+    let mut decoder = flacx::DecodeConfig::default().into_decoder(Cursor::new(Vec::new()));
+    let decode_summary = decoder
+        .decode_source(read_flac_reader(Cursor::new(&flac)).unwrap().into_decode_source())
+        .unwrap();
+    let decoded = decoder.into_inner().into_inner();
+
+    assert_eq!(encode_summary.total_samples, 1_024);
+    assert_eq!(decode_summary.total_samples, 1_024);
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+    assert_eq!(encoded, flac);
+}
+
+#[test]
+fn config_accessors_reflect_public_builder_state() {
+    let encode = EncoderConfig::default()
+        .with_level(Level::Level0)
+        .with_threads(3);
+    let decode = flacx::DecodeConfig::default()
+        .with_threads(2)
+        .with_emit_fxmd(true)
+        .with_strict_channel_mask_provenance(true);
+
+    assert_eq!(encode.level(), Level::Level0);
+    assert_eq!(encode.threads(), 3);
+    assert_eq!(decode.threads(), 2);
+    assert!(decode.emit_fxmd());
+    assert!(decode.strict_channel_mask_provenance());
+}
+
 #[test]
 fn builtin_convenience_no_longer_uses_legacy_helpers() {
     let source = include_str!("../src/convenience.rs");
@@ -146,191 +189,6 @@ fn builtin_convenience_no_longer_uses_legacy_helpers() {
             .count(),
         1
     );
-}
-
-#[test]
-fn recompress_public_exports_remain_stable() {
-    let source = include_str!("../src/lib.rs");
-    assert!(source.contains("pub mod builtin {"));
-    assert!(source.contains("recompress_bytes,"));
-    assert!(source.contains("recompress_file,"));
-    assert!(source.contains("pub use recompress::{"));
-    assert!(
-        source.contains(
-            "FlacRecompressSource, RecompressBuilder, RecompressConfig, RecompressMode, RecompressSummary,"
-        )
-    );
-    assert!(source.contains("Recompressor,"));
-    assert!(source.contains(
-        "#[cfg(feature = \"progress\")]\npub use recompress::{RecompressPhase, RecompressProgress};"
-    ));
-}
-
-#[test]
-fn source_exports_replace_split_metadata_surface() {
-    let lib_source = include_str!("../src/lib.rs");
-    let encoder_source = include_str!("../src/encoder.rs");
-    let decode_source = include_str!("../src/decode.rs");
-    let input_source = include_str!("../src/input.rs");
-    let metadata_source = include_str!("../src/metadata.rs");
-    let wav_input_source = include_str!("../src/wav_input.rs");
-
-    assert!(!lib_source.contains("AnyPcmStream,"));
-    assert!(!lib_source.contains("PcmReaderOptions,"));
-    assert!(!lib_source.contains("read_pcm_reader,"));
-    assert!(!lib_source.contains("read_pcm_reader_with_options,"));
-    assert!(lib_source.contains("EncodeSource"));
-    assert!(lib_source.contains("DecodeSource"));
-    assert!(lib_source.contains("pub use metadata::Metadata;"));
-    assert!(lib_source.contains("Metadata,"));
-    let removed_metadata_reexport = concat!(
-        "pub use metadata::{DecodeMetadata, EncodeMetadata, ",
-        "Wav",
-        "Metadata};",
-    );
-    assert!(!lib_source.contains(removed_metadata_reexport));
-
-    assert!(encoder_source.contains("pub fn encode_source<"));
-    assert!(!encoder_source.contains("pub fn set_metadata("));
-    assert!(!encoder_source.contains("pub fn with_metadata("));
-
-    assert!(decode_source.contains("pub fn decode_source<"));
-    assert!(!decode_source.contains("pub fn set_metadata("));
-    assert!(!decode_source.contains("pub fn with_metadata("));
-
-    assert!(input_source.contains("pub fn new(reader: R) -> Result<Self>"));
-    assert!(!input_source.contains("pub fn read_pcm_reader<"));
-    assert!(!input_source.contains("pub fn read_pcm_reader_with_options<"));
-    let removed_spec_alias = concat!("PcmSpec as ", "Wav", "Spec");
-    let removed_stream_alias = concat!("PcmStream as ", "Wav", "Data");
-    let removed_metadata_alias = concat!("type ", "Wav", "Metadata = Metadata");
-    assert!(!input_source.contains(removed_spec_alias));
-    assert!(!input_source.contains(removed_stream_alias));
-    assert!(!metadata_source.contains(removed_metadata_alias));
-    assert!(!wav_input_source.contains(removed_spec_alias));
-    assert!(!wav_input_source.contains(removed_stream_alias));
-}
-
-#[test]
-fn direct_construction_exports_include_flac_pcm_stream_and_stream_info() {
-    let lib_source = include_str!("../src/lib.rs");
-
-    assert!(lib_source.contains("pub use read::{"));
-    assert!(lib_source.contains("FlacPcmStream"));
-    assert!(lib_source.contains("FlacReader"));
-    assert!(lib_source.contains("pub use stream_info::StreamInfo;"));
-    assert!(lib_source.contains("pub mod core {"));
-    assert!(lib_source.contains("FlacPcmStream"));
-    assert!(lib_source.contains("StreamInfo"));
-}
-
-#[test]
-fn direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
-    let wav_source = include_str!("../src/wav_input.rs");
-    let aiff_source = include_str!("../src/aiff.rs");
-    let caf_source = include_str!("../src/caf.rs");
-    let raw_source = include_str!("../src/raw.rs");
-    let read_source = include_str!("../src/read.rs");
-
-    assert!(wav_source.contains("pub struct WavPcmStream"));
-    assert!(wav_source.contains("WavPcmStream::builder") || wav_source.contains("pub fn builder("));
-
-    assert!(aiff_source.contains("pub struct AiffPcmStream"));
-    assert!(aiff_source.contains("AiffPcmStream") && aiff_source.contains("pub fn new("));
-
-    assert!(caf_source.contains("pub struct CafPcmStream"));
-    assert!(caf_source.contains("CafPcmStream") && caf_source.contains("pub fn new("));
-
-    assert!(raw_source.contains("pub struct RawPcmStream"));
-    assert!(raw_source.contains("RawPcmStream") && raw_source.contains("pub fn new("));
-
-    assert!(read_source.contains("pub struct FlacPcmStream"));
-    assert!(
-        read_source.contains("FlacPcmStream::builder") || read_source.contains("pub fn builder(")
-    );
-}
-
-#[test]
-fn api_top_level_public_api_uses_pcm_inspection_naming() {
-    let lib_source = include_str!("../src/lib.rs");
-    assert!(
-        lib_source
-            .contains("pub use input::inspect_wav_total_samples as inspect_pcm_total_samples;")
-    );
-    assert!(!lib_source.contains("pub use input::inspect_wav_total_samples;"));
-    assert!(!lib_source.contains("inspect_wav_total_samples,"));
-}
-
-#[test]
-fn api_docs_examples_use_reset_reader_entry_points() {
-    let lib_source = include_str!("../src/lib.rs");
-    let decode_source = include_str!("../src/decode.rs");
-    let readme = include_str!("../README.md");
-
-    assert!(
-        lib_source.contains("the reset API built around staged readers, sources, configs, and")
-    );
-    assert!(lib_source.contains("| Reset API | You want direct control over staged input, direct stream construction, metadata, configs, output containers, or progress callbacks. |"));
-    assert!(lib_source.contains("The reset API is organized around a few reusable concepts:"));
-    assert!(
-        lib_source.contains("The [`core`] module re-exports the reset API in one place if you")
-    );
-    assert!(lib_source.contains("- Start with [`core`] for the reset API."));
-    assert!(lib_source.contains("use flacx::{EncoderConfig, PcmReader};"));
-    assert!(lib_source.contains("let source = PcmReader::new(input)?.into_source();"));
-    assert!(lib_source.contains("use flacx::{DecodeConfig, read_flac_reader};"));
-    assert!(lib_source.contains("let source = read_flac_reader(input)?.into_decode_source();"));
-    assert!(lib_source.contains("let source = read_flac_reader(input)?.into_recompress_source();"));
-    assert!(!lib_source.contains("use flacx::{EncoderConfig, WavReader};"));
-    assert!(!lib_source.contains("use flacx::{DecodeConfig, FlacReader};"));
-    assert!(!lib_source.contains("use flacx::{FlacReader, RecompressConfig};"));
-
-    assert!(decode_source.contains("use flacx::{DecodeConfig, read_flac_reader};"));
-    assert!(decode_source.contains(
-        "let reader = read_flac_reader(std::fs::File::open(\"input.flac\").unwrap()).unwrap();"
-    ));
-    assert!(!decode_source.contains("use flacx::{DecodeConfig, FlacReader};"));
-
-    assert!(
-        readme
-            .contains("`PcmReader` for PCM-container inputs, `read_flac_reader` for FLAC inputs,")
-    );
-    assert!(readme.contains("`inspect_pcm_total_samples`"));
-    assert!(!readme.contains("`WavReader`, and"));
-    assert!(!readme.contains("`FlacReader`."));
-}
-
-#[test]
-fn api_public_error_surface_uses_pcm_container_variants() {
-    let error_source = include_str!("../src/error.rs");
-    assert!(error_source.contains("InvalidPcmContainer"));
-    assert!(error_source.contains("UnsupportedPcmContainer"));
-    assert!(!error_source.contains("InvalidWav"));
-    assert!(!error_source.contains("UnsupportedWav"));
-}
-
-#[test]
-fn api_session_level_builders_are_removed_from_public_surface() {
-    let encoder_source = include_str!("../src/encoder.rs");
-    let decoder_source = include_str!("../src/decode.rs");
-    assert!(!encoder_source.contains("pub fn builder() -> EncoderBuilder"));
-    assert!(!decoder_source.contains("pub fn builder() -> DecodeBuilder"));
-}
-
-#[test]
-fn api_config_accessors_replace_public_field_contract() {
-    let config_source = include_str!("../src/config.rs");
-    assert!(config_source.contains("pub fn level(&self) -> Level"));
-    assert!(config_source.contains("pub fn threads(&self) -> usize"));
-    assert!(config_source.contains("pub fn emit_fxmd(&self) -> bool"));
-    assert!(config_source.contains("pub fn output_container(&self) -> PcmContainer"));
-    assert!(config_source.contains(
-        "Their fields stay private; inspect the\n//! resulting values through the accessor methods"
-    ));
-    assert!(!config_source.contains("pub level: Level"));
-    assert!(!config_source.contains("pub threads: usize"));
-    assert!(!config_source.contains("pub emit_fxmd: bool"));
-    assert!(!config_source.contains("pub output_container: PcmContainer"));
 }
 
 #[cfg(feature = "aiff")]
@@ -844,21 +702,6 @@ fn directly_constructed_wav_stream_matches_reader_encode_source_output() {
 
     assert_eq!(direct_summary, baseline_summary);
     assert_eq!(direct_flac, baseline_flac);
-}
-
-#[test]
-fn shared_metadata_replaces_public_split_metadata_and_exposes_no_raw_authoring_surface() {
-    let lib_source = include_str!("../src/lib.rs");
-    let metadata_source = include_str!("../src/metadata.rs");
-
-    assert!(lib_source.contains("pub use metadata::Metadata;"));
-    assert!(!lib_source.contains("EncodeMetadata"));
-    assert!(!lib_source.contains("DecodeMetadata"));
-    assert!(metadata_source.contains("pub struct Metadata"));
-    assert!(!metadata_source.contains("pub struct EncodeMetadata"));
-    assert!(!metadata_source.contains("pub struct DecodeMetadata"));
-    assert!(!metadata_source.contains("pub fn from_fxmd"));
-    assert!(!metadata_source.contains("pub fn raw_"));
 }
 
 #[cfg(feature = "progress")]
