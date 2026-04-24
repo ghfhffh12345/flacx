@@ -322,6 +322,8 @@ impl StreamingDecodeSession {
 
     pub(super) fn set_window_depth_limit(&mut self, window_depth_limit: usize) {
         self.window_depth_limit = window_depth_limit.max(1);
+        self.ordered_drain
+            .set_window_capacity(self.window_depth_limit);
     }
 
     fn release_window_capacity(&mut self, completed_slabs: usize) {
@@ -699,6 +701,23 @@ mod tests {
         assert_eq!(session.active_slab_count(), 1);
         assert_eq!(session.drain_into(1, 1, &mut output), (1, 1));
         assert_eq!(output, vec![10, 20]);
+    }
+
+    #[test]
+    fn increasing_window_depth_limit_expands_ready_capacity_for_out_of_order_results() {
+        let mut session = StreamingDecodeSession::from_result_receiver_with_window_depth(
+            mpsc::sync_channel::<crate::read::Result<DecodeSessionResult>>(1).1,
+            1,
+        );
+        let mut output = Vec::new();
+
+        session.set_window_depth_limit(3);
+        session.accept_ready_slab(slab(2, 2, &[1], &[30]), 3);
+        session.accept_ready_slab(slab(0, 0, &[1], &[10]), 3);
+        session.accept_ready_slab(slab(1, 1, &[1], &[20]), 3);
+
+        assert_eq!(session.drain_into(usize::MAX, 1, &mut output), (3, 3));
+        assert_eq!(output, vec![10, 20, 30]);
     }
 
     fn fixture_plans(count: usize) -> (Vec<DecodeSlabPlan>, usize) {

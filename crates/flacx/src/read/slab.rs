@@ -222,6 +222,24 @@ impl OrderedSlabDrain {
         *slot = Some(slab);
     }
 
+    pub(super) fn set_window_capacity(&mut self, window_capacity: usize) {
+        let ready_slot_capacity = window_capacity.max(1).max(self.minimum_window_capacity());
+        if ready_slot_capacity == self.ready_slots.len() {
+            return;
+        }
+
+        let mut ready_slots = (0..ready_slot_capacity).map(|_| None).collect::<Vec<_>>();
+        for slab in self.ready_slots.iter_mut().filter_map(Option::take) {
+            let slot_index = slab.sequence % ready_slot_capacity;
+            assert!(
+                ready_slots[slot_index].is_none(),
+                "ready slot collision while resizing to capacity {ready_slot_capacity}",
+            );
+            ready_slots[slot_index] = Some(slab);
+        }
+        self.ready_slots = ready_slots;
+    }
+
     pub(super) fn drain_into(
         &mut self,
         max_frames: usize,
@@ -326,6 +344,18 @@ impl OrderedSlabDrain {
 
     fn ready_slot_index(&self, sequence: usize) -> usize {
         sequence % self.ready_slots.len()
+    }
+
+    fn minimum_window_capacity(&self) -> usize {
+        self.ready_slots
+            .iter()
+            .flatten()
+            .map(|slab| {
+                debug_assert!(slab.sequence >= self.next_ready_sequence);
+                slab.sequence - self.next_ready_sequence + 1
+            })
+            .max()
+            .unwrap_or(1)
     }
 }
 
