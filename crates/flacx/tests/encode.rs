@@ -224,6 +224,29 @@ fn produces_identical_output_across_thread_counts() {
 }
 
 #[test]
+fn level8_multithreaded_encode_matches_single_threaded_bytes() {
+    let wav = pcm_wav_bytes(16, 2, 44_100, &sample_fixture(2, 8_192));
+
+    let single = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(1)
+            .with_level(flacx::level::Level::Level8),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+
+    let multi = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(8)
+            .with_level(flacx::level::Level::Level8),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+
+    assert_eq!(single, multi);
+}
+
+#[test]
 fn reference_identity_matrix_repeats_exact_encode_bytes() {
     struct IdentityCase {
         label: &'static str,
