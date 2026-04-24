@@ -36,7 +36,17 @@ fn bench_with_temp_output_dir(
     run: impl Fn(&Path) -> Result<(), Box<dyn Error>>,
 ) {
     group.bench_function(name, |b| {
-        let temp_prefix = format!("flacx-cli-bench-{name}");
+        let sanitized_name: String = name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let temp_prefix = format!("flacx-cli-bench-{sanitized_name}");
         b.iter_batched(
             || TempDir::new(&temp_prefix).expect("create output dir"),
             |output_dir| {
