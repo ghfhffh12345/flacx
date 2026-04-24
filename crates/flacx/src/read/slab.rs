@@ -344,4 +344,57 @@ mod tests {
         assert_eq!(drain.completed_input_frames(), 2);
         assert!(drain.is_idle());
     }
+    #[test]
+    fn ordered_drain_holds_out_of_order_results_until_sequence_gap_closes() {
+        let mut drain = OrderedSlabDrain::with_window_capacity(3);
+        let mut output = Vec::new();
+
+        drain.push_ready(slab(1, 1, &[2], &[30, 31]));
+
+        let progress = drain.drain_into(8, 1, &mut output);
+        assert_eq!(progress.drained_frames, 0);
+        assert_eq!(progress.completed_input_frames, 0);
+        assert_eq!(progress.retired_slabs, 0);
+        assert!(output.is_empty());
+
+        drain.push_ready(slab(0, 0, &[2], &[10, 11]));
+
+        let progress = drain.drain_into(8, 1, &mut output);
+        assert_eq!(progress.drained_frames, 4);
+        assert_eq!(progress.completed_input_frames, 2);
+        assert_eq!(progress.retired_slabs, 2);
+        assert_eq!(output, vec![10, 11, 30, 31]);
+    }
+
+    #[test]
+    fn ordered_drain_keeps_ready_state_bounded_to_window_capacity() {
+        let mut drain = OrderedSlabDrain::with_window_capacity(2);
+        let mut output = Vec::new();
+
+        drain.push_ready(slab(1, 1, &[1], &[20]));
+        drain.push_ready(slab(0, 0, &[1], &[10]));
+
+        assert_eq!(drain.ready_slot_capacity(), 2);
+        assert_eq!(drain.ready_slab_count(), 2);
+
+        let progress = drain.drain_into(1, 1, &mut output);
+        assert_eq!(progress.drained_frames, 1);
+        assert_eq!(progress.completed_input_frames, 1);
+        assert_eq!(progress.retired_slabs, 1);
+        assert_eq!(drain.ready_slot_capacity(), 2);
+        assert_eq!(drain.ready_slab_count(), 1);
+
+        drain.push_ready(slab(2, 2, &[1], &[30]));
+
+        assert_eq!(drain.ready_slot_capacity(), 2);
+        assert_eq!(drain.ready_slab_count(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds bounded ready window")]
+    fn ordered_drain_rejects_ready_slabs_beyond_window_capacity() {
+        let mut drain = OrderedSlabDrain::with_window_capacity(2);
+
+        drain.push_ready(slab(2, 2, &[1], &[30]));
+    }
 }
