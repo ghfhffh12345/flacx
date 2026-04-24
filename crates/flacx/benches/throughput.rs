@@ -39,11 +39,6 @@ fn configure_throughput_group(group: &mut BenchmarkGroup<'_, WallTime>, bytes: u
     group.measurement_time(DEFAULT_MEASUREMENT_TIME);
 }
 
-fn configure_large_streaming_group(group: &mut BenchmarkGroup<'_, WallTime>) {
-    group.measurement_time(DEFAULT_MEASUREMENT_TIME);
-    group.sample_size(LARGE_STREAMING_SAMPLE_SIZE);
-}
-
 fn encode_corpus_throughput(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let total_bytes = corpus.wav_total_input_bytes();
@@ -132,7 +127,8 @@ fn encode_multiframe_streaming_path(c: &mut Criterion) {
 
 fn decode_large_streaming_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("flacx throughput");
-    configure_large_streaming_group(&mut group);
+    group.measurement_time(DEFAULT_MEASUREMENT_TIME);
+    group.sample_size(LARGE_STREAMING_SAMPLE_SIZE);
     bench_large_streaming_real_decode_matrix(
         &mut group,
         "decode_large_streaming_real_decode_path",
