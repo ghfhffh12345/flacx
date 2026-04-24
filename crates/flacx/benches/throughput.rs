@@ -6,21 +6,25 @@ use std::{
 };
 
 use criterion::{
-    BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
+    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, Criterion, Throughput,
 };
 use flacx::{
-    DecodeConfig, EncoderConfig, FlacReaderOptions, RecompressConfig, RecompressMode, WavReader,
-    WavReaderOptions, builtin, read_flac_reader_with_options,
+    builtin, read_flac_reader_with_options, DecodeConfig, EncoderConfig, FlacReaderOptions,
+    RecompressConfig, RecompressMode, WavReader, WavReaderOptions,
 };
 
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-use support::{
-    TestDecoder as DecodeHarness, large_streaming_decode_flac_bytes,
-    large_streaming_decode_wav_bytes,
-};
 use support::{cue_chunk, info_list_chunk, pcm_wav_bytes, sample_fixture, wav_with_chunks};
+use support::{
+    large_streaming_decode_flac_bytes, large_streaming_decode_wav_bytes,
+    TestDecoder as DecodeHarness,
+};
+
+const DEFAULT_MEASUREMENT_TIME: Duration = Duration::from_secs(5);
+const LARGE_STREAMING_SAMPLE_SIZE: usize = 10;
+const DECODE_THREAD_VARIANTS: [usize; 4] = [1, 2, 4, 8];
 
 fn corpus_root(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -30,14 +34,23 @@ fn corpus_root(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("corpus root '{name}' should exist from the workspace root"))
 }
 
+fn configure_throughput_group(group: &mut BenchmarkGroup<'_, WallTime>, bytes: u64) {
+    group.throughput(Throughput::Bytes(bytes));
+    group.measurement_time(DEFAULT_MEASUREMENT_TIME);
+}
+
+fn configure_large_streaming_group(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.measurement_time(DEFAULT_MEASUREMENT_TIME);
+    group.sample_size(LARGE_STREAMING_SAMPLE_SIZE);
+}
+
 fn encode_corpus_throughput(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let total_bytes = corpus.wav_total_input_bytes();
     let threads = shared_thread_count();
 
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(total_bytes));
-    group.measurement_time(Duration::from_secs(5));
+    configure_throughput_group(&mut group, total_bytes);
     group.bench_function("corpus_encode", |b| {
         b.iter(|| run_encode_corpus(&corpus, threads).expect("encode corpus"))
     });
@@ -50,8 +63,7 @@ fn decode_corpus_throughput(c: &mut Criterion) {
     let threads = shared_thread_count();
 
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(total_bytes));
-    group.measurement_time(Duration::from_secs(5));
+    configure_throughput_group(&mut group, total_bytes);
     group.bench_function("corpus_decode", |b| {
         b.iter(|| run_decode_corpus(&corpus, threads).expect("decode corpus"))
     });
@@ -64,8 +76,7 @@ fn recompress_corpus_throughput(c: &mut Criterion) {
     let threads = shared_thread_count();
 
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(total_bytes));
-    group.measurement_time(Duration::from_secs(5));
+    configure_throughput_group(&mut group, total_bytes);
     group.bench_function("corpus_recompress", |b| {
         b.iter(|| run_recompress_corpus(&corpus, threads).expect("recompress corpus"))
     });
@@ -75,10 +86,7 @@ fn recompress_corpus_throughput(c: &mut Criterion) {
 fn builtin_bytes_encode(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(
-        corpus.representative_wav_bytes.len() as u64
-    ));
-    group.measurement_time(Duration::from_secs(5));
+    configure_throughput_group(&mut group, corpus.representative_wav_bytes.len() as u64);
     group.bench_function("bytes_encode", |b| {
         b.iter(|| builtin::encode_bytes(&corpus.representative_wav_bytes).expect("builtin encode"))
     });
@@ -88,10 +96,7 @@ fn builtin_bytes_encode(c: &mut Criterion) {
 fn builtin_bytes_decode(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(
-        corpus.representative_flac_bytes.len() as u64
-    ));
-    group.measurement_time(Duration::from_secs(5));
+    configure_throughput_group(&mut group, corpus.representative_flac_bytes.len() as u64);
     group.bench_function("bytes_decode", |b| {
         b.iter(|| builtin::decode_bytes(&corpus.representative_flac_bytes).expect("builtin decode"))
     });
@@ -101,10 +106,7 @@ fn builtin_bytes_decode(c: &mut Criterion) {
 fn builtin_bytes_recompress(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(
-        corpus.representative_flac_bytes.len() as u64
-    ));
-    group.measurement_time(Duration::from_secs(5));
+    configure_throughput_group(&mut group, corpus.representative_flac_bytes.len() as u64);
     group.bench_function("bytes_recompress", |b| {
         b.iter(|| {
             builtin::recompress_bytes(&corpus.representative_flac_bytes)
@@ -120,8 +122,7 @@ fn encode_multiframe_streaming_path(c: &mut Criterion) {
         .with_threads(shared_thread_count())
         .with_block_schedule(vec![576, 1_152, 576, 2_304, 4_096, 576, 1_152]);
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(input.len() as u64));
-    group.measurement_time(Duration::from_secs(5));
+    configure_throughput_group(&mut group, input.len() as u64);
     group.sample_size(20);
     group.bench_function("encode_multiframe_streaming_path", |b| {
         b.iter(|| encode_fixture_bytes(&config, &input).expect("encode multiframe streaming path"))
@@ -131,8 +132,7 @@ fn encode_multiframe_streaming_path(c: &mut Criterion) {
 
 fn decode_large_streaming_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("flacx throughput");
-    group.measurement_time(Duration::from_secs(5));
-    group.sample_size(10);
+    configure_large_streaming_group(&mut group);
     bench_large_streaming_real_decode_matrix(
         &mut group,
         "decode_large_streaming_real_decode_path",
@@ -147,9 +147,8 @@ fn matched_large_streaming_encode_decode(c: &mut Criterion) {
     let wav_input = large_streaming_decode_wav_bytes();
     let encoder_config = EncoderConfig::default().with_threads(threads);
     let mut group = c.benchmark_group("flacx matched throughput");
-    group.throughput(Throughput::Bytes(wav_input.len() as u64));
-    group.measurement_time(Duration::from_secs(5));
-    group.sample_size(10);
+    configure_throughput_group(&mut group, wav_input.len() as u64);
+    group.sample_size(LARGE_STREAMING_SAMPLE_SIZE);
     group.bench_function("matched_large_streaming_encode", |b| {
         b.iter(|| encode_fixture_bytes(&encoder_config, &wav_input).expect("matched encode"))
     });
@@ -166,10 +165,10 @@ fn recompress_streaming_verify_handoff(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let config = RecompressConfig::default().with_threads(shared_thread_count());
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(
+    configure_throughput_group(
+        &mut group,
         corpus.recompress_streaming_flac_bytes.len() as u64,
-    ));
-    group.measurement_time(Duration::from_secs(5));
+    );
     group.bench_function("recompress_streaming_verify_handoff", |b| {
         b.iter(|| {
             let reader = read_flac_reader_with_options(
@@ -191,8 +190,7 @@ fn recompress_streaming_verify_handoff(c: &mut Criterion) {
 fn metadata_write_path(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(corpus.metadata_flac_bytes.len() as u64));
-    group.measurement_time(Duration::from_secs(5));
+    configure_throughput_group(&mut group, corpus.metadata_flac_bytes.len() as u64);
     group.bench_function("metadata_write_path", |b| {
         // Synthetic fixture retained because it exercises the metadata-bearing write path,
         // which the repository corpora do not cover directly.
@@ -204,10 +202,10 @@ fn metadata_write_path(c: &mut Criterion) {
 fn decode_frame_materialization(c: &mut Criterion) {
     let corpus = Corpus::load().expect("benchmark corpus");
     let mut group = c.benchmark_group("flacx throughput");
-    group.throughput(Throughput::Bytes(
+    configure_throughput_group(
+        &mut group,
         corpus.decode_materialization_flac_bytes.len() as u64,
-    ));
-    group.measurement_time(Duration::from_secs(5));
+    );
     group.bench_function("decode_frame_materialization", |b| {
         // Synthetic fixture retained because it forces multi-frame decode materialization
         // behavior that is not reliably represented by the fixed corpus subset.
@@ -589,7 +587,7 @@ fn bench_large_streaming_real_decode_matrix<F, T>(
     F: Fn(usize) -> Vec<u8>,
     T: Fn(usize, &[u8]) -> Throughput,
 {
-    for threads in decode_thread_variants() {
+    for threads in DECODE_THREAD_VARIANTS {
         let input = input_for_threads(threads);
         let decoder = DecodeHarness::new(DecodeConfig::default().with_threads(threads));
         group.throughput(throughput(threads, &input));
@@ -601,8 +599,4 @@ fn bench_large_streaming_real_decode_matrix<F, T>(
             })
         });
     }
-}
-
-fn decode_thread_variants() -> [usize; 4] {
-    [1, 2, 4, 8]
 }
