@@ -388,13 +388,20 @@ mod tests {
 
         assert_eq!(drain.ready_slot_capacity(), 2);
         assert_eq!(drain.ready_slab_count(), 2);
-    }
-
-    #[test]
-    #[should_panic(expected = "exceeds bounded ready window")]
-    fn ordered_drain_rejects_ready_slabs_beyond_window_capacity() {
-        let mut drain = OrderedSlabDrain::with_window_capacity(2);
-
-        drain.push_ready(slab(2, 2, &[1], &[30]));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drain.push_ready(slab(3, 3, &[1], &[40]));
+        }));
+        let message = panic.expect_err("sequence beyond the bounded ready window should panic");
+        let message = if let Some(message) = message.downcast_ref::<String>() {
+            message.as_str()
+        } else if let Some(message) = message.downcast_ref::<&'static str>() {
+            message
+        } else {
+            panic!("unexpected panic payload");
+        };
+        assert!(
+            message.contains("exceeds bounded ready window"),
+            "unexpected panic message: {message}"
+        );
     }
 }
