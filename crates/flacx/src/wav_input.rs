@@ -362,6 +362,7 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
                 Some(EncodeChunkPayload::DecodedSamples(samples)) => samples,
                 Some(_) | None => Vec::new(),
             };
+            output.clear();
             let frames = self.read_chunk(max_frames, &mut output)?;
             debug_assert_eq!(frames, output.len() / usize::from(self.spec.channels));
             return Ok(EncodeChunkPayload::DecodedSamples(output));

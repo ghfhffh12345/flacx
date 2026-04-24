@@ -128,6 +128,38 @@ fn level8_multithreaded_wav_encode_keeps_streaminfo_md5() {
 }
 
 #[test]
+fn level8_single_threaded_large_wav_still_decodes() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 1_049_000));
+    let flac = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(1)
+            .with_level(flacx::level::Level::Level8),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+
+    let decoded = decode_bytes(&flac).expect("single-threaded level8 output should decode");
+
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+}
+
+#[test]
+fn level8_multithreaded_large_wav_still_decodes() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &sample_fixture(1, 2_100_000));
+    let flac = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(2)
+            .with_level(flacx::level::Level::Level8),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+
+    let decoded = decode_bytes(&flac).expect("multithreaded level8 output should decode");
+
+    assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&wav));
+}
+
+#[test]
 fn writes_empty_stream_md5_for_zero_sample_pcm() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &[]);
     let flac = Encoder::default().encode_bytes(&wav).unwrap();

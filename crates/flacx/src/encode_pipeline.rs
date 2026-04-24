@@ -151,6 +151,7 @@ where
                                 EncodeChunkPayload::PackedPcm {
                                     bytes, envelope, ..
                                 } => {
+                                    decoded_samples.clear();
                                     decode_samples_into(bytes, *envelope, &mut decoded_samples)?;
                                     encode_frame_batch(
                                         &decoded_samples,
@@ -531,6 +532,7 @@ where
                 encode_chunk(config, plan, chunk_start, chunk_end, &mut chunk_samples)?
             }
             EncodeChunkPayload::PackedPcm { bytes, envelope, .. } => {
+                decoded_samples.clear();
                 decode_samples_into(bytes, *envelope, &mut decoded_samples)?;
                 encode_chunk(config, plan, chunk_start, chunk_end, &mut decoded_samples)?
             }

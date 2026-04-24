@@ -76,6 +76,7 @@ pub trait EncodePcmStream {
             Some(EncodeChunkPayload::DecodedSamples(samples)) => samples,
             Some(_) | None => Vec::new(),
         };
+        output.clear();
         let frames = self.read_chunk(max_frames, &mut output)?;
         debug_assert_eq!(frames, output.len() / usize::from(self.spec().channels));
         Ok(EncodeChunkPayload::DecodedSamples(output))
