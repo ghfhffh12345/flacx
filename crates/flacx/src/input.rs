@@ -9,6 +9,52 @@ pub(crate) use crate::pcm::{
 pub use crate::pcm::{PcmSpec, PcmStream};
 pub(crate) type PcmReaderOptions = crate::wav_input::WavReaderOptions;
 
+pub(crate) enum EncodeChunkPayload {
+    DecodedSamples(Vec<i32>),
+    PackedPcm {
+        bytes: Vec<u8>,
+        frame_count: usize,
+        envelope: PcmEnvelope,
+    },
+}
+
+impl EncodeChunkPayload {
+    pub(crate) fn pcm_frames(&self, channels: usize) -> usize {
+        match self {
+            Self::DecodedSamples(samples) => samples.len() / channels,
+            Self::PackedPcm { frame_count, .. } => *frame_count,
+        }
+    }
+
+    pub(crate) fn decoded_samples_len(&self) -> Option<usize> {
+        match self {
+            Self::DecodedSamples(samples) => Some(samples.len()),
+            Self::PackedPcm { .. } => None,
+        }
+    }
+
+    pub(crate) fn clear_for_reuse(self) -> Self {
+        match self {
+            Self::DecodedSamples(mut samples) => {
+                samples.clear();
+                Self::DecodedSamples(samples)
+            }
+            Self::PackedPcm {
+                mut bytes,
+                envelope,
+                ..
+            } => {
+                bytes.clear();
+                Self::PackedPcm {
+                    bytes,
+                    frame_count: 0,
+                    envelope,
+                }
+            }
+        }
+    }
+}
+
 /// Single-pass PCM sample source consumed by the encode session.
 pub trait EncodePcmStream {
     /// Return the stream specification that drives encode planning.
@@ -18,6 +64,22 @@ pub trait EncodePcmStream {
     ///
     /// Returns the number of frames appended to `output`.
     fn read_chunk(&mut self, max_frames: usize, output: &mut Vec<i32>) -> Result<usize>;
+
+    #[doc(hidden)]
+    #[allow(private_interfaces)]
+    fn read_chunk_payload(
+        &mut self,
+        max_frames: usize,
+        reuse: Option<EncodeChunkPayload>,
+    ) -> Result<EncodeChunkPayload> {
+        let mut output = match reuse {
+            Some(EncodeChunkPayload::DecodedSamples(samples)) => samples,
+            Some(_) | None => Vec::new(),
+        };
+        let frames = self.read_chunk(max_frames, &mut output)?;
+        debug_assert_eq!(frames, output.len() / usize::from(self.spec().channels));
+        Ok(EncodeChunkPayload::DecodedSamples(output))
+    }
 
     #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
@@ -30,6 +92,22 @@ pub trait EncodePcmStream {
         samples: &[i32],
     ) -> Result<()> {
         md5.update_samples(samples)
+    }
+
+    #[doc(hidden)]
+    #[allow(private_interfaces)]
+    fn update_streaminfo_md5_for_payload(
+        &mut self,
+        md5: &mut crate::md5::StreaminfoMd5,
+        payload: &EncodeChunkPayload,
+    ) -> Result<()> {
+        match payload {
+            EncodeChunkPayload::DecodedSamples(samples) => self.update_streaminfo_md5(md5, samples),
+            EncodeChunkPayload::PackedPcm { bytes, .. } => {
+                md5.update_bytes(bytes);
+                Ok(())
+            }
+        }
     }
 
     fn finish_streaminfo_md5(&mut self, md5: crate::md5::StreaminfoMd5) -> Result<[u8; 16]> {
@@ -88,6 +166,20 @@ impl<S: EncodePcmStream> EncodePcmStream for CountedEncodePcmStream<S> {
         Ok(frames)
     }
 
+    #[allow(private_interfaces)]
+    fn read_chunk_payload(
+        &mut self,
+        max_frames: usize,
+        reuse: Option<EncodeChunkPayload>,
+    ) -> Result<EncodeChunkPayload> {
+        let payload = self.stream.read_chunk_payload(max_frames, reuse)?;
+        self.input_bytes_processed = self.input_bytes_processed.saturating_add(pcm_bytes_for_frames(
+            self.stream.spec(),
+            payload.pcm_frames(usize::from(self.stream.spec().channels)),
+        ));
+        Ok(payload)
+    }
+
     #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
         self.input_bytes_processed
@@ -99,6 +191,15 @@ impl<S: EncodePcmStream> EncodePcmStream for CountedEncodePcmStream<S> {
         samples: &[i32],
     ) -> Result<()> {
         self.stream.update_streaminfo_md5(md5, samples)
+    }
+
+    #[allow(private_interfaces)]
+    fn update_streaminfo_md5_for_payload(
+        &mut self,
+        md5: &mut crate::md5::StreaminfoMd5,
+        payload: &EncodeChunkPayload,
+    ) -> Result<()> {
+        self.stream.update_streaminfo_md5_for_payload(md5, payload)
     }
 
     fn finish_streaminfo_md5(&mut self, md5: crate::md5::StreaminfoMd5) -> Result<[u8; 16]> {
@@ -290,6 +391,21 @@ impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
         }
     }
 
+    #[allow(private_interfaces)]
+    fn read_chunk_payload(
+        &mut self,
+        max_frames: usize,
+        reuse: Option<EncodeChunkPayload>,
+    ) -> Result<EncodeChunkPayload> {
+        match self {
+            Self::Wav(stream) => stream.read_chunk_payload(max_frames, reuse),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(stream) => stream.read_chunk_payload(max_frames, reuse),
+            #[cfg(feature = "caf")]
+            Self::Caf(stream) => stream.read_chunk_payload(max_frames, reuse),
+        }
+    }
+
     #[cfg(feature = "progress")]
     fn input_bytes_processed(&self) -> u64 {
         match self {
@@ -312,6 +428,21 @@ impl<R: Read + Seek> EncodePcmStream for AnyPcmStream<R> {
             Self::Aiff(stream) => stream.update_streaminfo_md5(md5, samples),
             #[cfg(feature = "caf")]
             Self::Caf(stream) => stream.update_streaminfo_md5(md5, samples),
+        }
+    }
+
+    #[allow(private_interfaces)]
+    fn update_streaminfo_md5_for_payload(
+        &mut self,
+        md5: &mut crate::md5::StreaminfoMd5,
+        payload: &EncodeChunkPayload,
+    ) -> Result<()> {
+        match self {
+            Self::Wav(stream) => stream.update_streaminfo_md5_for_payload(md5, payload),
+            #[cfg(feature = "aiff")]
+            Self::Aiff(stream) => stream.update_streaminfo_md5_for_payload(md5, payload),
+            #[cfg(feature = "caf")]
+            Self::Caf(stream) => stream.update_streaminfo_md5_for_payload(md5, payload),
         }
     }
 }

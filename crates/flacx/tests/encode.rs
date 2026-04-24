@@ -107,6 +107,27 @@ fn writes_streaminfo_md5_for_nonempty_pcm() {
 }
 
 #[test]
+fn level8_multithreaded_wav_encode_keeps_streaminfo_md5() {
+    let wav = pcm_wav_bytes(16, 1, 44_100, &[1, -2, 3, -4]);
+    let flac = Encoder::new(
+        EncoderConfig::default()
+            .with_threads(8)
+            .with_level(flacx::level::Level::Level8),
+    )
+    .encode_bytes(&wav)
+    .unwrap();
+    let md5 = &flac_metadata_blocks(&flac)[0].payload[18..34];
+
+    assert_eq!(
+        md5,
+        &[
+            0x4e, 0xee, 0x3c, 0x56, 0x22, 0x45, 0x41, 0xfe, 0x00, 0x81, 0x1d, 0x91, 0xd5, 0x24,
+            0x24, 0x56,
+        ]
+    );
+}
+
+#[test]
 fn writes_empty_stream_md5_for_zero_sample_pcm() {
     let wav = pcm_wav_bytes(16, 1, 44_100, &[]);
     let flac = Encoder::default().encode_bytes(&wav).unwrap();

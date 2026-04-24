@@ -17,12 +17,13 @@ use crate::{
     config::EncoderConfig,
     encoder::EncodeSummary,
     error::{Error, Result},
-    input::EncodePcmStream,
+    input::{EncodeChunkPayload, EncodePcmStream},
     md5::StreaminfoMd5,
     metadata::Metadata,
     model::encode_frame,
     plan::{EncodePlan, FrameCodedNumberKind, summary_from_stream_info},
     progress::ProgressSink,
+    wav_input::decode_samples_into,
     write::{EncodedFrame, FlacWriter, FrameHeaderNumber},
 };
 
@@ -59,7 +60,7 @@ struct EncodeJob {
     end_frame: usize,
     pcm_frames: usize,
     chunk_base_sample: u64,
-    samples: Vec<i32>,
+    payload: EncodeChunkPayload,
 }
 
 struct EncodedWorkChunk {
@@ -68,7 +69,7 @@ struct EncodedWorkChunk {
     frame_count: usize,
     encode_elapsed: Duration,
     frames: Vec<EncodedFrame>,
-    samples: Vec<i32>,
+    payload: EncodeChunkPayload,
 }
 
 #[derive(Default)]
@@ -118,9 +119,7 @@ where
         let mut next_expected = 0usize;
         let mut inflight_pcm_frames = 0usize;
         let mut pending: BTreeMap<usize, EncodedWorkChunk> = BTreeMap::new();
-        let mut reusable_buffers = std::iter::repeat_with(Vec::new)
-            .take(queue_limit)
-            .collect::<Vec<_>>();
+        let mut reusable_payloads = Vec::with_capacity(queue_limit);
 
         thread::scope(|scope| -> Result<()> {
             let (result_sender, result_receiver) = mpsc::sync_channel::<Result<EncodedWorkChunk>>(
@@ -136,16 +135,34 @@ where
                 let plan = plan.clone();
 
                 scope.spawn(move || {
+                    let mut decoded_samples = Vec::new();
                     while let Ok(job) = receiver.recv() {
                         let encode_start = Instant::now();
-                        let encoded = encode_frame_batch(
-                            &job.samples,
-                            &plan,
-                            job.start_frame,
-                            0,
-                            job.end_frame - job.start_frame,
-                            job.chunk_base_sample,
-                        );
+                        let encoded = (|| -> Result<EncodedChunk> {
+                            match &job.payload {
+                                EncodeChunkPayload::DecodedSamples(samples) => encode_frame_batch(
+                                    samples,
+                                    &plan,
+                                    job.start_frame,
+                                    0,
+                                    job.end_frame - job.start_frame,
+                                    job.chunk_base_sample,
+                                ),
+                                EncodeChunkPayload::PackedPcm {
+                                    bytes, envelope, ..
+                                } => {
+                                    decode_samples_into(bytes, *envelope, &mut decoded_samples)?;
+                                    encode_frame_batch(
+                                        &decoded_samples,
+                                        &plan,
+                                        job.start_frame,
+                                        0,
+                                        job.end_frame - job.start_frame,
+                                        job.chunk_base_sample,
+                                    )
+                                }
+                            }
+                        })();
                         let elapsed = encode_start.elapsed();
                         let encoded = encoded.map(|chunk| EncodedWorkChunk {
                             start_frame: job.start_frame,
@@ -153,7 +170,7 @@ where
                             frame_count: job.end_frame - job.start_frame,
                             encode_elapsed: elapsed,
                             frames: chunk.frames,
-                            samples: job.samples,
+                            payload: job.payload,
                         });
                         if result_sender.send(encoded).is_err() {
                             return;
@@ -168,16 +185,16 @@ where
                 while chunk_start < plan.total_frames {
                     let chunk_end = chunk_end_for_plan(plan, chunk_start, chunk_policy);
                     let pcm_frames = expected_frames_for_chunk(plan, chunk_start, chunk_end);
-                    let mut chunk_samples = reusable_buffers.pop().unwrap_or_default();
+                    let reuse = reusable_payloads.pop();
                     let read_start = Instant::now();
-                    read_planned_chunk(
+                    let payload = read_planned_chunk(
                         stream,
                         plan,
                         chunk_start,
                         chunk_end,
                         channels,
                         md5,
-                        &mut chunk_samples,
+                        reuse,
                     )?;
                     profile.read_decode_md5 += read_start.elapsed();
                     profile.total_chunks += 1;
@@ -189,7 +206,7 @@ where
                         end_frame: chunk_end,
                         pcm_frames,
                         chunk_base_sample: plan.frame(chunk_start).sample_offset,
-                        samples: chunk_samples,
+                        payload,
                     };
 
                     loop {
@@ -209,7 +226,7 @@ where
                                     &mut pending,
                                     writer,
                                     progress,
-                                    &mut reusable_buffers,
+                                    &mut reusable_payloads,
                                     &mut processed_samples,
                                     plan.spec.total_samples,
                                     &mut next_expected,
@@ -224,7 +241,7 @@ where
                                     &mut pending,
                                     writer,
                                     progress,
-                                    &mut reusable_buffers,
+                                    &mut reusable_payloads,
                                     &mut processed_samples,
                                     plan.spec.total_samples,
                                     &mut next_expected,
@@ -252,7 +269,7 @@ where
                         &mut pending,
                         writer,
                         progress,
-                        &mut reusable_buffers,
+                        &mut reusable_payloads,
                         &mut processed_samples,
                         plan.spec.total_samples,
                         &mut next_expected,
@@ -267,7 +284,7 @@ where
                         &mut pending,
                         writer,
                         progress,
-                        &mut reusable_buffers,
+                        &mut reusable_payloads,
                         &mut processed_samples,
                         plan.spec.total_samples,
                         &mut next_expected,
@@ -417,33 +434,31 @@ fn read_planned_chunk<S>(
     chunk_end: usize,
     channels: usize,
     md5: &mut StreaminfoMd5,
-    chunk_samples: &mut Vec<i32>,
-) -> Result<()>
+    reuse: Option<EncodeChunkPayload>,
+) -> Result<EncodeChunkPayload>
 where
     S: EncodePcmStream,
 {
     let expected_frames = expected_frames_for_chunk(plan, chunk_start, chunk_end);
-    let expected_samples = expected_frames
-        .checked_mul(channels)
-        .ok_or_else(|| Error::Encode("PCM chunk sample count overflows".into()))?;
-    chunk_samples.clear();
-    if chunk_samples.capacity() < expected_samples {
-        chunk_samples.reserve(expected_samples - chunk_samples.capacity());
-    }
-    let read_frames = stream.read_chunk(expected_frames, chunk_samples)?;
+    let payload = stream.read_chunk_payload(expected_frames, reuse)?;
+    let read_frames = payload.pcm_frames(channels);
     if read_frames != expected_frames {
         return Err(Error::Encode(format!(
             "PCM stream ended early: expected {expected_frames} frames, read {read_frames}"
         )));
     }
-    if chunk_samples.len() != expected_samples {
-        return Err(Error::Encode(format!(
-            "PCM stream yielded {} samples for {expected_frames} frames across {channels} channels",
-            chunk_samples.len()
-        )));
+    if let Some(sample_len) = payload.decoded_samples_len() {
+        let expected_samples = expected_frames
+            .checked_mul(channels)
+            .ok_or_else(|| Error::Encode("PCM chunk sample count overflows".into()))?;
+        if sample_len != expected_samples {
+            return Err(Error::Encode(format!(
+                "PCM stream yielded {sample_len} samples for {expected_frames} frames across {channels} channels"
+            )));
+        }
     }
-    stream.update_streaminfo_md5(md5, chunk_samples)?;
-    Ok(())
+    stream.update_streaminfo_md5_for_payload(md5, &payload)?;
+    Ok(payload)
 }
 
 fn chunk_end_for_plan(
@@ -485,7 +500,8 @@ where
 {
     let channels = usize::from(plan.spec.channels);
     let mut processed_samples = 0u64;
-    let mut chunk_samples = Vec::new();
+    let mut reusable_payload = None;
+    let mut decoded_samples = Vec::new();
     let mut chunk_start = 0usize;
     let profile_path = active_encode_profile_path();
     let mut profile = EncodeProfileSummary::default();
@@ -494,14 +510,14 @@ where
         let chunk_end = chunk_end_for_plan(plan, chunk_start, chunk_policy);
         let pcm_frames = expected_frames_for_chunk(plan, chunk_start, chunk_end);
         let read_start = Instant::now();
-        read_planned_chunk(
+        let payload = read_planned_chunk(
             stream,
             plan,
             chunk_start,
             chunk_end,
             channels,
             md5,
-            &mut chunk_samples,
+            reusable_payload.take(),
         )?;
         profile.read_decode_md5 += read_start.elapsed();
         profile.total_chunks += 1;
@@ -509,8 +525,18 @@ where
         profile.peak_inflight_pcm_frames = profile.peak_inflight_pcm_frames.max(pcm_frames);
 
         let encode_start = Instant::now();
-        let encoded = encode_chunk(config, plan, chunk_start, chunk_end, &mut chunk_samples)?;
+        let encoded = match &payload {
+            EncodeChunkPayload::DecodedSamples(chunk_samples) => {
+                let mut chunk_samples = chunk_samples.clone();
+                encode_chunk(config, plan, chunk_start, chunk_end, &mut chunk_samples)?
+            }
+            EncodeChunkPayload::PackedPcm { bytes, envelope, .. } => {
+                decode_samples_into(bytes, *envelope, &mut decoded_samples)?;
+                encode_chunk(config, plan, chunk_start, chunk_end, &mut decoded_samples)?
+            }
+        };
         profile.worker_encode_cpu += encode_start.elapsed();
+        reusable_payload = Some(payload.clear_for_reuse());
 
         let write_start = Instant::now();
         #[cfg(feature = "progress")]
@@ -566,7 +592,7 @@ fn receive_and_drain_ready<W, P>(
     pending: &mut BTreeMap<usize, EncodedWorkChunk>,
     writer: &mut FlacWriter<W>,
     progress: &mut P,
-    reusable_buffers: &mut Vec<Vec<i32>>,
+    reusable_payloads: &mut Vec<EncodeChunkPayload>,
     processed_samples: &mut u64,
     total_samples: u64,
     next_expected: &mut usize,
@@ -608,8 +634,7 @@ where
         )?;
         *next_expected += frame_count;
         *inflight_pcm_frames = inflight_pcm_frames.saturating_sub(chunk.pcm_frames);
-        chunk.samples.clear();
-        reusable_buffers.push(chunk.samples);
+        reusable_payloads.push(chunk.payload.clear_for_reuse());
     }
     profile.write_progress += write_start.elapsed();
     Ok(())
@@ -622,7 +647,7 @@ fn receive_and_drain_ready<W, P>(
     pending: &mut BTreeMap<usize, EncodedWorkChunk>,
     writer: &mut FlacWriter<W>,
     progress: &mut P,
-    reusable_buffers: &mut Vec<Vec<i32>>,
+    reusable_payloads: &mut Vec<EncodeChunkPayload>,
     processed_samples: &mut u64,
     total_samples: u64,
     next_expected: &mut usize,
@@ -662,8 +687,7 @@ where
         )?;
         *next_expected += frame_count;
         *inflight_pcm_frames = inflight_pcm_frames.saturating_sub(chunk.pcm_frames);
-        chunk.samples.clear();
-        reusable_buffers.push(chunk.samples);
+        reusable_payloads.push(chunk.payload.clear_for_reuse());
     }
     profile.write_progress += write_start.elapsed();
     Ok(())

@@ -1,6 +1,6 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::input::EncodePcmStream;
+use crate::input::{EncodeChunkPayload, EncodePcmStream};
 use crate::metadata::{FXMD_CHUNK_ID, FxmdChunkPolicy, Metadata, MetadataDraft};
 use crate::{
     error::{Error, Result},
@@ -349,6 +349,54 @@ impl<R: Read + Seek> crate::input::EncodePcmStream for WavPcmStream<R> {
             self.input_bytes_processed = self.input_bytes_processed.saturating_add(byte_len as u64);
         }
         Ok(frames)
+    }
+
+    #[allow(private_interfaces)]
+    fn read_chunk_payload(
+        &mut self,
+        max_frames: usize,
+        reuse: Option<EncodeChunkPayload>,
+    ) -> Result<EncodeChunkPayload> {
+        if self.envelope.container_bits_per_sample == 8 {
+            let mut output = match reuse {
+                Some(EncodeChunkPayload::DecodedSamples(samples)) => samples,
+                Some(_) | None => Vec::new(),
+            };
+            let frames = self.read_chunk(max_frames, &mut output)?;
+            debug_assert_eq!(frames, output.len() / usize::from(self.spec.channels));
+            return Ok(EncodeChunkPayload::DecodedSamples(output));
+        }
+
+        let frames = self.remaining_frames.min(max_frames as u64) as usize;
+        if frames == 0 {
+            return Ok(match reuse {
+                Some(payload) => payload.clear_for_reuse(),
+                None => EncodeChunkPayload::DecodedSamples(Vec::new()),
+            });
+        }
+
+        let mut bytes = match reuse {
+            Some(EncodeChunkPayload::PackedPcm {
+                bytes, envelope, ..
+            }) if envelope == self.envelope => bytes,
+            Some(_) | None => Vec::new(),
+        };
+        let byte_len = frames
+            .checked_mul(self.frame_bytes)
+            .ok_or_else(|| Error::UnsupportedPcmContainer("PCM chunk size overflows".into()))?;
+        bytes.clear();
+        bytes.resize(byte_len, 0);
+        self.reader.read_exact(&mut bytes)?;
+        self.remaining_frames -= frames as u64;
+        #[cfg(feature = "progress")]
+        {
+            self.input_bytes_processed = self.input_bytes_processed.saturating_add(byte_len as u64);
+        }
+        Ok(EncodeChunkPayload::PackedPcm {
+            bytes,
+            frame_count: frames,
+            envelope: self.envelope,
+        })
     }
 
     #[cfg(feature = "progress")]
@@ -851,7 +899,11 @@ fn is_captured_metadata_chunk(chunk_id: [u8; 4]) -> bool {
     matches!(&chunk_id, b"LIST" | b"cue " | &FXMD_CHUNK_ID)
 }
 
-fn decode_samples_into(data: &[u8], envelope: PcmEnvelope, output: &mut Vec<i32>) -> Result<()> {
+pub(crate) fn decode_samples_into(
+    data: &[u8],
+    envelope: PcmEnvelope,
+    output: &mut Vec<i32>,
+) -> Result<()> {
     let shift = envelope
         .container_bits_per_sample
         .checked_sub(envelope.valid_bits_per_sample)
@@ -1594,5 +1646,53 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(error.to_string().contains("total_samples"));
+    }
+
+    #[test]
+    fn non_8bit_wav_read_chunk_payload_returns_packed_pcm() {
+        let data = [1i16, -2, 3, -4]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut stream = super::WavPcmStream::builder(Cursor::new(data))
+            .sample_rate(44_100)
+            .channels(2)
+            .valid_bits_per_sample(16)
+            .total_samples(2)
+            .build()
+            .unwrap();
+
+        let payload = stream.read_chunk_payload(2, None).unwrap();
+
+        let crate::input::EncodeChunkPayload::PackedPcm {
+            bytes,
+            frame_count,
+            envelope,
+        } = payload
+        else {
+            panic!("expected packed PCM payload");
+        };
+        assert_eq!(frame_count, 2);
+        assert_eq!(envelope.valid_bits_per_sample, 16);
+        assert_eq!(bytes.len(), 8);
+    }
+
+    #[test]
+    fn pcm_stream_md5_update_accepts_chunk_payload() {
+        let data = [1i16, -2, 3, -4]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut stream = super::WavPcmStream::builder(Cursor::new(data))
+            .sample_rate(44_100)
+            .channels(2)
+            .valid_bits_per_sample(16)
+            .total_samples(2)
+            .build()
+            .unwrap();
+        let payload = stream.read_chunk_payload(2, None).unwrap();
+        let mut md5 = crate::md5::StreaminfoMd5::new(stream.spec());
+
+        stream.update_streaminfo_md5_for_payload(&mut md5, &payload).unwrap();
     }
 }
