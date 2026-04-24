@@ -30,52 +30,52 @@ fn benchmark_thread_count() -> usize {
     encode_threads
 }
 
+fn bench_with_temp_output_dir(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    name: &str,
+    temp_prefix: &'static str,
+    run: impl Fn(&Path) -> Result<(), Box<dyn Error>>,
+) {
+    group.bench_function(name, |b| {
+        b.iter_batched(
+            || TempDir::new(temp_prefix).expect("create output dir"),
+            |output_dir| {
+                run(output_dir.path()).expect("benchmark run");
+                black_box(())
+            },
+            BatchSize::PerIteration,
+        );
+    });
+}
+
 fn criterion_benches(c: &mut Criterion) {
     let corpus = DirectoryParityCorpus::prepare().expect("prepare CLI benchmark corpus");
     let large_decode = LargeDecodeFixture::prepare().expect("prepare large CLI decode fixture");
 
     let mut group = c.benchmark_group("directory_parity");
-    group.bench_function("encode_directory_parity", |b| {
-        b.iter_batched(
-            || TempDir::new("flacx-cli-bench-encode-output").expect("create encode output dir"),
-            |output_dir| {
-                corpus
-                    .run_encode_directory_parity(output_dir.path())
-                    .expect("encode benchmark run");
-                black_box(())
-            },
-            BatchSize::PerIteration,
-        );
-    });
-    group.bench_function("decode_directory_parity", |b| {
-        b.iter_batched(
-            || TempDir::new("flacx-cli-bench-decode-output").expect("create decode output dir"),
-            |output_dir| {
-                corpus
-                    .run_decode_directory_parity(output_dir.path())
-                    .expect("decode benchmark run");
-                black_box(())
-            },
-            BatchSize::PerIteration,
-        );
-    });
+    bench_with_temp_output_dir(
+        &mut group,
+        "encode_directory_parity",
+        "flacx-cli-bench-encode-output",
+        |output_root| corpus.run_encode_directory_parity(output_root),
+    );
+    bench_with_temp_output_dir(
+        &mut group,
+        "decode_directory_parity",
+        "flacx-cli-bench-decode-output",
+        |output_root| corpus.run_decode_directory_parity(output_root),
+    );
     group.finish();
 
     let mut large_group = c.benchmark_group("streaming_throughput");
     large_group.throughput(Throughput::Bytes(large_decode.input_bytes));
     large_group.sample_size(20);
-    large_group.bench_function("decode_large_streaming_single_file", |b| {
-        b.iter_batched(
-            || TempDir::new("flacx-cli-bench-large-decode-output").expect("create decode output"),
-            |output_dir| {
-                large_decode
-                    .run(output_dir.path())
-                    .expect("large decode benchmark run");
-                black_box(())
-            },
-            BatchSize::PerIteration,
-        );
-    });
+    bench_with_temp_output_dir(
+        &mut large_group,
+        "decode_large_streaming_single_file",
+        "flacx-cli-bench-large-decode-output",
+        |output_root| large_decode.run(output_root),
+    );
     large_group.finish();
 }
 
