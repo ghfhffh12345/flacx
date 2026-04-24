@@ -299,19 +299,23 @@ fn decode_thread_variants_cover_throughput_comparison_set() {
 }
 
 #[test]
-fn throughput_bench_reuses_decode_matrix_for_dispatcher_backed_path() {
+fn throughput_bench_reuses_decode_matrix_for_real_decode_path() {
     let source = include_str!("../benches/throughput.rs");
     assert!(
-        source.contains("bench_large_streaming_dispatcher_backed_decode_matrix("),
-        "throughput bench should reuse a shared dispatcher-backed decode matrix helper"
+        source.contains("bench_large_streaming_real_decode_matrix("),
+        "throughput bench should reuse a shared real-decode matrix helper"
     );
     assert!(
-        source.contains("\"decode_large_streaming_dispatcher_backed_path\""),
-        "throughput bench should label the large streaming decode matrix as dispatcher-backed"
+        source.contains("\"decode_large_streaming_real_decode_path\""),
+        "throughput bench should label the large streaming decode matrix as the real decode path"
     );
     assert!(
-        source.contains("\"matched_large_streaming_dispatcher_backed_decode\""),
-        "matched throughput bench should label the shared decode matrix as dispatcher-backed"
+        source.contains("\"matched_large_streaming_real_decode\""),
+        "matched throughput bench should label the shared decode matrix as the real decode path"
+    );
+    assert!(
+        source.contains("decoder\n                    .decode_bytes(&input)"),
+        "throughput bench should keep the shared matrix on the real decode path"
     );
 }
 
@@ -780,10 +784,11 @@ fn streaming_decode_session_reports_bounded_slab_residency_for_small_writer_chun
 
 #[cfg(feature = "progress")]
 #[test]
-fn real_reader_decode_uses_dispatcher_backed_session_across_thread_counts() {
+fn real_reader_decode_direct_dispatch_matches_output_across_thread_counts() {
     let flac = large_streaming_decode_flac_bytes(4);
     let expected_wav = large_streaming_decode_wav_bytes();
-    for threads in [1, 4, 8] {
+    let mut baseline = None;
+    for threads in decode_thread_variants() {
         let profile = DecodeProfileGuard::new();
         let reader = read_flac_reader(Cursor::new(&flac)).unwrap();
         let mut output = Cursor::new(Vec::new());
@@ -805,10 +810,8 @@ fn real_reader_decode_uses_dispatcher_backed_session_across_thread_counts() {
             LARGE_STREAMING_DECODE_SAMPLE_COUNT as u64
         );
         assert!(progress.len() > 1, "expected streaming progress updates");
-        assert_eq!(
-            wav_data_bytes(&output.into_inner()),
-            wav_data_bytes(&expected_wav)
-        );
+        let decoded = output.into_inner();
+        assert_eq!(wav_data_bytes(&decoded), wav_data_bytes(&expected_wav));
         assert_eq!(
             *profile_summary.get("worker_count").unwrap(),
             threads,
@@ -818,6 +821,14 @@ fn real_reader_decode_uses_dispatcher_backed_session_across_thread_counts() {
             *profile_summary.get("peak_staged_input_bytes").unwrap() > 0,
             "decode should stage real input bytes through the dispatcher-backed session for threads={threads}"
         );
+        if let Some(expected) = &baseline {
+            assert_eq!(
+                decoded, *expected,
+                "real-reader direct-dispatch decode output changed for threads={threads}"
+            );
+        } else {
+            baseline = Some(decoded);
+        }
     }
 }
 
@@ -837,7 +848,7 @@ fn dispatcher_backed_decode_stops_after_declared_samples_before_physical_eof() {
 
 #[cfg(feature = "progress")]
 #[test]
-fn real_reader_dispatcher_overlaps_and_stays_window_bounded() {
+fn direct_dispatch_decode_keeps_staged_input_and_pcm_residency_bounded() {
     let profile = DecodeProfileGuard::new();
     let flac = large_streaming_decode_flac_bytes(4);
     let expected_wav = large_streaming_decode_wav_bytes();
