@@ -83,6 +83,218 @@ struct EncodeProfileSummary {
     out_of_order_results: usize,
 }
 
+struct EncodeStreamingSession<'a, W: Write + Seek, S, P> {
+    plan: &'a EncodePlan,
+    stream: &'a mut S,
+    writer: &'a mut FlacWriter<W>,
+    progress: &'a mut P,
+    md5: &'a mut StreaminfoMd5,
+}
+
+impl<W, S, P> EncodeStreamingSession<'_, W, S, P>
+where
+    W: Write + Seek,
+    S: EncodePcmStream,
+    P: ProgressSink,
+{
+    fn run(self, chunk_policy: EncodeChunkPolicy, worker_count: usize) -> Result<()> {
+        let Self {
+            plan,
+            stream,
+            writer,
+            progress,
+            md5,
+        } = self;
+
+        let queue_limit = worker_count
+            .checked_mul(ENCODE_SESSION_WINDOW_DEPTH)
+            .unwrap_or(worker_count)
+            .max(worker_count);
+        let profile_path = active_encode_profile_path();
+        let mut profile = EncodeProfileSummary::default();
+        let mut chunk_start = 0usize;
+        let channels = usize::from(plan.spec.channels);
+        let mut processed_samples = 0u64;
+        let mut next_expected = 0usize;
+        let mut inflight_pcm_frames = 0usize;
+        let mut pending: BTreeMap<usize, EncodedWorkChunk> = BTreeMap::new();
+        let mut reusable_buffers = std::iter::repeat_with(Vec::new)
+            .take(queue_limit)
+            .collect::<Vec<_>>();
+
+        thread::scope(|scope| -> Result<()> {
+            let (result_sender, result_receiver) = mpsc::sync_channel::<Result<EncodedWorkChunk>>(
+                worker_count * ENCODE_SESSION_RESULT_BACKLOG_PER_WORKER,
+            );
+            let mut worker_senders = Vec::with_capacity(worker_count);
+
+            for _ in 0..worker_count {
+                let (sender, receiver) =
+                    mpsc::sync_channel::<EncodeJob>(ENCODE_SESSION_QUEUE_DEPTH_MULTIPLIER);
+                worker_senders.push(sender);
+                let result_sender = result_sender.clone();
+                let plan = plan.clone();
+
+                scope.spawn(move || {
+                    while let Ok(job) = receiver.recv() {
+                        let encode_start = Instant::now();
+                        let encoded = encode_frame_batch(
+                            &job.samples,
+                            &plan,
+                            job.start_frame,
+                            0,
+                            job.end_frame - job.start_frame,
+                            job.chunk_base_sample,
+                        );
+                        let elapsed = encode_start.elapsed();
+                        let encoded = encoded.map(|chunk| EncodedWorkChunk {
+                            start_frame: job.start_frame,
+                            pcm_frames: job.pcm_frames,
+                            frame_count: job.end_frame - job.start_frame,
+                            encode_elapsed: elapsed,
+                            frames: chunk.frames,
+                            samples: job.samples,
+                        });
+                        if result_sender.send(encoded).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+            drop(result_sender);
+
+            let session_result = (|| -> Result<()> {
+                let mut next_worker = 0usize;
+                while chunk_start < plan.total_frames {
+                    let chunk_end = chunk_end_for_plan(plan, chunk_start, chunk_policy);
+                    let pcm_frames = expected_frames_for_chunk(plan, chunk_start, chunk_end);
+                    let mut chunk_samples = reusable_buffers.pop().unwrap_or_default();
+                    let read_start = Instant::now();
+                    read_planned_chunk(
+                        stream,
+                        plan,
+                        chunk_start,
+                        chunk_end,
+                        channels,
+                        md5,
+                        &mut chunk_samples,
+                    )?;
+                    profile.read_decode_md5 += read_start.elapsed();
+                    profile.total_chunks += 1;
+                    profile.peak_requested_pcm_frames =
+                        profile.peak_requested_pcm_frames.max(pcm_frames);
+
+                    let mut job = EncodeJob {
+                        start_frame: chunk_start,
+                        end_frame: chunk_end,
+                        pcm_frames,
+                        chunk_base_sample: plan.frame(chunk_start).sample_offset,
+                        samples: chunk_samples,
+                    };
+
+                    loop {
+                        match try_dispatch_job(job, &worker_senders, &mut next_worker) {
+                            Ok(()) => {
+                                inflight_pcm_frames =
+                                    inflight_pcm_frames.saturating_add(pcm_frames);
+                                profile.peak_inflight_pcm_frames =
+                                    profile.peak_inflight_pcm_frames.max(inflight_pcm_frames);
+                                break;
+                            }
+                            Err(DispatchError::Full(returned)) => {
+                                job = returned;
+                                #[cfg(feature = "progress")]
+                                receive_and_drain_ready(
+                                    &result_receiver,
+                                    &mut pending,
+                                    writer,
+                                    progress,
+                                    &mut reusable_buffers,
+                                    &mut processed_samples,
+                                    plan.spec.total_samples,
+                                    &mut next_expected,
+                                    plan.total_frames,
+                                    stream.input_bytes_processed(),
+                                    &mut inflight_pcm_frames,
+                                    &mut profile,
+                                )?;
+                                #[cfg(not(feature = "progress"))]
+                                receive_and_drain_ready(
+                                    &result_receiver,
+                                    &mut pending,
+                                    writer,
+                                    progress,
+                                    &mut reusable_buffers,
+                                    &mut processed_samples,
+                                    plan.spec.total_samples,
+                                    &mut next_expected,
+                                    plan.total_frames,
+                                    &mut inflight_pcm_frames,
+                                    &mut profile,
+                                )?;
+                            }
+                            Err(DispatchError::Disconnected) => {
+                                return Err(Error::Thread(
+                                    "encode worker queue disconnected before the session completed"
+                                        .into(),
+                                ));
+                            }
+                        }
+                    }
+
+                    chunk_start = chunk_end;
+                }
+
+                while next_expected < plan.total_frames {
+                    #[cfg(feature = "progress")]
+                    receive_and_drain_ready(
+                        &result_receiver,
+                        &mut pending,
+                        writer,
+                        progress,
+                        &mut reusable_buffers,
+                        &mut processed_samples,
+                        plan.spec.total_samples,
+                        &mut next_expected,
+                        plan.total_frames,
+                        stream.input_bytes_processed(),
+                        &mut inflight_pcm_frames,
+                        &mut profile,
+                    )?;
+                    #[cfg(not(feature = "progress"))]
+                    receive_and_drain_ready(
+                        &result_receiver,
+                        &mut pending,
+                        writer,
+                        progress,
+                        &mut reusable_buffers,
+                        &mut processed_samples,
+                        plan.spec.total_samples,
+                        &mut next_expected,
+                        plan.total_frames,
+                        &mut inflight_pcm_frames,
+                        &mut profile,
+                    )?;
+                }
+
+                Ok(())
+            })();
+
+            drop(worker_senders);
+            session_result
+        })?;
+
+        maybe_append_encode_profile(
+            profile_path.as_deref(),
+            &profile,
+            worker_count,
+            queue_limit,
+            chunk_policy,
+        );
+        Ok(())
+    }
+}
+
 pub(crate) fn set_encode_profile_path_for_current_thread(path: Option<std::path::PathBuf>) {
     TEST_PROFILE_PATH.with(|profile_path| {
         *profile_path.borrow_mut() = path;
@@ -157,16 +369,26 @@ where
         return Ok(summary_from_stream_info(stream_info, 0));
     }
 
-    encode_streaming_session(
-        config,
-        &plan,
-        &mut stream,
-        &mut writer,
-        progress,
-        &mut md5,
-        chunk_policy,
-        worker_count,
-    )?;
+    if worker_count == 1 {
+        encode_streaming_session_single_thread(
+            config,
+            &plan,
+            &mut stream,
+            &mut writer,
+            progress,
+            &mut md5,
+            chunk_policy,
+        )?;
+    } else {
+        EncodeStreamingSession {
+            plan: &plan,
+            stream: &mut stream,
+            writer: &mut writer,
+            progress,
+            md5: &mut md5,
+        }
+        .run(chunk_policy, worker_count)?;
+    }
 
     let extra_frames = stream.read_chunk(1, &mut Vec::new())?;
     if extra_frames != 0 {
@@ -245,221 +467,6 @@ fn chunk_end_for_plan(
         chunk_end += 1;
     }
     chunk_end
-}
-
-fn encode_streaming_session<W, S, P>(
-    config: &EncoderConfig,
-    plan: &EncodePlan,
-    stream: &mut S,
-    writer: &mut FlacWriter<W>,
-    progress: &mut P,
-    md5: &mut StreaminfoMd5,
-    chunk_policy: EncodeChunkPolicy,
-    worker_count: usize,
-) -> Result<()>
-where
-    W: Write + Seek,
-    S: EncodePcmStream,
-    P: ProgressSink,
-{
-    if worker_count == 1 {
-        return encode_streaming_session_single_thread(
-            config,
-            plan,
-            stream,
-            writer,
-            progress,
-            md5,
-            chunk_policy,
-        );
-    }
-
-    let queue_limit = worker_count
-        .checked_mul(ENCODE_SESSION_WINDOW_DEPTH)
-        .unwrap_or(worker_count)
-        .max(worker_count);
-    let profile_path = active_encode_profile_path();
-    let mut profile = EncodeProfileSummary::default();
-    let mut chunk_start = 0usize;
-    let channels = usize::from(plan.spec.channels);
-    let mut processed_samples = 0u64;
-    let mut next_expected = 0usize;
-    let mut inflight_pcm_frames = 0usize;
-    let mut pending: BTreeMap<usize, EncodedWorkChunk> = BTreeMap::new();
-    let mut reusable_buffers = std::iter::repeat_with(Vec::new)
-        .take(queue_limit)
-        .collect::<Vec<_>>();
-
-    thread::scope(|scope| -> Result<()> {
-        let (result_sender, result_receiver) = mpsc::sync_channel::<Result<EncodedWorkChunk>>(
-            worker_count * ENCODE_SESSION_RESULT_BACKLOG_PER_WORKER,
-        );
-        let mut worker_senders = Vec::with_capacity(worker_count);
-
-        for _ in 0..worker_count {
-            let (sender, receiver) =
-                mpsc::sync_channel::<EncodeJob>(ENCODE_SESSION_QUEUE_DEPTH_MULTIPLIER);
-            worker_senders.push(sender);
-            let result_sender = result_sender.clone();
-            let plan = plan.clone();
-
-            scope.spawn(move || {
-                while let Ok(job) = receiver.recv() {
-                    let encode_start = Instant::now();
-                    let encoded = encode_frame_batch(
-                        &job.samples,
-                        &plan,
-                        job.start_frame,
-                        0,
-                        job.end_frame - job.start_frame,
-                        job.chunk_base_sample,
-                    );
-                    let elapsed = encode_start.elapsed();
-                    let encoded = encoded.map(|chunk| EncodedWorkChunk {
-                        start_frame: job.start_frame,
-                        pcm_frames: job.pcm_frames,
-                        frame_count: job.end_frame - job.start_frame,
-                        encode_elapsed: elapsed,
-                        frames: chunk.frames,
-                        samples: job.samples,
-                    });
-                    if result_sender.send(encoded).is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-        drop(result_sender);
-
-        let session_result = (|| -> Result<()> {
-            let mut next_worker = 0usize;
-            while chunk_start < plan.total_frames {
-                let chunk_end = chunk_end_for_plan(plan, chunk_start, chunk_policy);
-                let pcm_frames = expected_frames_for_chunk(plan, chunk_start, chunk_end);
-                let mut chunk_samples = reusable_buffers.pop().unwrap_or_default();
-                let read_start = Instant::now();
-                read_planned_chunk(
-                    stream,
-                    plan,
-                    chunk_start,
-                    chunk_end,
-                    channels,
-                    md5,
-                    &mut chunk_samples,
-                )?;
-                profile.read_decode_md5 += read_start.elapsed();
-                profile.total_chunks += 1;
-                profile.peak_requested_pcm_frames =
-                    profile.peak_requested_pcm_frames.max(pcm_frames);
-
-                let mut job = EncodeJob {
-                    start_frame: chunk_start,
-                    end_frame: chunk_end,
-                    pcm_frames,
-                    chunk_base_sample: plan.frame(chunk_start).sample_offset,
-                    samples: chunk_samples,
-                };
-
-                loop {
-                    match try_dispatch_job(job, &worker_senders, &mut next_worker) {
-                        Ok(()) => {
-                            inflight_pcm_frames = inflight_pcm_frames.saturating_add(pcm_frames);
-                            profile.peak_inflight_pcm_frames =
-                                profile.peak_inflight_pcm_frames.max(inflight_pcm_frames);
-                            break;
-                        }
-                        Err(DispatchError::Full(returned)) => {
-                            job = returned;
-                            #[cfg(feature = "progress")]
-                            receive_and_drain_ready(
-                                &result_receiver,
-                                &mut pending,
-                                writer,
-                                progress,
-                                &mut reusable_buffers,
-                                &mut processed_samples,
-                                plan.spec.total_samples,
-                                &mut next_expected,
-                                plan.total_frames,
-                                stream.input_bytes_processed(),
-                                &mut inflight_pcm_frames,
-                                &mut profile,
-                            )?;
-                            #[cfg(not(feature = "progress"))]
-                            receive_and_drain_ready(
-                                &result_receiver,
-                                &mut pending,
-                                writer,
-                                progress,
-                                &mut reusable_buffers,
-                                &mut processed_samples,
-                                plan.spec.total_samples,
-                                &mut next_expected,
-                                plan.total_frames,
-                                &mut inflight_pcm_frames,
-                                &mut profile,
-                            )?;
-                        }
-                        Err(DispatchError::Disconnected) => {
-                            return Err(Error::Thread(
-                                "encode worker queue disconnected before the session completed"
-                                    .into(),
-                            ));
-                        }
-                    }
-                }
-
-                chunk_start = chunk_end;
-            }
-
-            while next_expected < plan.total_frames {
-                #[cfg(feature = "progress")]
-                receive_and_drain_ready(
-                    &result_receiver,
-                    &mut pending,
-                    writer,
-                    progress,
-                    &mut reusable_buffers,
-                    &mut processed_samples,
-                    plan.spec.total_samples,
-                    &mut next_expected,
-                    plan.total_frames,
-                    stream.input_bytes_processed(),
-                    &mut inflight_pcm_frames,
-                    &mut profile,
-                )?;
-                #[cfg(not(feature = "progress"))]
-                receive_and_drain_ready(
-                    &result_receiver,
-                    &mut pending,
-                    writer,
-                    progress,
-                    &mut reusable_buffers,
-                    &mut processed_samples,
-                    plan.spec.total_samples,
-                    &mut next_expected,
-                    plan.total_frames,
-                    &mut inflight_pcm_frames,
-                    &mut profile,
-                )?;
-            }
-
-            Ok(())
-        })();
-
-        drop(worker_senders);
-        session_result
-    })?;
-
-    maybe_append_encode_profile(
-        profile_path.as_deref(),
-        &profile,
-        worker_count,
-        queue_limit,
-        chunk_policy,
-    );
-    let _ = config;
-    Ok(())
 }
 
 fn encode_streaming_session_single_thread<W, S, P>(

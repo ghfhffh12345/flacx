@@ -16,7 +16,10 @@ use crate::{
 use crate::{input::container_bits_from_valid_bits, progress::emit_progress};
 use bitstream_io::{BigEndian, BitRead, BitReader};
 #[cfg(test)]
-use std::{cell::Cell, sync::{Condvar, Mutex}};
+use std::{
+    cell::Cell,
+    sync::{Condvar, Mutex},
+};
 use std::{
     collections::HashMap,
     io::{Cursor, Read},
@@ -263,14 +266,6 @@ impl FrameDecodeWorkerPool {
         )
     }
 
-    pub(super) fn submit(&mut self, slab: DecodeWorkChunk) -> Result<()> {
-        let sender = &self.worker_senders[self.next_worker % self.worker_senders.len()];
-        self.next_worker = self.next_worker.wrapping_add(1);
-        sender
-            .send(slab)
-            .map_err(|_| Error::Thread("decode worker channel closed unexpectedly".into()))
-    }
-
     pub(super) fn try_submit(
         &mut self,
         slab: DecodeWorkChunk,
@@ -318,6 +313,7 @@ impl Drop for FrameDecodeWorkerPool {
     }
 }
 
+#[cfg(test)]
 pub(super) fn decode_work_chunk(chunk: DecodeWorkChunk) -> Result<DecodedWorkChunk> {
     let mut scratch = WorkerScratch::new();
     decode_work_chunk_with_scratch(chunk, &mut scratch)
@@ -353,10 +349,6 @@ fn decode_work_chunk_with_scratch(
         frame_block_sizes: decoded_block_sizes,
         decoded_samples,
     })
-}
-
-pub(super) fn decode_work_slab(slab: DecodeWorkSlab) -> Result<DecodedWorkSlab> {
-    decode_work_chunk(slab)
 }
 
 #[allow(dead_code)]
@@ -1452,7 +1444,7 @@ mod tests {
         );
 
         for sequence in 0..2 {
-            pool.submit(DecodeWorkChunk {
+            pool.try_submit(DecodeWorkChunk {
                 sequence,
                 start_frame_index: 0,
                 start_sample_number: 0,
@@ -1468,7 +1460,10 @@ mod tests {
             assert!(!decoded.decoded_samples.is_empty());
         }
 
-        assert_eq!(scratch_create_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            scratch_create_count.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]

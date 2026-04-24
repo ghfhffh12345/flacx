@@ -137,7 +137,7 @@ fn decode_large_streaming_path(c: &mut Criterion) {
         &mut group,
         "decode_large_streaming_real_decode_path",
         |_threads, input| Throughput::Bytes(input.len() as u64),
-        |threads| large_streaming_decode_flac_bytes(threads),
+        large_streaming_decode_flac_bytes,
     );
     group.finish();
 }

@@ -720,9 +720,8 @@ impl<R: Read + Seek> DecodePcmStream for FlacPcmStream<R> {
 fn decode_slab_max_input_bytes(stream_info: StreamInfo) -> usize {
     let advertised_max_frame_size =
         usize::try_from(stream_info.max_frame_size).unwrap_or(usize::MAX);
-    let derived_max_frame_size = advertised_max_frame_size
-        .checked_mul(DECODE_SLAB_MAX_INPUT_FRAMES)
-        .unwrap_or(usize::MAX);
+    let derived_max_frame_size =
+        advertised_max_frame_size.saturating_mul(DECODE_SLAB_MAX_INPUT_FRAMES);
     if advertised_max_frame_size == 0 {
         DECODE_SLAB_MAX_INPUT_BYTES_FALLBACK
     } else {
@@ -1089,7 +1088,9 @@ mod tests {
         assert_eq!(stream.chunk_scanner.ready_chunk_count(), 0);
     }
 
-    fn fixture_ready_chunks(count: usize) -> (StreamInfo, Vec<super::chunk::CompressedDecodeChunk>) {
+    fn fixture_ready_chunks(
+        count: usize,
+    ) -> (StreamInfo, Vec<super::chunk::CompressedDecodeChunk>) {
         let fixture_path = workspace_fixture_dir("test-flacs").join("case1/test01.flac");
         let bytes = std::fs::read(fixture_path).unwrap();
         let (mut stream_info, _, frame_offset) =

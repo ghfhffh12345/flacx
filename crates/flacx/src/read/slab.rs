@@ -44,6 +44,7 @@ pub(super) struct DecodeSlabPlan {
 }
 
 impl DecodeSlabPlan {
+    #[cfg(test)]
     pub(super) fn new(
         sequence: usize,
         start_frame_index: usize,
@@ -63,6 +64,7 @@ impl DecodeSlabPlan {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn seal_bytes(mut self, bytes: Vec<u8>) -> Self {
         self.bytes = std::sync::Arc::from(bytes);
         self
@@ -181,6 +183,7 @@ pub(super) struct OrderedSlabDrain {
 }
 
 impl OrderedSlabDrain {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
         Self::with_window_capacity(1)
     }
