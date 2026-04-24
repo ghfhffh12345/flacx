@@ -56,8 +56,9 @@ pub(crate) enum AnalyzedSubframe {
 pub(crate) struct ResidualEncoding {
     pub(crate) method: RiceMethod,
     pub(crate) partition_order: u8,
-    pub(crate) residuals: Vec<i32>,
-    pub(crate) partitions: Vec<ResidualPartition>,
+    pub(crate) bit_len: usize,
+    pub(crate) residuals: Box<[i32]>,
+    pub(crate) partitions: Box<[ResidualPartition]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,37 +343,7 @@ impl AnalyzedSubframe {
 
 impl ResidualEncoding {
     fn bit_len(&self) -> usize {
-        2 + 4
-            + self
-                .partitions
-                .iter()
-                .map(|partition| partition.bit_len(self.method, &self.residuals))
-                .sum::<usize>()
-    }
-}
-
-impl ResidualPartition {
-    fn bit_len(&self, method: RiceMethod, residuals: &[i32]) -> usize {
-        let parameter_bits = method.parameter_bits();
-        match self {
-            Self::Rice {
-                parameter,
-                start,
-                end,
-            } => {
-                parameter_bits
-                    + residuals[*start..*end]
-                        .iter()
-                        .map(|&residual| {
-                            let folded = fold_residual(residual);
-                            (folded >> usize::from(*parameter)) + 1 + usize::from(*parameter)
-                        })
-                        .sum::<usize>()
-            }
-            Self::Escape { bits, start, end } => {
-                parameter_bits + 5 + (end - start) * usize::from(*bits)
-            }
-        }
+        self.bit_len
     }
 }
 
@@ -444,10 +415,10 @@ fn choose_subframe(
             continue;
         };
         if let Some(residuals) = fixed_residuals(samples, order)
-            && let Some((residual, residual_bits)) =
-                choose_residual_encoding(&residuals, order, max_partition_order, residual_bit_limit)
+            && let Some(residual) =
+                choose_residual_encoding(residuals, order, max_partition_order, residual_bit_limit)
         {
-            let candidate_bits = fixed_overhead + residual_bits;
+            let candidate_bits = fixed_overhead + residual.bit_len();
             let candidate = AnalyzedSubframe::Fixed {
                 order,
                 warmup: samples[..usize::from(order)].to_vec(),
@@ -530,13 +501,13 @@ fn choose_lpc_subframe(
                 coefficients,
             } = quantize_lpc_coefficients(coefficients, precision)?;
             let residuals = lpc_residuals(samples, &coefficients, shift)?;
-            let (residual, residual_bits) = choose_residual_encoding(
-                &residuals,
+            let residual = choose_residual_encoding(
+                residuals,
                 order,
                 max_partition_order,
                 residual_bit_limit,
             )?;
-            let candidate_bits = lpc_overhead + residual_bits;
+            let candidate_bits = lpc_overhead + residual.bit_len();
             let candidate = AnalyzedSubframe::Lpc {
                 order,
                 warmup: samples[..usize::from(order)].to_vec(),
@@ -634,16 +605,16 @@ fn fixed_residuals(samples: &[i32], order: u8) -> Option<Vec<i32>> {
 }
 
 fn choose_residual_encoding(
-    residuals: &[i32],
+    residuals: Vec<i32>,
     predictor_order: u8,
     max_partition_order: u8,
     residual_bit_limit: usize,
-) -> Option<(ResidualEncoding, usize)> {
+) -> Option<ResidualEncoding> {
     let block_size = residuals.len() + usize::from(predictor_order);
     let mut best: Option<(usize, RiceMethod, u8, Vec<PartitionEncodingSpec>)> = None;
     let (partition_orders, partition_order_count) =
         partition_order_candidates(block_size, predictor_order, max_partition_order);
-    let (methods, method_count) = candidate_rice_methods(residuals);
+    let (methods, method_count) = candidate_rice_methods(&residuals);
     for &partition_order in partition_orders[..partition_order_count].iter() {
         let partition_count = 1usize << partition_order;
         let partition_len = block_size >> partition_order;
@@ -702,19 +673,17 @@ fn choose_residual_encoding(
         }
     }
 
-    best.map(|(bit_len, method, partition_order, partitions)| {
-        (
-            ResidualEncoding {
-                method,
-                partition_order,
-                residuals: residuals.to_vec(),
-                partitions: partitions
-                    .into_iter()
-                    .map(materialize_partition_encoding)
-                    .collect(),
-            },
-            bit_len,
-        )
+    let residuals = residuals.into_boxed_slice();
+    best.map(|(bit_len, method, partition_order, partitions)| ResidualEncoding {
+        method,
+        partition_order,
+        bit_len,
+        residuals,
+        partitions: partitions
+            .into_iter()
+            .map(materialize_partition_encoding)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
     })
 }
 
@@ -1010,8 +979,8 @@ fn lpc_residuals(samples: &[i32], coefficients: &[i16], shift: u8) -> Option<Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        ChannelAssignment, MAX_STREAMABLE_LPC_ORDER_AT_48KHZ, analyze_frame,
-        max_lpc_order_for_stream,
+        AnalyzedSubframe, ChannelAssignment, MAX_STREAMABLE_LPC_ORDER_AT_48KHZ, analyze_frame,
+        choose_residual_encoding, max_lpc_order_for_stream,
     };
     use crate::level::LevelProfile;
 
@@ -1063,5 +1032,40 @@ mod tests {
             ChannelAssignment::Independent(3)
         ));
         assert_eq!(analysis.subframes.len(), 3);
+    }
+
+    #[test]
+    fn chosen_residual_encoding_keeps_the_exact_selected_bit_len() {
+        let residuals = vec![0, 1, -1, 4, -2, 0, 3, -3, 2, -1];
+
+        let encoding = choose_residual_encoding(residuals.clone(), 0, 4, usize::MAX).unwrap();
+
+        assert_eq!(encoding.bit_len, encoding.bit_len());
+        assert_eq!(&*encoding.residuals, residuals.as_slice());
+    }
+
+    #[test]
+    fn chosen_lpc_candidate_keeps_cached_residual_cost() {
+        let residual = super::ResidualEncoding {
+            method: super::RiceMethod::FourBit,
+            partition_order: 0,
+            bit_len: 17,
+            residuals: Box::new([0, 1, -1]),
+            partitions: Box::new([super::ResidualPartition::Rice {
+                parameter: 0,
+                start: 0,
+                end: 3,
+            }]),
+        };
+        let candidate = AnalyzedSubframe::Lpc {
+            order: 2,
+            warmup: vec![11, 12],
+            precision: 7,
+            shift: 0,
+            coefficients: vec![2, -1],
+            residual,
+        };
+
+        assert_eq!(candidate.bit_len(16), 1 + 6 + 1 + 2 * 16 + 4 + 5 + 2 * 7 + 17);
     }
 }
