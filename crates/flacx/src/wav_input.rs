@@ -914,40 +914,54 @@ pub(crate) fn decode_samples_into(
     match envelope.container_bits_per_sample {
         8 => {
             let bias = 1i32 << (envelope.valid_bits_per_sample - 1);
-            output.reserve(data.len());
-            for &byte in data {
-                output.push((i32::from(byte) >> shift) - bias);
+            output.clear();
+            output.resize(data.len(), 0);
+            for (index, &byte) in data.iter().enumerate() {
+                output[index] = (i32::from(byte) >> shift) - bias;
             }
             Ok(())
         }
         16 => {
             let sample_count = data.len() / 2;
-            output.reserve(sample_count);
-            for chunk in data.chunks_exact(2) {
-                let value = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
-                output.push(if shift == 0 { value } else { value >> shift });
+            output.clear();
+            output.resize(sample_count, 0);
+            for index in 0..sample_count {
+                let byte_index = index * 2;
+                let value = i16::from_le_bytes([data[byte_index], data[byte_index + 1]]) as i32;
+                output[index] = if shift == 0 { value } else { value >> shift };
             }
             Ok(())
         }
         24 => {
             let sample_count = data.len() / 3;
-            output.reserve(sample_count);
-            for chunk in data.chunks_exact(3) {
+            output.clear();
+            output.resize(sample_count, 0);
+            for index in 0..sample_count {
+                let byte_index = index * 3;
                 let mut value =
-                    i32::from(chunk[0]) | (i32::from(chunk[1]) << 8) | (i32::from(chunk[2]) << 16);
+                    i32::from(data[byte_index])
+                        | (i32::from(data[byte_index + 1]) << 8)
+                        | (i32::from(data[byte_index + 2]) << 16);
                 if value & 0x0080_0000 != 0 {
                     value |= !0x00ff_ffff;
                 }
-                output.push(if shift == 0 { value } else { value >> shift });
+                output[index] = if shift == 0 { value } else { value >> shift };
             }
             Ok(())
         }
         32 => {
             let sample_count = data.len() / 4;
-            output.reserve(sample_count);
-            for chunk in data.chunks_exact(4) {
-                let value = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                output.push(if shift == 0 { value } else { value >> shift });
+            output.clear();
+            output.resize(sample_count, 0);
+            for index in 0..sample_count {
+                let byte_index = index * 4;
+                let value = i32::from_le_bytes([
+                    data[byte_index],
+                    data[byte_index + 1],
+                    data[byte_index + 2],
+                    data[byte_index + 3],
+                ]);
+                output[index] = if shift == 0 { value } else { value >> shift };
             }
             Ok(())
         }
@@ -1044,7 +1058,7 @@ mod tests {
         metadata::FlacMetadataBlock,
     };
 
-    use super::{PcmSpec, PcmStream, ordinary_channel_mask, read_wav};
+    use super::{PcmSpec, PcmStream, decode_samples_into, ordinary_channel_mask, read_wav};
 
     struct ParsedForEncode {
         wav: PcmStream,
@@ -1694,5 +1708,25 @@ mod tests {
         let mut md5 = crate::md5::StreaminfoMd5::new(stream.spec());
 
         stream.update_streaminfo_md5_for_payload(&mut md5, &payload).unwrap();
+    }
+
+    #[test]
+    fn decode_samples_into_24bit_matches_existing_sign_extension() {
+        let bytes = [0x00, 0x00, 0x80, 0xff, 0xff, 0x7f];
+        let mut output = Vec::new();
+
+        decode_samples_into(
+            &bytes,
+            crate::pcm::PcmEnvelope {
+                channels: 1,
+                valid_bits_per_sample: 24,
+                container_bits_per_sample: 24,
+                channel_mask: 0,
+            },
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output, vec![-8_388_608, 8_388_607]);
     }
 }

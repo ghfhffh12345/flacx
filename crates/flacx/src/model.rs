@@ -577,8 +577,16 @@ fn lpc_subframe_lower_bound(
 }
 
 fn fixed_residuals(samples: &[i32], order: u8) -> Option<Vec<i32>> {
+    let mut residuals = Vec::new();
+    fixed_residuals_into(samples, order, &mut residuals)?;
+    Some(residuals)
+}
+
+fn fixed_residuals_into(samples: &[i32], order: u8, output: &mut Vec<i32>) -> Option<()> {
     let order_usize = usize::from(order);
-    let mut residuals = Vec::with_capacity(samples.len().saturating_sub(order_usize));
+    let residual_count = samples.len().saturating_sub(order_usize);
+    output.clear();
+    output.resize(residual_count, 0);
     for index in order_usize..samples.len() {
         let prediction = match order {
             0 => 0i64,
@@ -599,9 +607,9 @@ fn fixed_residuals(samples: &[i32], order: u8) -> Option<Vec<i32>> {
         if !residual_is_encodable(residual) {
             return None;
         }
-        residuals.push(residual as i32);
+        output[index - order_usize] = residual as i32;
     }
-    Some(residuals)
+    Some(())
 }
 
 fn choose_residual_encoding(
@@ -959,8 +967,21 @@ fn quantize_lpc_coefficients(coefficients: &[f64], precision: u8) -> Option<Quan
 }
 
 fn lpc_residuals(samples: &[i32], coefficients: &[i16], shift: u8) -> Option<Vec<i32>> {
+    let mut residuals = Vec::new();
+    lpc_residuals_into(samples, coefficients, shift, &mut residuals)?;
+    Some(residuals)
+}
+
+fn lpc_residuals_into(
+    samples: &[i32],
+    coefficients: &[i16],
+    shift: u8,
+    output: &mut Vec<i32>,
+) -> Option<()> {
     let order = coefficients.len();
-    let mut residuals = Vec::with_capacity(samples.len().saturating_sub(order));
+    let residual_count = samples.len().saturating_sub(order);
+    output.clear();
+    output.resize(residual_count, 0);
     for index in order..samples.len() {
         let mut prediction = 0i64;
         for (coefficient_index, &coefficient) in coefficients.iter().enumerate() {
@@ -972,15 +993,15 @@ fn lpc_residuals(samples: &[i32], coefficients: &[i16], shift: u8) -> Option<Vec
         if !residual_is_encodable(residual) {
             return None;
         }
-        residuals.push(residual as i32);
+        output[index - order] = residual as i32;
     }
-    Some(residuals)
+    Some(())
 }
 #[cfg(test)]
 mod tests {
     use super::{
         AnalyzedSubframe, ChannelAssignment, MAX_STREAMABLE_LPC_ORDER_AT_48KHZ, analyze_frame,
-        choose_residual_encoding, max_lpc_order_for_stream,
+        choose_residual_encoding, fixed_residuals_into, max_lpc_order_for_stream,
     };
     use crate::level::LevelProfile;
 
@@ -1067,5 +1088,15 @@ mod tests {
         };
 
         assert_eq!(candidate.bit_len(16), 1 + 6 + 1 + 2 * 16 + 4 + 5 + 2 * 7 + 17);
+    }
+
+    #[test]
+    fn fixed_order_four_helper_matches_existing_formula() {
+        let samples = [1, 4, 9, 16, 25, 36, 49, 64];
+        let mut output = Vec::new();
+
+        fixed_residuals_into(&samples, 4, &mut output).unwrap();
+
+        assert_eq!(output, vec![0, 0, 0, 0]);
     }
 }
