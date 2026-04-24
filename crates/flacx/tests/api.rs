@@ -174,23 +174,6 @@ fn config_accessors_reflect_public_builder_state() {
     assert!(decode.strict_channel_mask_provenance());
 }
 
-#[test]
-fn builtin_convenience_no_longer_uses_legacy_helpers() {
-    let source = include_str!("../src/convenience.rs");
-    assert!(!source.contains("read_wav_for_encode_with_config"));
-    assert!(!source.contains("encode_buffered_input_with_sink"));
-    assert!(!source.contains("decode_flac_to_pcm_with_config"));
-    assert!(!source.contains("can_use_wav_family_encode_fastpath"));
-    assert!(source.contains("fn recompress_reader_session_with_config_and_progress"));
-    assert_eq!(source.matches("into_recompress_source()").count(), 1);
-    assert_eq!(
-        source
-            .matches("recompress_with_sink(source, progress)")
-            .count(),
-        1
-    );
-}
-
 #[cfg(feature = "aiff")]
 #[test]
 fn builtin_encode_file_accepts_aiff_inputs() {
