@@ -914,28 +914,28 @@ pub(crate) fn decode_samples_into(
     match envelope.container_bits_per_sample {
         8 => {
             let bias = 1i32 << (envelope.valid_bits_per_sample - 1);
-            output.clear();
-            output.resize(data.len(), 0);
+            let start = output.len();
+            output.resize(start + data.len(), 0);
             for (index, &byte) in data.iter().enumerate() {
-                output[index] = (i32::from(byte) >> shift) - bias;
+                output[start + index] = (i32::from(byte) >> shift) - bias;
             }
             Ok(())
         }
         16 => {
             let sample_count = data.len() / 2;
-            output.clear();
-            output.resize(sample_count, 0);
+            let start = output.len();
+            output.resize(start + sample_count, 0);
             for index in 0..sample_count {
                 let byte_index = index * 2;
                 let value = i16::from_le_bytes([data[byte_index], data[byte_index + 1]]) as i32;
-                output[index] = if shift == 0 { value } else { value >> shift };
+                output[start + index] = if shift == 0 { value } else { value >> shift };
             }
             Ok(())
         }
         24 => {
             let sample_count = data.len() / 3;
-            output.clear();
-            output.resize(sample_count, 0);
+            let start = output.len();
+            output.resize(start + sample_count, 0);
             for index in 0..sample_count {
                 let byte_index = index * 3;
                 let mut value =
@@ -945,14 +945,14 @@ pub(crate) fn decode_samples_into(
                 if value & 0x0080_0000 != 0 {
                     value |= !0x00ff_ffff;
                 }
-                output[index] = if shift == 0 { value } else { value >> shift };
+                output[start + index] = if shift == 0 { value } else { value >> shift };
             }
             Ok(())
         }
         32 => {
             let sample_count = data.len() / 4;
-            output.clear();
-            output.resize(sample_count, 0);
+            let start = output.len();
+            output.resize(start + sample_count, 0);
             for index in 0..sample_count {
                 let byte_index = index * 4;
                 let value = i32::from_le_bytes([
@@ -961,7 +961,7 @@ pub(crate) fn decode_samples_into(
                     data[byte_index + 2],
                     data[byte_index + 3],
                 ]);
-                output[index] = if shift == 0 { value } else { value >> shift };
+                output[start + index] = if shift == 0 { value } else { value >> shift };
             }
             Ok(())
         }
