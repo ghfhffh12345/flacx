@@ -33,12 +33,12 @@ fn benchmark_thread_count() -> usize {
 fn bench_with_temp_output_dir(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     name: &str,
-    temp_prefix: &'static str,
     run: impl Fn(&Path) -> Result<(), Box<dyn Error>>,
 ) {
     group.bench_function(name, |b| {
+        let temp_prefix = format!("flacx-cli-bench-{name}");
         b.iter_batched(
-            || TempDir::new(temp_prefix).expect("create output dir"),
+            || TempDir::new(&temp_prefix).expect("create output dir"),
             |output_dir| {
                 run(output_dir.path()).expect("benchmark run");
                 black_box(())
@@ -56,13 +56,11 @@ fn criterion_benches(c: &mut Criterion) {
     bench_with_temp_output_dir(
         &mut group,
         "encode_directory_parity",
-        "flacx-cli-bench-encode-output",
         |output_root| corpus.run_encode_directory_parity(output_root),
     );
     bench_with_temp_output_dir(
         &mut group,
         "decode_directory_parity",
-        "flacx-cli-bench-decode-output",
         |output_root| corpus.run_decode_directory_parity(output_root),
     );
     group.finish();
@@ -73,7 +71,6 @@ fn criterion_benches(c: &mut Criterion) {
     bench_with_temp_output_dir(
         &mut large_group,
         "decode_large_streaming_single_file",
-        "flacx-cli-bench-large-decode-output",
         |output_root| large_decode.run(output_root),
     );
     large_group.finish();
