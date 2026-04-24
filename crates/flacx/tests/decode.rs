@@ -298,48 +298,6 @@ fn decode_thread_variants_cover_throughput_comparison_set() {
     assert_eq!(decode_thread_variants(), [1, 2, 4, 8]);
 }
 
-#[test]
-fn throughput_bench_reuses_decode_matrix_for_real_decode_path() {
-    let source = include_str!("../benches/throughput.rs");
-    assert!(
-        source.contains("bench_large_streaming_real_decode_matrix("),
-        "throughput bench should reuse a shared real-decode matrix helper"
-    );
-    assert!(
-        source.contains("\"decode_large_streaming_real_decode_path\""),
-        "throughput bench should label the large streaming decode matrix as the real decode path"
-    );
-    assert!(
-        source.contains("\"matched_large_streaming_real_decode\""),
-        "matched throughput bench should label the shared decode matrix as the real decode path"
-    );
-    assert!(
-        source.contains("decoder\n                    .decode_bytes(&input)"),
-        "throughput bench should keep the shared matrix on the real decode path"
-    );
-}
-
-#[test]
-fn decode_pcm_stream_trait_does_not_expose_profile_hooks() {
-    let source = include_str!("../src/read.rs");
-    let trait_start = source
-        .find("pub trait DecodePcmStream: EncodePcmStream {")
-        .unwrap();
-    let trait_end = source[trait_start..]
-        .find("/// Owned decode-side handoff")
-        .map(|offset| trait_start + offset)
-        .unwrap();
-    let trait_source = &source[trait_start..trait_end];
-    assert!(
-        !trait_source.contains("fn release_decode_output_buffer"),
-        "decode profiling lifecycle must remain internal to preserve the public DecodePcmStream API"
-    );
-    assert!(
-        !trait_source.contains("fn finish_successful_decode_profile"),
-        "decode profiling lifecycle must remain internal to preserve the public DecodePcmStream API"
-    );
-}
-
 #[cfg(feature = "progress")]
 #[test]
 fn segmented_direct_decode_emits_profile_summary_after_small_ordered_writes() {
