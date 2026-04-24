@@ -152,7 +152,8 @@ fn builtin_convenience_no_longer_uses_legacy_helpers() {
 fn recompress_public_exports_remain_stable() {
     let source = include_str!("../src/lib.rs");
     assert!(source.contains("pub mod builtin {"));
-    assert!(source.contains("recompress_bytes, recompress_file,"));
+    assert!(source.contains("recompress_bytes,"));
+    assert!(source.contains("recompress_file,"));
     assert!(source.contains("pub use recompress::{"));
     assert!(
         source.contains(
@@ -252,9 +253,10 @@ fn direct_construction_family_surfaces_remain_discoverable_in_module_sources() {
 #[test]
 fn api_top_level_public_api_uses_pcm_inspection_naming() {
     let lib_source = include_str!("../src/lib.rs");
-    assert!(lib_source.contains(
-        "pub use input::inspect_wav_total_samples as inspect_pcm_total_samples;"
-    ));
+    assert!(
+        lib_source
+            .contains("pub use input::inspect_wav_total_samples as inspect_pcm_total_samples;")
+    );
     assert!(!lib_source.contains("pub use input::inspect_wav_total_samples;"));
     assert!(!lib_source.contains("inspect_wav_total_samples,"));
 }
@@ -265,18 +267,20 @@ fn api_docs_examples_use_reset_reader_entry_points() {
     let decode_source = include_str!("../src/decode.rs");
     let readme = include_str!("../README.md");
 
-    assert!(lib_source.contains("the reset API built around staged readers, sources, configs, and"));
+    assert!(
+        lib_source.contains("the reset API built around staged readers, sources, configs, and")
+    );
     assert!(lib_source.contains("| Reset API | You want direct control over staged input, direct stream construction, metadata, configs, output containers, or progress callbacks. |"));
     assert!(lib_source.contains("The reset API is organized around a few reusable concepts:"));
-    assert!(lib_source.contains("The [`core`] module re-exports the reset API in one place if you"));
+    assert!(
+        lib_source.contains("The [`core`] module re-exports the reset API in one place if you")
+    );
     assert!(lib_source.contains("- Start with [`core`] for the reset API."));
     assert!(lib_source.contains("use flacx::{EncoderConfig, PcmReader};"));
     assert!(lib_source.contains("let source = PcmReader::new(input)?.into_source();"));
     assert!(lib_source.contains("use flacx::{DecodeConfig, read_flac_reader};"));
     assert!(lib_source.contains("let source = read_flac_reader(input)?.into_decode_source();"));
-    assert!(lib_source.contains(
-        "let source = read_flac_reader(input)?.into_recompress_source();"
-    ));
+    assert!(lib_source.contains("let source = read_flac_reader(input)?.into_recompress_source();"));
     assert!(!lib_source.contains("use flacx::{EncoderConfig, WavReader};"));
     assert!(!lib_source.contains("use flacx::{DecodeConfig, FlacReader};"));
     assert!(!lib_source.contains("use flacx::{FlacReader, RecompressConfig};"));
@@ -287,7 +291,10 @@ fn api_docs_examples_use_reset_reader_entry_points() {
     ));
     assert!(!decode_source.contains("use flacx::{DecodeConfig, FlacReader};"));
 
-    assert!(readme.contains("`PcmReader` for PCM-container inputs, `read_flac_reader` for FLAC inputs,"));
+    assert!(
+        readme
+            .contains("`PcmReader` for PCM-container inputs, `read_flac_reader` for FLAC inputs,")
+    );
     assert!(readme.contains("`inspect_pcm_total_samples`"));
     assert!(!readme.contains("`WavReader`, and"));
     assert!(!readme.contains("`FlacReader`."));

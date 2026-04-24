@@ -122,10 +122,7 @@ where
             config.flac_reader_options(),
         )?;
         let (mut temp_writer, summary) = recompress_reader_session_with_config_and_progress(
-            config,
-            reader,
-            temp_file,
-            progress,
+            config, reader, temp_file, progress,
         )?;
         temp_writer.flush()?;
         Ok(summary)
@@ -194,19 +191,18 @@ where
     let output_container =
         inferred_output_container_from_path(output_path)?.unwrap_or(config.output_container());
 
-    let result =
-        (|| {
-            let reader = read_flac_reader_with_options(
-                open_buffered_reader(input_path)?,
-                flac_reader_options(config),
-            )?;
-            let mut decoder = config
-                .with_output_container(output_container)
-                .into_decoder(temp_file);
-            let summary = decoder.decode_source_with_sink(reader.into_decode_source(), progress)?;
-            decoder.into_inner().flush()?;
-            Ok(summary)
-        })();
+    let result = (|| {
+        let reader = read_flac_reader_with_options(
+            open_buffered_reader(input_path)?,
+            flac_reader_options(config),
+        )?;
+        let mut decoder = config
+            .with_output_container(output_container)
+            .into_decoder(temp_file);
+        let summary = decoder.decode_source_with_sink(reader.into_decode_source(), progress)?;
+        decoder.into_inner().flush()?;
+        Ok(summary)
+    })();
     match result {
         Ok(summary) => {
             if let Err(error) = commit_temp_output(&temp_path, output_path) {

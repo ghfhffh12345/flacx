@@ -198,7 +198,8 @@ pub mod level;
 pub mod builtin {
     pub use crate::convenience::{
         decode_bytes, decode_file, encode_bytes, encode_file, inspect_flac_total_samples,
-        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, recompress_bytes, recompress_file,
+        inspect_pcm_total_samples, inspect_raw_pcm_total_samples, recompress_bytes,
+        recompress_file,
     };
 }
 

@@ -285,7 +285,7 @@ impl DecodeConfig {
     ///     .strict_channel_mask_provenance(true)
     ///     .strict_seektable_validation(true)
     ///     .build();
-///
+    ///
     /// assert_eq!(config.threads(), 4);
     /// assert!(!config.emit_fxmd());
     /// assert_eq!(config.output_container(), PcmContainer::Wave64);
