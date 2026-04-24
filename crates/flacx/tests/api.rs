@@ -159,18 +159,22 @@ fn top_level_aliases_and_reset_entry_points_are_usable_from_public_api() {
 
 #[test]
 fn config_accessors_reflect_public_builder_state() {
-    let encode = EncoderConfig::default()
-        .with_level(Level::Level0)
-        .with_threads(3);
-    let decode = flacx::DecodeConfig::default()
-        .with_threads(2)
-        .with_emit_fxmd(true)
-        .with_strict_channel_mask_provenance(true);
+    let encode = EncoderConfig::builder()
+        .level(Level::Level0)
+        .threads(3)
+        .build();
+    let decode = flacx::DecodeConfig::builder()
+        .threads(2)
+        .emit_fxmd(true)
+        .output_container(flacx::PcmContainer::Wave64)
+        .strict_channel_mask_provenance(true)
+        .build();
 
     assert_eq!(encode.level(), Level::Level0);
     assert_eq!(encode.threads(), 3);
     assert_eq!(decode.threads(), 2);
     assert!(decode.emit_fxmd());
+    assert_eq!(decode.output_container(), flacx::PcmContainer::Wave64);
     assert!(decode.strict_channel_mask_provenance());
 }
 
