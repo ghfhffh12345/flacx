@@ -43,8 +43,6 @@ pub struct LevelProfile {
     pub max_residual_partition_order: u8,
     /// Whether mid/side stereo may be used for the level.
     pub use_mid_side_stereo: bool,
-    /// Whether the encoder should perform exhaustive model search.
-    pub exhaustive_model_search: bool,
 }
 
 impl Level {
@@ -56,7 +54,6 @@ impl Level {
     /// use flacx::level::Level;
     ///
     /// let profile = Level::Level8.profile();
-    /// assert!(profile.exhaustive_model_search);
     /// assert_eq!(u8::from(Level::Level8), 8);
     /// ```
     #[inline]
@@ -68,7 +65,6 @@ impl Level {
                 max_lpc_order: 0,
                 max_residual_partition_order: 0,
                 use_mid_side_stereo: false,
-                exhaustive_model_search: false,
             },
             Level::Level1 => LevelProfile {
                 block_size: 576,
@@ -76,7 +72,6 @@ impl Level {
                 max_lpc_order: 0,
                 max_residual_partition_order: 1,
                 use_mid_side_stereo: true,
-                exhaustive_model_search: false,
             },
             Level::Level2 => LevelProfile {
                 block_size: 1152,
@@ -84,7 +79,6 @@ impl Level {
                 max_lpc_order: 8,
                 max_residual_partition_order: 2,
                 use_mid_side_stereo: true,
-                exhaustive_model_search: false,
             },
             Level::Level3 => LevelProfile {
                 block_size: 1152,
@@ -92,7 +86,6 @@ impl Level {
                 max_lpc_order: 8,
                 max_residual_partition_order: 2,
                 use_mid_side_stereo: true,
-                exhaustive_model_search: false,
             },
             Level::Level4 => LevelProfile {
                 block_size: 2304,
@@ -100,7 +93,6 @@ impl Level {
                 max_lpc_order: 12,
                 max_residual_partition_order: 3,
                 use_mid_side_stereo: true,
-                exhaustive_model_search: false,
             },
             Level::Level5 => LevelProfile {
                 block_size: 2304,
@@ -108,7 +100,6 @@ impl Level {
                 max_lpc_order: 12,
                 max_residual_partition_order: 4,
                 use_mid_side_stereo: true,
-                exhaustive_model_search: false,
             },
             Level::Level6 => LevelProfile {
                 block_size: 4096,
@@ -116,7 +107,6 @@ impl Level {
                 max_lpc_order: 16,
                 max_residual_partition_order: 5,
                 use_mid_side_stereo: true,
-                exhaustive_model_search: false,
             },
             Level::Level7 => LevelProfile {
                 block_size: 4096,
@@ -124,7 +114,6 @@ impl Level {
                 max_lpc_order: 32,
                 max_residual_partition_order: 6,
                 use_mid_side_stereo: true,
-                exhaustive_model_search: true,
             },
             Level::Level8 => LevelProfile {
                 block_size: 4096,
@@ -132,7 +121,6 @@ impl Level {
                 max_lpc_order: 32,
                 max_residual_partition_order: 6,
                 use_mid_side_stereo: true,
-                exhaustive_model_search: true,
             },
         }
     }
@@ -189,7 +177,6 @@ impl LevelProfile {
         max_lpc_order: u8,
         max_residual_partition_order: u8,
         use_mid_side_stereo: bool,
-        exhaustive_model_search: bool,
     ) -> Self {
         Self {
             block_size,
@@ -197,7 +184,6 @@ impl LevelProfile {
             max_lpc_order,
             max_residual_partition_order,
             use_mid_side_stereo,
-            exhaustive_model_search,
         }
     }
 }

@@ -369,7 +369,7 @@ mod tests {
             interleaved.push(sample * 16 + (sample & 1));
             interleaved.push(sample * 16 + 2);
         }
-        let profile = LevelProfile::new(256, 4, 12, 4, true, true);
+        let profile = LevelProfile::new(256, 4, 12, 4, true);
         let encoded = encode_frame(
             &interleaved,
             3,
@@ -390,7 +390,7 @@ mod tests {
             interleaved.push(sample * 16);
             interleaved.push(sample * 16 + (sample & 1));
         }
-        let profile = LevelProfile::new(256, 4, 12, 4, true, true);
+        let profile = LevelProfile::new(256, 4, 12, 4, true);
         let encoded = encode_frame(
             &interleaved,
             2,

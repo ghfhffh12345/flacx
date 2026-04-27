@@ -1007,7 +1007,7 @@ mod tests {
 
     #[test]
     fn streamable_subset_clamps_lpc_order_at_48khz() {
-        let profile = LevelProfile::new(4096, 4, 32, 6, true, true);
+        let profile = LevelProfile::new(4096, 4, 32, 6, true);
         assert_eq!(
             max_lpc_order_for_stream(profile, 44_100),
             MAX_STREAMABLE_LPC_ORDER_AT_48KHZ
@@ -1017,7 +1017,7 @@ mod tests {
 
     #[test]
     fn out_of_range_residuals_fall_back_to_verbatim() {
-        let profile = LevelProfile::new(32, 4, 8, 4, false, false);
+        let profile = LevelProfile::new(32, 4, 8, 4, false);
         let analysis = analyze_frame(&[0, i32::MAX], 1, 32, 96_000, profile).unwrap();
         let debug = format!("{analysis:?}");
         assert!(debug.contains("Verbatim"));
@@ -1030,7 +1030,7 @@ mod tests {
             interleaved.push(sample * 8);
             interleaved.push(sample * 8 + (sample & 1));
         }
-        let profile = LevelProfile::new(256, 4, 12, 4, true, true);
+        let profile = LevelProfile::new(256, 4, 12, 4, true);
         let analysis = analyze_frame(&interleaved, 2, 16, 44_100, profile).unwrap();
         assert!(matches!(
             analysis.channel_assignment,
@@ -1046,7 +1046,7 @@ mod tests {
             interleaved.push(sample + 1);
             interleaved.push(sample + 2);
         }
-        let profile = LevelProfile::new(64, 4, 12, 4, true, true);
+        let profile = LevelProfile::new(64, 4, 12, 4, true);
         let analysis = analyze_frame(&interleaved, 3, 16, 44_100, profile).unwrap();
         assert!(matches!(
             analysis.channel_assignment,
